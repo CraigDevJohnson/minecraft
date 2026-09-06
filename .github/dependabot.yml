@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      routine:
+        applies-to: version-updates
+        update-types: [minor, patch]
+      security:
+        applies-to: security-updates
+        patterns: ["*"]

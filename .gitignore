@@ -1,0 +1,37 @@
+# macOS and local editor files
+.DS_Store
+.idea/
+*.swp
+*.swo
+*~
+
+# Local environment files and SSH private keys
+.env
+.env.*
+!.env.example
+!.env.sample
+.ssh/
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# Local Terraform data and plans
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+# Minecraft server runtime data in the repository root
+/world/
+/world_nether/
+/world_the_end/
+/logs/
+/backups/
+/crash-reports/
+/usercache.json
+/banned-ips.json
+/banned-players.json
+/ops.json
+/whitelist.json
+/server.properties
