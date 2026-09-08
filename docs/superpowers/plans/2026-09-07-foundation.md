@@ -36,7 +36,7 @@
 - `.tools/bin/task check` is the local/CI gate; `fmt` formats actual HCL/shell files; `infra:validate` performs backend-free initialization and validation.
 - `scripts/check.sh` propagates every failure, invokes project-local tools, uses a temporary `TF_DATA_DIR`, and never changes an operator's initialized backend.
 
-- [ ] **Step 1: Define and test tool installation behavior.**
+- [x] **Step 1: Define and test tool installation behavior.**
 
 Use one committed JSON manifest containing each tool's version and, for each supported platform, its official HTTPS URL, SHA256, archive kind and exact member path (or raw binary). Obtain real hashes from upstream release checksum files or GitHub release asset digests; verify any downloaded asset before execution.
 
@@ -55,7 +55,7 @@ with tempfile.TemporaryDirectory() as directory:
 
 Ensure this test fails if verification or atomic preservation is removed.
 
-- [ ] **Step 2: Install pinned tools and establish the OpenTofu root.**
+- [x] **Step 2: Install pinned tools and establish the OpenTofu root.**
 
 ```hcl
 terraform {
@@ -78,7 +78,7 @@ python3 scripts/bootstrap_tools.py
 
 Do not add a provider block, backend configuration or resource merely to make the root look larger.
 
-- [ ] **Step 3: Wire the shared check/format commands and CI.**
+- [x] **Step 3: Wire the shared check/format commands and CI.**
 
 The check path runs script syntax/ShellCheck/shfmt checks, OpenTofu formatting, bootstrap unit tests, then:
 
@@ -91,13 +91,13 @@ Run those commands using the project-local binary and an isolated temporary data
 
 CI runs on pull requests and main pushes with contents-read permission, checkout pinned to the existing verified SHA, no persisted checkout credentials, a bounded timeout, and no AWS secrets/OIDC permission. It installs tools then invokes the exact local check command. Preserve existing security jobs.
 
-- [ ] **Step 4: Document setup, state bootstrap and ignore boundaries.**
+- [x] **Step 4: Document setup, state bootstrap and ignore boundaries.**
 
 README links setup, commands, the design, and issues while honestly stating that game runtime and live infrastructure are separate deliveries. State bootstrap documentation describes private target/account inputs, reviewed bootstrap creation, state migration into a versioned/locked backend, and recovery of bootstrap state; it must not present unimplemented apply commands as executable today. Mark AWS authentication/creation as later operator steps, distinct from current validation.
 
 Ignore tools, worktrees, generated nested instance data, operator config, all state/plan artifacts and runtime secrets. Preserve tracking of provider locks and safe examples. Add priority label meanings and readiness reassessment behavior to the existing triage guidance without replacing the canonical roles.
 
-- [ ] **Step 5: Validate success and meaningful failure paths.**
+- [x] **Step 5: Validate success and meaningful failure paths.**
 
 ```sh
 python3 scripts/bootstrap_tools.py
@@ -109,6 +109,6 @@ actionlint
 
 Use temporary copies to demonstrate malformed HCL and bad formatting fail the main gate. In a fresh git checkout with no `.tools/` or provider cache, bootstrap and check must pass without AWS configuration. Verify representative private files are ignored and `infra/.terraform.lock.hcl` is not ignored. Do not start Minecraft or create AWS resources.
 
-- [ ] **Step 6: Commit and request independent review.**
+- [x] **Step 6: Commit and request independent review.**
 
 Stage only this task's files and commit after checks pass. Report commit IDs, commands/results, supported platforms actually executed, and limits (no live infrastructure or game validation). Root handles the reviewed PR and remote CI; do not merge.
