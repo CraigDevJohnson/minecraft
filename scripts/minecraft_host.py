@@ -61,7 +61,9 @@ def load_deployment(path: Path) -> dict:
         raise HostError("cannot read deployment JSON") from exc
     if not isinstance(deployment, dict):
         raise HostError("deployment must be a JSON object")
-    host_id, region, instances = (deployment.get(key) for key in ("host_id", "region", "instances"))
+    account_id, host_id, region, instances = (deployment.get(key) for key in ("account_id", "host_id", "region", "instances"))
+    if not isinstance(account_id, str) or not re.fullmatch(r"[0-9]{12}", account_id):
+        raise HostError("deployment account_id must be a 12-digit AWS account ID")
     if not isinstance(host_id, str) or not re.fullmatch(r"i-(?:[a-f0-9]{8}|[a-f0-9]{17})", host_id):
         raise HostError("deployment host_id is invalid")
     if not isinstance(region, str) or not re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-[0-9]+", region):
@@ -94,6 +96,11 @@ class HostSession:
         if timeout <= 0:
             raise HostError(f"AWS {operation} wait timed out")
         return self.aws.run(service, operation, *arguments, timeout=timeout)
+
+    def verify_account(self) -> None:
+        identity = self.call("sts", "get-caller-identity")
+        if identity.get("Account") != self.deployment["account_id"]:
+            raise HostError("active AWS account does not match the reviewed deployment account")
 
     def host_state(self, deadline=None) -> str:
         response = self.call("ec2", "describe-instances", "--instance-ids", self.deployment["host_id"], deadline=deadline)
@@ -224,6 +231,7 @@ def main(argv=None, *, aws=None) -> int:
         if args.action == "start" and (args.instance not in deployment["instances"] or not INSTANCE_ID.fullmatch(args.instance)):
             raise HostError("instance is invalid or not configured in the deployment")
         session = HostSession(deployment, aws or AWSCLI(deployment["region"]))
+        session.verify_account()
         if args.action == "start":
             output = session.start(args.instance)
         elif args.action == "stop":

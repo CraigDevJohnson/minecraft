@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import minecraft_host  # noqa: E402
 
 HOST_ID = "i-0123456789abcdef0"
+ACCOUNT_ID = "123456789012"
 
 
 class FakeAWS:
@@ -28,6 +29,7 @@ class FakeAWS:
         self.online = True
         self.fail_operation = None
         self.invocation_status = "Success"
+        self.account_id = ACCOUNT_ID
         self.remote = {"instance": "survival", "application": "running", "backup": "pending", "ready": True}
 
     def monotonic(self):
@@ -42,6 +44,8 @@ class FakeAWS:
         self.calls.append((service, operation, arguments))
         if operation == self.fail_operation:
             raise minecraft_host.HostError(f"AWS {operation} failed")
+        if operation == "get-caller-identity":
+            return {"Account": self.account_id, "Arn": "private-operator-identity", "UserId": "private-user-id"}
         if operation == "describe-instances":
             state = self.state
             if self.state == "pending":
@@ -69,7 +73,7 @@ class HostCommandTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.deployment = Path(self.temp.name) / "deployment.json"
-        self.deployment.write_text(json.dumps({"host_id": HOST_ID, "region": "us-west-2", "instances": {"survival": {}}}))
+        self.deployment.write_text(json.dumps({"account_id": ACCOUNT_ID, "host_id": HOST_ID, "region": "us-west-2", "instances": {"survival": {}}}))
 
     def invoke(self, aws, action, *extra):
         stdout = io.StringIO()
@@ -81,14 +85,65 @@ class HostCommandTests(unittest.TestCase):
         aws = FakeAWS()
         result, output = self.invoke(aws, "start", "--instance", "survival")
         self.assertEqual(result, 0, output)
+        self.assertEqual(aws.calls[0], ("sts", "get-caller-identity", ()))
+        self.assertEqual(aws.calls[1][1], "describe-instances")
         self.assertEqual(output, {"host": "running", "instance": "survival", "application": "running", "backup": "pending", "ready": True})
         self.assertEqual(self.invoke(aws, "start", "--instance", "survival")[0], 0)
+        self.assertEqual(sum(call[1] == "get-caller-identity" for call in aws.calls), 2)
         self.assertEqual(sum(call[1] == "start-instances" for call in aws.calls), 1)
         sends = [call for call in aws.calls if call[1] == "send-command"]
         self.assertEqual(len(sends), 2)
         parameters = json.loads(sends[0][2][sends[0][2].index("--parameters") + 1])
         self.assertEqual(parameters["commands"], ["/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json start survival"])
         self.assertGreater(int(parameters["executionTimeout"][0]), 0)
+
+    def test_wrong_aws_account_blocks_start_stop_and_status_before_ec2_or_ssm(self):
+        for action in ("start", "stop", "status"):
+            with self.subTest(action=action):
+                aws = FakeAWS()
+                aws.account_id = "987654321098"
+                result, output = self.invoke(aws, action, *(["--instance", "survival"] if action == "start" else []))
+                self.assertEqual(result, 1, output)
+                self.assertEqual(aws.calls, [("sts", "get-caller-identity", ())])
+                self.assertIn("account", output["error"])
+                for private_value in (ACCOUNT_ID, aws.account_id, "private-operator-identity", "private-user-id"):
+                    self.assertNotIn(private_value, json.dumps(output))
+
+    def test_missing_or_malformed_deployment_account_blocks_every_aws_call(self):
+        for account_id in (None, "", "12345678901", "1234567890123", 123456789012, "12345678901x", "123456789012\n", "１２３４５６７８９０１２"):
+            with self.subTest(account_id=account_id):
+                deployment = {"host_id": HOST_ID, "region": "us-west-2", "instances": {"survival": {}}}
+                if account_id is not None:
+                    deployment["account_id"] = account_id
+                self.deployment.write_text(json.dumps(deployment))
+                aws = FakeAWS()
+                result, output = self.invoke(aws, "start", "--instance", "survival")
+                self.assertEqual(result, 1, output)
+                self.assertIn("account_id", output["error"])
+                self.assertEqual(aws.calls, [])
+
+    def test_unverified_caller_identity_blocks_ec2_and_ssm(self):
+        for identity in ({}, {"Account": None}, {"Account": 123456789012}, {"Account": ACCOUNT_ID + "\n"}):
+            for action in ("start", "stop", "status"):
+                with self.subTest(identity=identity, action=action):
+                    class InvalidIdentityAWS(FakeAWS):
+                        def run(self, service, operation, *arguments, timeout):
+                            response = super().run(service, operation, *arguments, timeout=timeout)
+                            return identity if operation == "get-caller-identity" else response
+                    aws = InvalidIdentityAWS()
+                    result, output = self.invoke(aws, action, *(["--instance", "survival"] if action == "start" else []))
+                    self.assertEqual(result, 1, output)
+                    self.assertEqual(aws.calls, [("sts", "get-caller-identity", ())])
+
+    def test_sts_failure_blocks_all_lifecycle_commands(self):
+        for action in ("start", "stop", "status"):
+            with self.subTest(action=action):
+                aws = FakeAWS()
+                aws.fail_operation = "get-caller-identity"
+                result, output = self.invoke(aws, action, *(["--instance", "survival"] if action == "start" else []))
+                self.assertEqual(result, 1, output)
+                self.assertEqual(aws.calls, [("sts", "get-caller-identity", ())])
+                self.assertIn("get-caller-identity", output["error"])
 
     def test_stop_drains_every_instance_before_ec2_stop_and_repeat_is_safe(self):
         aws = FakeAWS()
@@ -226,7 +281,7 @@ class HostCommandTests(unittest.TestCase):
                     aws.state = state
                     result, output = self.invoke(aws, action, *(["--instance", "survival"] if action == "start" else []))
                     self.assertEqual(result, 1, output)
-                    self.assertEqual([call[1] for call in aws.calls], ["describe-instances"])
+                    self.assertEqual([call[1] for call in aws.calls], ["get-caller-identity", "describe-instances"])
 
     def test_invalid_or_unconfigured_instance_is_rejected_before_aws(self):
         for instance in ("../survival", "survival;echo secret", "creative", "Survival"):
@@ -243,6 +298,7 @@ class HostCommandTests(unittest.TestCase):
                     result, output = self.invoke(minecraft_host.AWSCLI("us-west-2"), "status")
                 self.assertEqual(result, 1, output)
                 self.assertEqual(command.call_args.kwargs["timeout"], 30)
+                self.assertEqual(command.call_args.args[0][-2:], ["sts", "get-caller-identity"])
                 self.assertNotIn("private-player", json.dumps(output))
                 self.assertNotIn("credential-secret", json.dumps(output))
 
@@ -284,7 +340,7 @@ class HostCommandTests(unittest.TestCase):
     def test_private_deployment_contract_is_validated_before_aws(self):
         for change in ({"host_id": "i-wrong"}, {"region": "--profile secret"}, {"instances": {}}, {"instances": {"../survival": {}}}):
             with self.subTest(change=change):
-                self.deployment.write_text(json.dumps({"host_id": HOST_ID, "region": "us-west-2", "instances": {"survival": {}}, **change}))
+                self.deployment.write_text(json.dumps({"account_id": ACCOUNT_ID, "host_id": HOST_ID, "region": "us-west-2", "instances": {"survival": {}}, **change}))
                 aws = FakeAWS()
                 result, output = self.invoke(aws, "status")
                 self.assertEqual(result, 1, output)

@@ -17,7 +17,7 @@ class RuntimeInstallTests(unittest.TestCase):
         source = root / "source"
         (source / "scripts").mkdir(parents=True)
         (source / "runtime").mkdir()
-        for name in ("minecraft_instance.py", "minecraft_content.py", "minecraft_access.py"):
+        for name in ("minecraft_instance.py", "minecraft_content.py", "minecraft_access.py", "check_runtime_install.py"):
             shutil.copy2(ROOT / "scripts" / name, source / "scripts" / name)
         for name in ("survival.json", "content.json", "operator.json.example", "minecraft@.service"):
             shutil.copy2(ROOT / "runtime" / name, source / "runtime" / name)
@@ -27,6 +27,10 @@ class RuntimeInstallTests(unittest.TestCase):
             replacement = root / target.lstrip("/")
             replacement.mkdir(parents=True, exist_ok=True)
             script = script.replace(target, str(replacement))
+        (root / "etc/minecraft").chmod(0o700)
+        deployment = root / "etc/minecraft/deployment.json"
+        deployment.write_text('{"private": "deployment fixture"}\n')
+        deployment.chmod(0o600)
         script = script.replace("/usr/bin/python3", sys.executable)
         installed_script = source / "scripts/install_runtime.sh"
         installed_script.write_text(script)
@@ -35,19 +39,24 @@ class RuntimeInstallTests(unittest.TestCase):
         storage.chmod(0o755)
         binaries = root / "bin"
         binaries.mkdir()
-        (binaries / "python3").symlink_to(sys.executable)
         log = root / "commands.jsonl"
         fake = binaries / "fake.py"
-        fake.write_text('''#!/usr/bin/env python3
+        fake.write_text('''#!PYTHON_EXECUTABLE
 import json, os, pathlib, subprocess, sys
 name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 with open(os.environ["COMMAND_LOG"], "a") as log:
     log.write(json.dumps([name, *args]) + "\\n")
-if name == "id": print(os.environ.get("INSTALL_UID", "0"))
+if name == "python3":
+    if len(args) > 2 and args[0] == "-B" and pathlib.Path(args[1]).name == "check_runtime_install.py":
+        assert args[2] == "--deployment"
+        assert pathlib.Path(args[3]).name == "deployment.json"
+        sys.exit(int(os.environ.get("INSTALL_GUARD_FAILURE", "0")))
+    os.execv(sys.executable, [sys.executable, *args])
+elif name == "id": print(os.environ.get("INSTALL_UID", "0"))
 elif name == "uname": print("Linux" if args == ["-s"] else "aarch64")
 elif name == "timeout":
-    assert args[:2] == ["--kill-after=10s", "30s"]
+    assert args[0] == "--kill-after=10s" and args[1] in ("30s", "180s")
     sys.exit(subprocess.call(args[2:]))
 elif name == "flock":
     assert args == ["-w", "10", "9"]
@@ -58,9 +67,14 @@ elif name == "docker":
 elif name == "systemctl":
     assert args == ["daemon-reload"]
     sys.exit(int(os.environ.get("RELOAD_FAILURE", "0")))
-''')
+elif name == "stat":
+    assert args[:3] == ["-c", "%u:%a", "--"]
+    target = pathlib.Path(args[3])
+    owner = 1000 if str(target) == os.environ.get("UNTRUSTED_OWNER_PATH") else 0
+    print(f"{owner}:{target.stat().st_mode & 0o7777:o}")
+'''.replace("PYTHON_EXECUTABLE", sys.executable))
         fake.chmod(0o755)
-        for name in ("id", "uname", "timeout", "flock", "docker", "systemctl"):
+        for name in ("id", "uname", "timeout", "flock", "docker", "systemctl", "stat", "python3"):
             (binaries / name).symlink_to(fake)
         environment = os.environ.copy()
         environment.update(PATH=f"{binaries}:{environment['PATH']}", COMMAND_LOG=str(log))
@@ -89,7 +103,7 @@ elif name == "systemctl":
             self.assertIs(example["eula_accepted"], False)
             self.assertIsNone(example["backup_hook"])
             self.assertFalse((root / "srv").exists())
-            self.assertFalse((root / "etc/minecraft/deployment.json").exists())
+            self.assertEqual((root / "etc/minecraft/deployment.json").read_text(), '{"private": "deployment fixture"}\n')
             self.assertFalse((root / "etc/minecraft/rcon.secret").exists())
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             self.assertEqual([call for call in calls if call[0] == "systemctl"], [["systemctl", "daemon-reload"]] * 2)
@@ -125,6 +139,20 @@ elif name == "systemctl":
                 self.assertFalse((root / "opt/minecraft").exists())
                 self.assertFalse((root / "usr/local/sbin/minecraft-instance").exists())
 
+    def test_retained_state_refusal_blocks_install_after_old_release_is_moved_aside(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, script, environment, log = self.fixture(root)
+            environment["INSTALL_GUARD_FAILURE"] = "1"
+            # Absence of /opt/minecraft also represents the documented staged replacement.
+            self.assertFalse((root / "opt/minecraft").exists())
+            result = self.run_installer(script, environment)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((root / "opt/minecraft").exists())
+            self.assertFalse((root / "usr/local/sbin/minecraft-instance").exists())
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertFalse(any(call[0] == "systemctl" for call in calls))
+
     def test_non_root_and_symlink_targets_are_rejected(self):
         for condition in ("non-root", "symlink"):
             with self.subTest(condition=condition), tempfile.TemporaryDirectory() as directory:
@@ -153,6 +181,27 @@ elif name == "systemctl":
             second = self.run_installer(script, environment)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertEqual(installed.stat().st_mtime_ns, timestamp)
+
+    def test_untrusted_private_directory_is_rejected_without_repair(self):
+        for condition in ("non-root-owner", "group-writable", "public-readable"):
+            with self.subTest(condition=condition), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                _, script, environment, _ = self.fixture(root)
+                private_dir = root / "etc/minecraft"
+                if condition == "non-root-owner":
+                    environment["UNTRUSTED_OWNER_PATH"] = str(private_dir)
+                else:
+                    private_dir.chmod(0o770 if condition == "group-writable" else 0o755)
+                mode_before = private_dir.stat().st_mode
+                marker = private_dir / "operator.json"
+                marker.write_text('{"existing": true}\n')
+                result = self.run_installer(script, environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("root-owned mode 0700", result.stderr)
+                self.assertEqual(private_dir.stat().st_mode, mode_before)
+                self.assertEqual(marker.read_text(), '{"existing": true}\n')
+                self.assertFalse((root / "opt/minecraft").exists())
+                self.assertFalse((root / "usr/local/sbin/minecraft-instance").exists())
 
 
 if __name__ == "__main__":

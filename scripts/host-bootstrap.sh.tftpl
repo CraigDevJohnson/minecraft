@@ -23,7 +23,8 @@ if ! timeout --kill-after=10s 30s systemctl is-active --quiet amazon-ssm-agent.s
 	exit 1
 fi
 
-install -d -m 0755 /usr/local/sbin /etc/minecraft /etc/systemd/system/docker.service.d
+install -d -m 0755 /usr/local/sbin /etc/systemd/system/docker.service.d
+install -d -m 0700 /etc/minecraft
 base64 --decode >/usr/local/sbin/minecraft-storage <<'STORAGE_SCRIPT'
 ${storage_script_base64}
 STORAGE_SCRIPT

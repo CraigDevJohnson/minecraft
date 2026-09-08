@@ -9,6 +9,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,14 @@ class OperationError(Exception):
 
 @contextlib.contextmanager
 def operation_lock(path, *, timeout=10):
-    with open(path, "a", encoding="utf-8") as lock:
+    try:
+        descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError as error:
+        raise OperationError("cannot open trusted runtime lock") from error
+    with os.fdopen(descriptor, "r+", encoding="utf-8") as lock:
+        metadata = os.fstat(lock.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022:
+            raise OperationError("runtime lock must be an operator-owned regular file without other-account write access")
         deadline = time.monotonic() + timeout
         while True:
             try:
@@ -227,14 +235,54 @@ def command(argv, *, timeout=30, input_text=None):
         raise OperationError(f"cannot execute {Path(argv[0]).name}") from error
 
 
+def private_text(path):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as error:
+        raise OperationError("cannot open private operator file") from error
+    with os.fdopen(descriptor, encoding="utf-8") as stream:
+        metadata = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or
+                stat.S_IMODE(metadata.st_mode) != 0o600):
+            raise OperationError("operator file must be owned by the operator and a private regular file (mode 0600)")
+        value = stream.read(1024 * 1024 + 1)
+        if len(value) > 1024 * 1024:
+            raise OperationError("operator file exceeded its size limit")
+        return value
+
+
 def private_json(path):
-    path = Path(path)
-    if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
-        raise OperationError("operator configuration must be a private regular file (mode 0600)")
-    value = json.loads(path.read_text())
+    value = json.loads(private_text(path))
     if not isinstance(value, dict):
         raise OperationError("operator configuration must be a JSON object")
     return value
+
+
+def verify_retained_paths(root: Path) -> None:
+    """Reject submounts, including bind mounts with the retained disk's device ID."""
+    mounts = json.loads(command([
+        "findmnt", "--kernel", "--json", "--submounts", "--mountpoint", str(root),
+        "--output", "TARGET,MAJ:MIN,FSROOT,OPTIONS",
+    ])).get("filesystems", [])
+    if len(mounts) != 1 or mounts[0].get("target") != str(root):
+        raise OperationError("retained filesystem mount cannot be established")
+    mount = mounts[0]
+    if mount.get("children"):
+        raise OperationError("nested mounts under retained storage are forbidden; remove the maintenance mount first")
+    device = root.stat().st_dev
+    if (mount.get("maj:min") != f"{os.major(device)}:{os.minor(device)}" or
+            mount.get("fsroot") != "/" or "rw" not in mount.get("options", "").split(",")):
+        raise OperationError("retained mount changed or is not a writable whole filesystem")
+    instances = root / "instances"
+    paths = [root, instances, root / "host-drain.json"]
+    if instances.is_dir() and not instances.is_symlink():
+        for directory in instances.iterdir():
+            paths.extend((directory, directory / "data", directory / "runtime", directory / "operation.json"))
+    for path in paths:
+        if path.is_symlink():
+            raise OperationError("instance control/data paths must not be symlinks")
+        if path.exists() and path.stat().st_dev != device:
+            raise OperationError("instance control/data path is outside the retained filesystem")
 
 
 class LinuxMachine:
@@ -279,12 +327,7 @@ class LinuxMachine:
         command(["systemctl", "is-active", "--quiet", "docker.service"])
         command(["/usr/local/sbin/minecraft-storage", "verify", "--volume-id", self.deployment["data_volume_id"],
                  "--filesystem-uuid", self.deployment["data_filesystem_uuid"]])
-        for instance in self.definitions:
-            directory = self.root / "instances" / instance
-            for path in (self.root / "instances", directory, directory / "data", directory / "runtime",
-                         directory / "operation.json", self.root / "host-drain.json"):
-                if path.is_symlink():
-                    raise OperationError("instance control/data paths must not be symlinks")
+        verify_retained_paths(self.root)
 
     @staticmethod
     def boot_id():
@@ -323,10 +366,7 @@ class LinuxMachine:
         from minecraft_content import render_compose, stage_content
         if self.config.get("eula_accepted") is not True:
             raise OperationError("explicit private operator EULA acceptance is required")
-        secret = Path(self.config["rcon_password_file"])
-        if secret.is_symlink() or not secret.is_file() or secret.stat().st_mode & 0o077:
-            raise OperationError("RCON secret must be a private regular file (mode 0600)")
-        password = secret.read_text().strip()
+        password = private_text(self.config["rcon_password_file"]).strip()
         manifest = self.manifests[instance]
         runtime = self.runtime(instance)
         artifacts = stage_content(manifest, runtime / "content")

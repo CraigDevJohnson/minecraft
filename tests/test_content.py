@@ -17,6 +17,76 @@ import minecraft_content as content
 
 
 class ContentTests(unittest.TestCase):
+    def test_managed_configuration_is_recoverable_from_the_exact_manifest(self):
+        manifest = content.load_manifest(ROOT / "runtime/content.json")
+        expected = (b'{"bedrock":{"address":"0.0.0.0","clone-remote-port":false,"port":19132},'
+                    b'"config-version":7,"java":{"auth-type":"floodgate"},'
+                    b'"log-player-ip-addresses":false,"saved-user-logins":[]}\n')
+        artifact_bytes = b"fixture artifact contents"
+        for artifact in manifest["artifacts"]:
+            artifact["sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            recovered = Path(directory) / "recovered-manifest.json"
+            recovered.write_text(json.dumps(manifest))
+            with mock.patch("urllib.request.urlopen", side_effect=lambda *args, **kwargs: io.BytesIO(artifact_bytes)):
+                staged = content.stage_content(content.load_manifest(recovered), Path(directory) / "cache")
+            self.assertEqual((staged / "plugins/Geyser-Spigot/config.yml").read_bytes(), expected)
+
+    def test_corrupted_managed_cache_is_rejected_without_silent_replacement(self):
+        manifest = content.load_manifest(ROOT / "runtime/content.json")
+        artifact_bytes = b"fixture artifact contents"
+        for artifact in manifest["artifacts"]:
+            artifact["sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch("urllib.request.urlopen", side_effect=lambda *args, **kwargs: io.BytesIO(artifact_bytes)):
+                staged = content.stage_content(manifest, Path(directory))
+            target = staged / "plugins/Geyser-Spigot/config.yml"
+            target.write_bytes(b"unexpected configuration bytes\n")
+            with self.assertRaisesRegex(content.ContentError, "configuration checksum"):
+                content.stage_content(manifest, Path(directory))
+            self.assertEqual(target.read_bytes(), b"unexpected configuration bytes\n")
+
+    def test_configuration_schema_protects_authentication_network_and_privacy(self):
+        manifest = content.load_manifest(ROOT / "runtime/content.json")
+        original_revision = content.manifest_digest(manifest)
+        for mutate in (
+            lambda c: c["java"].update({"auth-type": "offline"}),
+            lambda c: c["bedrock"].update(port="19132"),
+            lambda c: c["bedrock"].update({"clone-remote-port": True}),
+            lambda c: c.update({"config-version": 7.0}),
+            lambda c: c.update({"log-player-ip-addresses": True}),
+            lambda c: c.update({"saved-user-logins": ["unapproved-fixture"]}),
+            lambda c: c["java"].clear(),
+            lambda c: c.update({"unexpected-config-key": True}),
+        ):
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as directory:
+                invalid = copy.deepcopy(manifest)
+                managed = invalid["managed_files"][0]
+                mutate(managed["content"])
+                encoded = (json.dumps(managed["content"], sort_keys=True, separators=(",", ":")) + "\n").encode()
+                managed["sha256"] = hashlib.sha256(encoded).hexdigest()
+                self.assertNotEqual(content.manifest_digest(invalid), original_revision)
+                path = Path(directory) / "manifest.json"
+                path.write_text(json.dumps(invalid))
+                with self.assertRaisesRegex(content.ContentError, "configuration schema"):
+                    content.load_manifest(path)
+
+    def test_managed_configuration_integrity_and_file_identity_are_required(self):
+        manifest = content.load_manifest(ROOT / "runtime/content.json")
+        for mutate in (
+            lambda m: m["managed_files"][0].update(sha256="0" * 64),
+            lambda m: m["managed_files"][0].update(path="../unrelated.yml"),
+            lambda m: m["managed_files"][0].update(format="unknown-encoding"),
+            lambda m: m.update(managed_files=[]),
+        ):
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as directory:
+                invalid = copy.deepcopy(manifest)
+                mutate(invalid)
+                path = Path(directory) / "manifest.json"
+                path.write_text(json.dumps(invalid))
+                with self.assertRaises(content.ContentError):
+                    content.load_manifest(path)
+
     def test_render_requires_acceptance_and_generates_private_authenticated_runtime(self):
         definition = content.load_definition(ROOT / "runtime/survival.json")
         manifest = content.load_manifest(ROOT / "runtime/content.json")

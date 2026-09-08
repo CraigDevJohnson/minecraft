@@ -70,6 +70,35 @@ def _validate_manifest(manifest: dict) -> None:
             raise ContentError("artifact requires an exact official HTTPS download URL")
     if artifacts[0]["name"] != "paper" or artifacts[0]["version"] != manifest["minecraft_version"]:
         raise ContentError("Paper and Minecraft versions must match")
+    managed_files = manifest.get("managed_files")
+    if not isinstance(managed_files, list) or len(managed_files) != 1:
+        raise ContentError("manifest must include the managed Geyser configuration")
+    managed = managed_files[0]
+    if (not isinstance(managed, dict) or set(managed) != {"path", "format", "content", "sha256"}
+            or managed["path"] != "plugins/Geyser-Spigot/config.yml" or managed["format"] != "canonical-json-v1"):
+        raise ContentError("unexpected managed configuration file or encoding")
+    if (not isinstance(managed["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", managed["sha256"])
+            or hashlib.sha256(_managed_file_bytes(managed)).hexdigest() != managed["sha256"]):
+        raise ContentError("managed configuration checksum mismatch")
+    configuration = managed["content"]
+    approved_schema = {
+        "config-version": 7,
+        "bedrock": {"address": "0.0.0.0", "port": 19132, "clone-remote-port": False},
+        "java": {"auth-type": "floodgate"},
+        "log-player-ip-addresses": False,
+        "saved-user-logins": [],
+    }
+    # Policy validation only: staged bytes always come from the manifest payload.
+    # JSON equality keeps scalar types distinct (7.0/7 and false/0 differ).
+    if (not isinstance(configuration, dict)
+            or _managed_file_bytes(managed) != _managed_file_bytes({"content": approved_schema})):
+        raise ContentError("managed configuration schema must preserve the approved Geyser v7 authentication, network and privacy settings")
+
+
+def _managed_file_bytes(managed: dict) -> bytes:
+    """canonical-json-v1: sorted keys, compact UTF-8 JSON, and one final LF."""
+    return (json.dumps(managed["content"], sort_keys=True, separators=(",", ":"),
+                       ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
 
 
 def manifest_digest(manifest: dict) -> str:
@@ -114,21 +143,26 @@ def stage_content(manifest: dict, cache_dir: Path) -> Path:
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
-    geyser_config = destination / "plugins/Geyser-Spigot/config.yml"
-    if geyser_config.is_symlink() or geyser_config.parent.is_symlink():
-        raise ContentError("managed configuration cannot contain symlinks")
-    geyser_config.parent.mkdir(exist_ok=True)
-    geyser_config.parent.chmod(0o755)
-    # This small file is managed desired configuration, copied on every start.
-    # Floodgate key.pem and every other mutable plugin file stay under /data.
-    geyser_config.write_text(
-        "config-version: 7\n"
-        "bedrock:\n  address: 0.0.0.0\n  port: 19132\n  clone-remote-port: false\n"
-        "java:\n  auth-type: floodgate\n"
-        "log-player-ip-addresses: false\n"
-        "saved-user-logins: []\n"
-    )
-    geyser_config.chmod(0o644)
+    for managed in manifest["managed_files"]:
+        target = destination / managed["path"]
+        if target.is_symlink() or target.parent.is_symlink():
+            raise ContentError("managed configuration cannot contain symlinks")
+        target.parent.mkdir(exist_ok=True)
+        target.parent.chmod(0o755)
+        if target.exists():
+            if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != managed["sha256"]:
+                raise ContentError("cached managed configuration checksum mismatch; remove the corrupt cache before retrying")
+            continue
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as output:
+                temporary = Path(output.name)
+                output.write(_managed_file_bytes(managed))
+            temporary.chmod(0o644)
+            temporary.replace(target)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
     return destination
 
 

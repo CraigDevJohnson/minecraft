@@ -2,7 +2,7 @@
 
 Run `scripts/minecraft_host.py` on the operator computer with Python 3.11+ and AWS CLI v2 installed. AWS CLI was available during implementation; the repository does not install it. Use the existing operator AWS profile/session. The game host's IAM role receives no EC2 start/stop permissions.
 
-The private deployment handoff is the direct JSON object produced by `tofu output -json deployment`, described in [infrastructure operations](infrastructure.md). The command consumes `host_id`, `region`, and the `instances` mapping. Keep this file private and outside tracked files; it contains deployment identifiers. For example, after an authorized deployment:
+The private deployment handoff is the direct JSON object produced by `tofu output -json deployment`, described in [infrastructure operations](infrastructure.md). The command consumes `account_id`, `host_id`, `region`, and the `instances` mapping. `account_id` must be a 12-digit ASCII string, matching the reviewed infrastructure account. Keep this file private and outside tracked files; it contains deployment identifiers. For example, after an authorized deployment:
 
 ```sh
 umask 077
@@ -11,6 +11,8 @@ mkdir -p operator-config/family
 ```
 
 Install and configure the instance runtime on the host before using these commands. SSM invokes `/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json` as the fixed host-side interface. That private configuration supplies explicit EULA acceptance, retained-volume identity, and the required backup hook. Host startup does not supply or infer those values.
+
+Every invocation, including `status`, first calls `sts get-caller-identity` with the operator's active credentials and requires its account to match the deployment handoff before any EC2 or SSM call. A missing or malformed deployment account, failed identity lookup, or mismatch stops the command. Correct the AWS profile/session or handoff and retry; the diagnostic does not print either account ID or the caller identity. The STS request shares the 30-second AWS process bound. [GetCallerIdentity](https://docs.aws.amazon.com/cli/latest/reference/sts/get-caller-identity.html) identifies the account owning the caller and does not require a new IAM permission grant.
 
 ```sh
 python3 scripts/minecraft_host.py --deployment operator-config/family/deployment.json start --instance survival
@@ -42,6 +44,6 @@ The operator needs existing access to `ec2:DescribeInstances`, `ec2:StartInstanc
 
 ## Validation boundary
 
-`tests/test_minecraft_host.py` exercises the public command interface against a controlled AWS CLI boundary. It covers duplicate operations, all-instance drain evidence, stopped instances with pending backups and retry, EC2/SSM failures, startup/readiness timeouts, remote invocation propagation, malformed responses, ID validation, and private-output filtering. Process-level fixtures verify the real CLI adapter's timeout and diagnostic handling. These tests neither contact AWS nor establish live backup recovery.
+`tests/test_minecraft_host.py` exercises the public command interface against a controlled AWS CLI boundary. It covers deployment/caller account matching before EC2/SSM access, malformed account inputs, failed STS lookup, duplicate operations, all-instance drain evidence, stopped instances with pending backups and retry, EC2/SSM failures, startup/readiness timeouts, remote invocation propagation, malformed responses, ID validation, and private-output filtering. Process-level fixtures verify the real CLI adapter's timeout and diagnostic handling. These tests neither contact AWS nor establish live backup recovery.
 
 AWS interface references: [SendCommand delivery timeout and parameters](https://docs.aws.amazon.com/cli/latest/reference/ssm/send-command.html), [GetCommandInvocation eventual consistency](https://docs.aws.amazon.com/cli/latest/reference/ssm/get-command-invocation.html), and [Run Shell Script execution timeout](https://docs.aws.amazon.com/systems-manager/latest/userguide/documents-command-ssm-plugin-reference.html#aws-runShellScript).

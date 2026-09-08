@@ -65,6 +65,7 @@ sys.exit(0 if os.environ["STORAGE_" + sys.argv[1].upper() + "_READY"] == "yes" e
                 result = subprocess.run(["bash", str(script)], env=environment, capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual((root / "usr/local/sbin/minecraft-storage").read_bytes(), payload)
+            self.assertEqual((root / "etc/minecraft").stat().st_mode & 0o777, 0o700)
             gate = (root / "etc/systemd/system/docker.service.d/10-minecraft-storage.conf").read_text()
             self.assertIn("Requires=minecraft-storage.service", gate)
             self.assertIn("After=minecraft-storage.service", gate)

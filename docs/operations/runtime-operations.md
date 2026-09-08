@@ -11,6 +11,8 @@ sudo minecraft-instance --config /etc/minecraft/operator.json update survival
 
 Start verifies retained EBS storage and operator acceptance, checks exact artifacts, and pulls the immutable ARM64 image. It verifies storage again before creating writable data and immediately before starting Compose. It waits for container health and RCON readiness. Missing storage cannot silently become a root-disk world. Compose has no automatic restart policy. Repeated start checks readiness without another writer; changed content requires `update`.
 
+Each storage check also inspects the kernel mount tree beneath `/srv/minecraft`. Nested mounts, including same-device bind mounts, are refused; instance data and control paths must stay on the verified filesystem without symlink redirection. Remove maintenance mounts before operating. Private operator/deployment files and the RCON secret must be root-owned regular files with mode `0600`; the command checks ownership and permissions on the same opened file descriptor it reads.
+
 Stop warns players, requires `save-all flush` confirmation, sends `stop`, and waits for a clean container exit before calling the required backup hook. It never uses Docker's forced stop/kill fallback. Failure returns nonzero. Results distinguish application and backup states without printing player identities or secrets.
 
 ## Persistent state and retries

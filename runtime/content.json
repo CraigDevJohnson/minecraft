@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "survival-2026-09-08",
+  "revision": "survival-2026-09-08-managed-config",
   "platform": "linux/arm64",
   "image": "itzg/minecraft-server@sha256:fa70ecc878ed641a89bc7dceaf43d8160faa351d9da4b48a2d9973f6ac9cb594",
   "image_source_revision": "da99021d880273b4fd5c1bf86a9a8d2489e0be43",
@@ -30,6 +30,24 @@
       "path": "plugins/floodgate-spigot.jar",
       "url": "https://download.geysermc.org/v2/projects/floodgate/versions/2.2.5/builds/140/downloads/spigot",
       "sha256": "9f436c42ffd8b1091a437d7a4e16f82181b9d5314f8b1732dfa9d5a4fffb19fe"
+    }
+  ],
+  "managed_files": [
+    {
+      "path": "plugins/Geyser-Spigot/config.yml",
+      "format": "canonical-json-v1",
+      "content": {
+        "config-version": 7,
+        "bedrock": {
+          "address": "0.0.0.0",
+          "port": 19132,
+          "clone-remote-port": false
+        },
+        "java": {"auth-type": "floodgate"},
+        "log-player-ip-addresses": false,
+        "saved-user-logins": []
+      },
+      "sha256": "ccaa9a5d704431af409ea334068555419571ac56a9861fb3d1c6ff2881d4b38d"
     }
   ]
 }

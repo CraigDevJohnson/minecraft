@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 install_dir=/opt/minecraft
@@ -13,6 +14,17 @@ fail() {
 	exit 1
 }
 
+trusted_path() {
+	local metadata owner mode
+	[[ ! -L "$1" ]] || fail 'Managed installation paths must not be symlinks.'
+	metadata="$(stat -c '%u:%a' -- "$1")"
+	owner="${metadata%%:*}"
+	mode="${metadata#*:}"
+	if [[ "$owner" != 0 ]] || (((8#$mode & 0022) != 0)); then
+		fail 'Managed installation paths must be root-owned and not writable by other accounts.'
+	fi
+}
+
 [[ $# == 0 ]] || fail 'usage: sudo bash scripts/install_runtime.sh'
 [[ "$(id -u)" == 0 ]] || fail 'Runtime installation requires root on the reviewed Linux host.'
 [[ "$(uname -s)" == Linux && "$(uname -m)" == aarch64 ]] || fail 'Runtime installation requires Linux ARM64.'
@@ -23,7 +35,27 @@ command -v docker >/dev/null
 command -v systemctl >/dev/null
 [[ -x /usr/local/sbin/minecraft-storage ]] || fail 'Install the reviewed host/storage prerequisites first.'
 
-exec 9>"$lock_file"
+for directory in /opt /usr/local/sbin /etc/systemd/system \
+	"$(dirname /usr/local/sbin)" "$(dirname "$(dirname /usr/local/sbin)")" \
+	"$(dirname /etc/systemd/system)" "$(dirname "$(dirname /etc/systemd/system)")" \
+	"$private_dir" "$install_dir"; do
+	[[ ! -L "$directory" ]] || fail 'Installation paths must not be symlinks.'
+	[[ ! -e "$directory" || -d "$directory" ]] || fail 'An installation directory is occupied by a non-directory.'
+	if [[ -e "$directory" ]]; then
+		if [[ "$directory" == "$private_dir" ]]; then
+			[[ "$(stat -c '%u:%a' -- "$directory")" == 0:700 ]] || fail 'The existing private directory must be root-owned mode 0700; inspect and repair it explicitly before installation.'
+		else
+			trusted_path "$directory"
+		fi
+	fi
+done
+trusted_path /usr/local/sbin/minecraft-storage
+if [[ -e "$lock_file" || -L "$lock_file" ]]; then
+	[[ -f "$lock_file" ]] || fail 'The runtime lock must be a trusted regular file.'
+	trusted_path "$lock_file"
+fi
+
+exec 9>>"$lock_file"
 flock -w 10 9 || fail 'Another runtime operation holds the host lock; retry later.'
 
 stage="$(mktemp -d)"
@@ -45,14 +77,10 @@ chmod 0755 "$stage/bin/minecraft-instance"
 chmod 0755 "$stage"
 
 # Preflight every managed path before writing any installed content.
-for directory in /opt /usr/local/sbin /etc/systemd/system "$private_dir" "$install_dir"; do
-	[[ ! -L "$directory" ]] || fail 'Installation paths must not be symlinks.'
-	[[ ! -e "$directory" || -d "$directory" ]] || fail 'An installation directory is occupied by a non-directory.'
-done
 if [[ -d "$install_dir" ]]; then
 	diff -rq --no-dereference "$stage" "$install_dir" >/dev/null || fail 'Installed release or desired content differs. Follow docs/operations/runtime-installation.md for a staged upgrade; nothing was replaced.'
-	for relative in scripts runtime bin; do
-		[[ ! -L "$install_dir/$relative" ]] || fail 'Installed release directories must not be symlinks.'
+	for relative in scripts runtime bin scripts/minecraft_instance.py scripts/minecraft_content.py scripts/minecraft_access.py runtime/survival.json runtime/content.json runtime/operator.json.example runtime/minecraft@.service bin/minecraft-instance; do
+		trusted_path "$install_dir/$relative"
 	done
 fi
 for pair in "bin/minecraft-instance:$launcher" "runtime/minecraft@.service:$unit"; do
@@ -60,6 +88,7 @@ for pair in "bin/minecraft-instance:$launcher" "runtime/minecraft@.service:$unit
 	target="${pair#*:}"
 	[[ ! -L "$target" ]] || fail 'Installed launcher/service must not be symlinks.'
 	if [[ -e "$target" ]]; then
+		trusted_path "$target"
 		if [[ ! -f "$target" ]] || ! cmp -s "$stage/$relative" "$target"; then
 			fail 'Installed launcher/service differs. Use the staged upgrade procedure; nothing was replaced.'
 		fi
@@ -68,6 +97,7 @@ done
 
 running="$(timeout --kill-after=10s 30s docker ps --quiet --filter label=com.docker.compose.service=minecraft)"
 [[ -z "$running" ]] || fail 'A Minecraft runtime is running. Complete its safe stop and backup before installation.'
+timeout --kill-after=10s 180s python3 -B "$root_dir/scripts/check_runtime_install.py" --deployment "$private_dir/deployment.json"
 
 if [[ ! -d "$install_dir" ]]; then
 	install -d -m 0755 /opt
