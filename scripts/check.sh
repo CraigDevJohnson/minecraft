@@ -16,6 +16,7 @@ validate_infra() (
 	local tofu_data_dir
 	tofu_data_dir="$(mktemp -d "${TMPDIR:-/tmp}/minecraft-tofu.XXXXXX")"
 	trap 'rm -rf -- "$tofu_data_dir"' EXIT
+	: >"$tofu_data_dir/validation.tfrc"
 
 	local -a tofu_env=(
 		env
@@ -29,9 +30,9 @@ validate_infra() (
 		-u AWS_WEB_IDENTITY_TOKEN_FILE
 		-u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
 		-u AWS_CONTAINER_CREDENTIALS_FULL_URI
-		-u TF_CLI_CONFIG_FILE
 		-u TOFU_CONFIG_FILE
 		-u TF_PLUGIN_CACHE_DIR
+		TF_CLI_CONFIG_FILE="$tofu_data_dir/validation.tfrc"
 		AWS_EC2_METADATA_DISABLED=true
 		AWS_CONFIG_FILE="$tofu_data_dir/nonexistent-aws-config"
 		AWS_SHARED_CREDENTIALS_FILE="$tofu_data_dir/nonexistent-aws-credentials"

@@ -20,7 +20,7 @@ Use the project-local Task binary for all repository commands:
 
 `check` runs Bash syntax checks, ShellCheck, shfmt verification, OpenTofu formatting verification, Python unit tests, and backend-free OpenTofu initialization and validation. `fmt` updates shell and OpenTofu formatting. `infra:validate` runs only the isolated OpenTofu initialization and validation path.
 
-OpenTofu uses a temporary `TF_DATA_DIR` for validation. The check removes inherited AWS credentials, disables instance metadata access, and points AWS configuration paths at nonexistent files. It cannot alter an operator's initialized backend or use an AWS identity, although it downloads the locked public provider.
+OpenTofu uses a temporary `TF_DATA_DIR` for validation. Both initialization and validation explicitly use an empty temporary CLI configuration, so per-user settings such as provider development overrides and credentials helpers do not affect these checks. The check removes inherited AWS credentials, disables instance metadata access, and points AWS configuration paths at nonexistent files. It cannot alter an operator's initialized backend or use an AWS identity, although it downloads the locked public provider.
 
 ## Shared instance contract
 
