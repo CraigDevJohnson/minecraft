@@ -25,6 +25,7 @@ The retained disk stores `instances/<id>/operation.json` beside mutable `data/` 
 | Save or clean shutdown fails | No backup success is claimed; investigate and retry stop. |
 | Clean stop succeeds but backup fails | Pending session persists. Fix/install the hook and retry stop without restarting or resaving the world. |
 | Completed stop is repeated | Reports stopped/complete without another backup. |
+| Compose fails before another container execution starts | The journal retains the prior container execution and session. Inspection can restore the completed backup state and permit retry when that execution is unchanged; a new failed execution still requires investigation. |
 | Start follows a pending session backup | Refused until stop/backup succeeds. |
 | Existing data has no operation record, or Minecraft exited unexpectedly | Ordinary operation refuses to adopt data or certify a crash as a clean save. Investigate and follow the reviewed recovery procedure. |
 

@@ -68,9 +68,26 @@ class Manager:
         path = self.state_path(instance)
         return json.loads(path.read_text()) if path.exists() else None
 
+    @staticmethod
+    def execution(container):
+        if not container["exists"]:
+            return None
+        return {"container_id": container["container_id"], "started_at": container["started_at"]}
+
+    def reconcile_start(self, instance, state, container):
+        if state and state["phase"] == "starting" and not container["running"]:
+            unchanged = self.execution(container) == state.get("previous_execution")
+            never_started = container["exists"] and container.get("started_at", "").startswith("0001-01-01")
+            if "previous_execution" in state and (unchanged or never_started):
+                state = state.get("previous_state") or {
+                    "phase": "prepared", "backup": "not-required", "revision": state["revision"], "session": state["session"]}
+                write_json(self.state_path(instance), state)
+        return state
+
     def status(self, instance):
         state = self.state(instance)
         container = self.machine.inspect(instance)
+        state = self.reconcile_start(instance, state, container)
         return {
             "instance": instance,
             "application": "running" if container["running"] else "stopped",
@@ -84,6 +101,7 @@ class Manager:
         state = self.state(instance)
         revision = self.machine.desired_revision(instance)
         container = self.machine.inspect(instance)
+        state = self.reconcile_start(instance, state, container)
         if not state and (container["exists"] or (self.root / "instances" / instance / "data").exists()):
             raise OperationError("untracked instance data; investigate or restore before operating")
         if state and state["revision"] != revision and not updating:
@@ -94,21 +112,27 @@ class Manager:
             if state and (state["phase"] == "running" or (state["phase"] == "starting" and container["exists"])):
                 raise OperationError("instance stopped unexpectedly; clean shutdown is not proven")
             self.machine.prepare(instance)
-            state = {"phase": "starting", "backup": "pending", "revision": revision, "session": str(uuid.uuid4())}
+            state = {"phase": "starting", "backup": "pending", "revision": revision, "session": str(uuid.uuid4()),
+                     "previous_execution": self.execution(container), "previous_state": state}
             write_json(self.state_path(instance), state)
             self.machine.verify_storage()
             self.machine.launch(instance)
         self.machine.wait_ready(instance)
         state["phase"] = "running"
+        state.pop("previous_execution", None)
+        state.pop("previous_state", None)
         write_json(self.state_path(instance), state)
         return {**self.status(instance), "ready": True}
 
     def stop(self, instance):
         state = self.state(instance)
         container = self.machine.inspect(instance)
+        state = self.reconcile_start(instance, state, container)
         if not state:
             if container["exists"] or (self.root / "instances" / instance / "data").exists():
                 raise OperationError("untracked instance data; investigate or restore before operating")
+            return self.status(instance)
+        if state["phase"] == "prepared" and not container["running"]:
             return self.status(instance)
         if container["running"]:
             self.machine.save(instance)
@@ -121,6 +145,8 @@ class Manager:
         if container["exists"] and container["exit_code"] != 0:
             raise OperationError("container did not exit cleanly")
         state["phase"] = "stopped"
+        state.pop("previous_execution", None)
+        state.pop("previous_state", None)
         write_json(self.state_path(instance), state)
         if state["backup"] != "complete":
             try:
@@ -290,7 +316,8 @@ class LinuxMachine:
             raise OperationError("multiple containers found for one instance; refusing concurrent writers")
         state = json.loads(command(["docker", "inspect", "--format", "{{json .State}}", ids[0]]))
         return {"exists": True, "running": state["Running"], "exit_code": state["ExitCode"],
-                "healthy": state.get("Health", {}).get("Status") == "healthy", "container_id": ids[0]}
+                "healthy": state.get("Health", {}).get("Status") == "healthy", "container_id": ids[0],
+                "started_at": state["StartedAt"]}
 
     def prepare(self, instance):
         from minecraft_content import render_compose, stage_content

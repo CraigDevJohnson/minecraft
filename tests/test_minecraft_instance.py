@@ -27,6 +27,7 @@ class FakeMachine:
         self.backup_works = False
         self.stop_works = True
         self.ready = True
+        self.starts = 0
 
     @contextlib.contextmanager
     def lock(self):
@@ -46,7 +47,8 @@ class FakeMachine:
         return self.revision
 
     def inspect(self, instance):
-        return {"exists": self.exists, "running": self.running, "exit_code": self.exit_code}
+        return {"exists": self.exists, "running": self.running, "exit_code": self.exit_code,
+                "container_id": "fixture-container", "started_at": f"run-{self.starts}"}
 
     def prepare(self, instance):
         if not self.accepted:
@@ -55,6 +57,7 @@ class FakeMachine:
 
     def launch(self, instance):
         self.events.append("launch")
+        self.starts += 1
         self.running = self.exists = True
 
     def wait_ready(self, instance):
@@ -152,6 +155,36 @@ class InstanceTests(unittest.TestCase):
             with self.assertRaisesRegex(minecraft_instance.OperationError, "completion"):
                 self.manager.execute("stop", "survival")
             self.assertEqual(self.manager.execute("status", "survival")["backup"], "failed")
+
+    def test_prelaunch_failure_preserves_completed_backup_and_can_retry_start(self):
+        self.machine.backup_works = True
+        self.manager.execute("start", "survival")
+        self.manager.execute("stop", "survival")
+        launch = self.machine.launch
+        def fail_before_launch(instance):
+            raise minecraft_instance.OperationError("Compose failed before launch")
+        self.machine.launch = fail_before_launch
+        with self.assertRaisesRegex(minecraft_instance.OperationError, "before launch"):
+            self.manager.execute("start", "survival")
+        self.assertEqual(self.manager.execute("status", "survival")["backup"], "complete")
+        self.machine.launch = launch
+        self.assertTrue(self.manager.execute("start", "survival")["ready"])
+        self.assertEqual(self.machine.events.count("backup"), 1)
+
+    def test_failed_new_execution_is_not_mistaken_for_safe_prelaunch_failure(self):
+        self.machine.backup_works = True
+        self.manager.execute("start", "survival")
+        self.manager.execute("stop", "survival")
+        def fail_after_execution(instance):
+            self.machine.starts += 1
+            raise minecraft_instance.OperationError("new container execution exited")
+        self.machine.launch = fail_after_execution
+        with self.assertRaises(minecraft_instance.OperationError):
+            self.manager.execute("start", "survival")
+        with self.assertRaisesRegex(minecraft_instance.OperationError, "unexpectedly"):
+            self.manager.execute("start", "survival")
+        with self.assertRaisesRegex(minecraft_instance.OperationError, "not proven"):
+            self.manager.execute("stop", "survival")
 
     def test_os_lock_prevents_competing_operations_and_releases_after_failure(self):
         lock = self.root / "host.lock"
