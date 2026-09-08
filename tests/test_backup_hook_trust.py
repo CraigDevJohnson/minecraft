@@ -24,7 +24,8 @@ class BackupHookTrustTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         root = Path(self.temporary.name)
         deployment = root / "deployment.json"
-        deployment.write_text(json.dumps({"backup_bucket_name": "fixture-bucket", "instances": {
+        deployment.write_text(json.dumps({"backup_bucket_name": "fixture-bucket",
+            "data_volume_id": "vol-0123456789abcdef0", "data_filesystem_uuid": "01234567-89ab-4cde-8fab-0123456789ab", "instances": {
             "survival": {"data_path": "/srv/minecraft/instances/survival/data", "backup_prefix": "instances/survival/"},
         }}))
         deployment.chmod(0o600)
@@ -66,6 +67,22 @@ class BackupHookTrustTests(unittest.TestCase):
         self.assertEqual(request["session"], "fixture-session")
         self.assertEqual(request["manifest_sha256"], self.state["revision"])
         self.assertEqual(request["destination"], {"bucket": "fixture-bucket", "prefix": "instances/survival/"})
+        self.assertEqual(request["source"], {"volume_id": "vol-0123456789abcdef0",
+            "filesystem_uuid": "01234567-89ab-4cde-8fab-0123456789ab"})
+        self.assertEqual(request["definition_path"], str(self.machine.runtime("survival") / "definition.json"))
+
+    def test_restored_handoff_requires_exact_recorded_content_and_definition(self):
+        definition_path = self.machine.runtime("survival") / "definition.json"
+        definition = json.loads((ROOT / "runtime/survival.json").read_text())
+        definition_path.write_text(json.dumps(definition))
+        self.machine.verify_restored("survival", self.state)
+        changed = dict(definition, max_players=7)
+        definition_path.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(runtime.OperationError, "exact recorded"):
+            self.machine.verify_restored("survival", self.state)
+        definition_path.write_text(json.dumps(definition))
+        with self.assertRaisesRegex(runtime.OperationError, "exact recorded"):
+            self.machine.verify_restored("survival", {**self.state, "revision": "0" * 64})
 
     def test_untrusted_ancestor_blocks_an_otherwise_trusted_executable(self):
         for ancestor in ("/", "/opt", "/opt/minecraft-backup", "/opt/minecraft-backup/bin"):

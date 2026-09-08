@@ -18,7 +18,8 @@ class RuntimeInstallTests(unittest.TestCase):
         source = root / "source"
         (source / "scripts").mkdir(parents=True)
         (source / "runtime").mkdir()
-        for name in ("minecraft_instance.py", "minecraft_content.py", "minecraft_access.py", "check_runtime_install.py"):
+        for name in ("minecraft_instance.py", "minecraft_content.py", "minecraft_access.py", "minecraft_backup.py",
+                     "minecraft_backup_store.py", "minecraft_restore.py", "check_runtime_install.py"):
             shutil.copy2(ROOT / "scripts" / name, source / "scripts" / name)
         for name in ("survival.json", "content.json", "operator.json.example", "minecraft@.service"):
             shutil.copy2(ROOT / "runtime" / name, source / "runtime" / name)
@@ -72,6 +73,22 @@ elif name == "docker":
 elif name == "systemctl":
     assert args == ["daemon-reload"]
     sys.exit(int(os.environ.get("RELOAD_FAILURE", "0")))
+elif name == "aws":
+    if args == ["--version"]:
+        print(os.environ.get("AWS_VERSION", "aws-cli/2.36.34 fixture-only"))
+    else:
+        assert args[0] == "s3api"
+        assert args[2:] == ["--generate-cli-skeleton", "input", "--no-cli-pager", "--no-cli-auto-prompt"]
+        skeletons = {
+            "put-object": {"IfNoneMatch": "", "ChecksumSHA256": ""},
+            "complete-multipart-upload": {"IfNoneMatch": ""},
+            "create-multipart-upload": {"ChecksumType": "COMPOSITE", "ChecksumAlgorithm": "SHA256"},
+        }
+        skeleton = skeletons[args[1]]
+        for field in list(skeleton):
+            if os.environ.get("AWS_MISSING_FIELD") == args[1] + ":" + field:
+                del skeleton[field]
+        print(json.dumps(skeleton))
 elif name == "stat":
     assert args[:3] == ["-c", "%u:%a", "--"]
     target = pathlib.Path(args[3])
@@ -79,7 +96,7 @@ elif name == "stat":
     print(f"{owner}:{target.stat().st_mode & 0o7777:o}")
 '''.replace("PYTHON_EXECUTABLE", sys.executable))
         fake.chmod(0o755)
-        for name in ("id", "uname", "timeout", "flock", "docker", "systemctl", "stat", "python3"):
+        for name in ("id", "uname", "timeout", "flock", "docker", "systemctl", "stat", "python3", "aws"):
             (binaries / name).symlink_to(fake)
         environment = os.environ.copy()
         environment.update(PATH=f"{binaries}:{environment['PATH']}", COMMAND_LOG=str(log))
@@ -101,12 +118,13 @@ elif name == "stat":
             self.assertEqual(private.read_text(), '{"operator-owned": true}\n')
             self.assertEqual(private.stat().st_mode & 0o777, 0o600)
             installed = root / "opt/minecraft"
-            for name in ("minecraft_instance.py", "minecraft_content.py", "minecraft_access.py"):
+            for name in ("minecraft_instance.py", "minecraft_content.py", "minecraft_access.py", "minecraft_backup.py",
+                         "minecraft_backup_store.py", "minecraft_restore.py"):
                 self.assertEqual((installed / "scripts" / name).read_bytes(), (source / "scripts" / name).read_bytes())
             self.assertEqual((installed / "runtime/content.json").read_bytes(), (source / "runtime/content.json").read_bytes())
             example = json.loads((installed / "runtime/operator.json.example").read_text())
             self.assertIs(example["eula_accepted"], False)
-            self.assertIsNone(example["backup_hook"])
+            self.assertEqual(example["backup_hook"], ["/usr/local/sbin/minecraft-backup", "hook"])
             self.assertFalse((root / "srv").exists())
             self.assertEqual((root / "etc/minecraft/deployment.json").read_text(), '{"private": "deployment fixture"}\n')
             self.assertFalse((root / "etc/minecraft/rcon.secret").exists())
@@ -116,10 +134,16 @@ elif name == "stat":
             help_result = subprocess.run(["bash", str(launcher), "--help"], capture_output=True, text=True, timeout=10)
             self.assertEqual(help_result.returncode, 0, help_result.stderr)
             self.assertIn("--config", help_result.stdout)
+            for name in ("minecraft-backup", "minecraft-restore"):
+                command = root / "usr/local/sbin" / name
+                self.assertTrue(command.is_file(), f"missing trusted {name} launcher")
+                self.assertEqual(command.stat().st_mode & 0o777, 0o755)
+                help_result = subprocess.run(["bash", str(command), "--help"], capture_output=True, text=True, timeout=10)
+                self.assertEqual(help_result.returncode, 0, help_result.stderr)
             self.assertFalse((installed / "scripts/__pycache__").exists())
 
     def test_changed_release_or_desired_content_is_not_overwritten(self):
-        for changed in ("scripts/minecraft_instance.py", "runtime/content.json"):
+        for changed in ("scripts/minecraft_instance.py", "runtime/content.json", "scripts/minecraft_backup.py"):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 source, script, environment, _ = self.fixture(root)
@@ -132,6 +156,25 @@ elif name == "stat":
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("staged upgrade", result.stderr)
                 self.assertEqual(installed.read_bytes(), before)
+
+    def test_incompatible_backup_cli_is_rejected_before_any_installation_mutation(self):
+        unsupported = [{"AWS_VERSION": "aws-cli/1.99.0 fixture-only"}]
+        unsupported.extend({"AWS_MISSING_FIELD": field} for field in (
+            "put-object:IfNoneMatch", "put-object:ChecksumSHA256", "complete-multipart-upload:IfNoneMatch",
+            "create-multipart-upload:ChecksumType", "create-multipart-upload:ChecksumAlgorithm"))
+        for settings in unsupported:
+            with self.subTest(settings=settings), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                _, script, environment, log = self.fixture(root)
+                environment.update(settings)
+                result = self.run_installer(script, environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("AWS CLI v2", result.stderr)
+                self.assertFalse((root / "run/minecraft").exists())
+                self.assertFalse((root / "opt/minecraft").exists())
+                self.assertFalse((root / "usr/local/sbin/minecraft-backup").exists())
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertFalse(any(call[0] in ("docker", "flock", "systemctl") for call in calls))
 
     def test_running_instance_or_lock_failure_prevents_installation(self):
         for values in ({"RUNNING_CONTAINER": "fixture-container"}, {"LOCK_FAILURE": "1"}):

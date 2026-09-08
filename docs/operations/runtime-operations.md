@@ -7,6 +7,7 @@ sudo minecraft-instance --config /etc/minecraft/operator.json start survival
 sudo minecraft-instance --config /etc/minecraft/operator.json status survival
 sudo minecraft-instance --config /etc/minecraft/operator.json stop survival
 sudo minecraft-instance --config /etc/minecraft/operator.json update survival
+sudo minecraft-instance --config /etc/minecraft/operator.json backup survival
 ```
 
 Start verifies retained EBS storage and operator acceptance, checks exact artifacts, and pulls the immutable ARM64 image. It verifies storage again before creating writable data and immediately before starting Compose. It waits for container health and RCON readiness. Missing storage cannot silently become a root-disk world. Compose has no automatic restart policy. Repeated start checks readiness without another writer; changed content requires `update`.
@@ -37,9 +38,9 @@ The [operator host commands](host-commands.md) control EC2 separately. Instance 
 
 `host-status` reports configured instances and the barrier. A pristine instance without data or operation state has `backup: not-required`, which is not a recovery point. An already-stopped EC2 host cannot provide fresh application or backup verification.
 
-## Required backup hook for #6
+## Required backup hook
 
-Private `backup_hook` is an argument array starting with an absolute executable, such as `["/usr/local/sbin/minecraft-backup"]`. The example leaves it `null`; no successful no-op hook is installed. The hook runs on the host with existing instance-role S3 access. The container gains neither AWS credentials nor EC2 permissions.
+Private `backup_hook` is an argument array starting with an absolute executable, supplied as `["/usr/local/sbin/minecraft-backup", "hook"]`. The trusted installer includes this real publisher. The hook runs on the host with existing instance-role S3 access. The container gains neither AWS credentials nor EC2 permissions.
 
 Immediately before invocation, the runtime checks the executable and every ancestor directory without following symlinks. Each must be owned by the effective operator (root on the production host) and have no group or other write permission; the executable must be a regular file executable by its owner. Symlinks, parent traversal, missing paths, and untrusted ownership or permissions block the backup. Install the reviewed hook under a trusted path such as `/usr/local/sbin`, outside the UID-1000-owned instance data tree. The remaining argument array is explicitly authorized by the private operator configuration: this executable check does not certify arbitrary interpreter arguments, script files, or programs the hook invokes. Those dependencies must also be reviewed and protected when deploying the hook.
 
@@ -54,7 +55,8 @@ One request is supplied on standard input:
   "manifest_path": "/srv/minecraft/instances/survival/runtime/manifest.json",
   "manifest_sha256": "canonical content manifest SHA-256",
   "definition_path": "/srv/minecraft/instances/survival/runtime/definition.json",
-  "destination": {"bucket": "private bucket", "prefix": "instances/survival/"}
+  "destination": {"bucket": "private bucket", "prefix": "instances/survival/"},
+  "source": {"volume_id": "private retained-volume identity", "filesystem_uuid": "private filesystem identity"}
 }
 ```
 
@@ -73,14 +75,14 @@ Exit zero alone is insufficient. Standard output must be one JSON object:
 }
 ```
 
-#6 must verify S3 publication before issuing this receipt, include the complete data directory plus supplied manifest/definition, and make retries for the same session/content idempotent. Missing, malformed, mismatched, failed or timed-out receipts block normal stop/update success. A timed-out hook process group is terminated; Minecraft has already exited cleanly. Diagnostics are not copied into public results.
+The [installed backup hook](backup-recovery.md) verifies S3 publication before issuing this receipt, includes the complete data directory plus supplied manifest/definition, and makes retries for the same session/content idempotent. Missing, malformed, mismatched, failed or timed-out receipts block normal stop/update success. A timed-out hook process group is terminated; Minecraft has already exited cleanly. Diagnostics are not copied into public results.
 
-The default hook timeout is 900 seconds, maximum 3000, keeping the initial single-instance stop within the one-hour SSM envelope. Runtime child processes share a 1 MiB budget across standard output and standard error, enforced while the process runs. Exceeding that budget fails the command and terminates its process group, just like a timeout; an oversized diagnostic stream cannot accumulate in host memory throughout the backup window. Keep hook output to the completion receipt and bounded diagnostics. Larger worlds/additional instances require revisiting measured bounds. Test doubles prove orchestration; #6/#8 establish real backup/recovery.
+The default hook timeout is 900 seconds, maximum 3000, keeping the initial single-instance stop within the one-hour SSM envelope. Runtime child processes share a 1 MiB budget across standard output and standard error, enforced while the process runs. Exceeding that budget fails the command and terminates its process group, just like a timeout; an oversized diagnostic stream cannot accumulate in host memory throughout the backup window. Keep hook output to the completion receipt and bounded diagnostics. Larger worlds/additional instances require revisiting measured bounds. Test doubles prove orchestration; the explicit local recovery check proves runtime compatibility, and #8 establishes live S3 recovery.
 
 ## Controlled updates and validation
 
 Review the new exact manifest and compatible desired definition outside mutable data. For an existing instance, `update` first stops and backs up the active revision, then stages and starts the new revision. Failed backup blocks launch. Active and desired manifests are separate; previous active manifests are retained by digest under runtime history before replacement. The hook receives the actual active definition as well.
 
-After a failed content upgrade, do not assume reinstalling old binaries reverses world-format changes. Restore the verified pre-update recovery point into an isolated target through #6, using its matching old manifest/definition; #8 proves live recovery. Replacing operation scripts follows [staged installation maintenance](runtime-installation.md).
+After a failed content upgrade, do not assume reinstalling old binaries reverses world-format changes. Restore the verified pre-update recovery point through the [isolated restore command](backup-recovery.md), using its matching old manifest/definition; #8 proves live recovery. Replacing operation scripts follows [staged installation maintenance](runtime-installation.md).
 
 See [content and explicit ARM64 validation](runtime-content.md) for pins and real test evidence, and [allowlist management](allowlist.md) for private identities. Craig accepted the EULA for this server and local tests on 2026-09-08; agents may prepare private local test configuration from that decision. Shared defaults and routine CI continue to carry no acceptance.

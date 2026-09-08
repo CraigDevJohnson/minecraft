@@ -5,6 +5,8 @@ umask 077
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 install_dir=/opt/minecraft
 launcher=/usr/local/sbin/minecraft-instance
+backup_launcher=/usr/local/sbin/minecraft-backup
+restore_launcher=/usr/local/sbin/minecraft-restore
 unit=/etc/systemd/system/minecraft@.service
 private_dir=/etc/minecraft
 lock_dir=/run/minecraft
@@ -34,6 +36,18 @@ command -v timeout >/dev/null
 command -v flock >/dev/null
 command -v docker >/dev/null
 command -v systemctl >/dev/null
+command -v aws >/dev/null || fail 'Install a reviewed AWS CLI v2 with conditional backup upload and checksum support first.'
+aws_version="$(timeout --kill-after=10s 30s aws --version)" || fail 'Cannot establish the installed AWS CLI v2 version.'
+[[ "$aws_version" == aws-cli/2.* ]] || fail 'Runtime backup requires AWS CLI v2.'
+for operation in put-object complete-multipart-upload create-multipart-upload; do
+	case "$operation" in
+	put-object) required_fields=(IfNoneMatch ChecksumSHA256) ;;
+	complete-multipart-upload) required_fields=(IfNoneMatch) ;;
+	create-multipart-upload) required_fields=(ChecksumType ChecksumAlgorithm) ;;
+	esac
+	aws_skeleton="$(AWS_EC2_METADATA_DISABLED=true AWS_PAGER='' AWS_CLI_AUTO_PROMPT=off timeout --kill-after=10s 30s aws s3api "$operation" --generate-cli-skeleton input --no-cli-pager --no-cli-auto-prompt)" || fail 'Cannot establish the AWS CLI v2 backup capabilities without credentials.'
+	python3 -c 'import json,sys; value=json.load(sys.stdin); sys.exit(not isinstance(value, dict) or not all(key in value for key in sys.argv[1:]))' "${required_fields[@]}" <<<"$aws_skeleton" || fail 'AWS CLI v2 lacks required conditional backup upload or checksum support; install a compatible reviewed CLI first.'
+done
 [[ -x /usr/local/sbin/minecraft-storage ]] || fail 'Install the reviewed host/storage prerequisites first.'
 
 for directory in /opt /usr/local/sbin /etc/systemd/system \
@@ -70,28 +84,30 @@ stage="$(mktemp -d)"
 copy_dir=''
 trap 'rm -rf "$stage" "$copy_dir"' EXIT
 install -d -m 0755 "$stage/scripts" "$stage/runtime" "$stage/bin"
-for name in minecraft_instance.py minecraft_content.py minecraft_access.py; do
+for name in minecraft_instance.py minecraft_content.py minecraft_access.py minecraft_backup.py minecraft_backup_store.py minecraft_restore.py; do
 	install -m 0644 "$root_dir/scripts/$name" "$stage/scripts/$name"
 done
 for name in survival.json content.json operator.json.example minecraft@.service; do
 	install -m 0644 "$root_dir/runtime/$name" "$stage/runtime/$name"
 done
-cat >"$stage/bin/minecraft-instance" <<'LAUNCHER'
+for name in minecraft-instance minecraft-backup minecraft-restore; do
+	cat >"$stage/bin/$name" <<LAUNCHER
 #!/usr/bin/env bash
 set -euo pipefail
-exec /usr/bin/python3 -B /opt/minecraft/scripts/minecraft_instance.py "$@"
+exec /usr/bin/python3 -B /opt/minecraft/scripts/${name//-/_}.py "\$@"
 LAUNCHER
-chmod 0755 "$stage/bin/minecraft-instance"
+	chmod 0755 "$stage/bin/$name"
+done
 chmod 0755 "$stage"
 
 # Preflight every managed path before writing any installed content.
 if [[ -d "$install_dir" ]]; then
 	diff -rq --no-dereference "$stage" "$install_dir" >/dev/null || fail 'Installed release or desired content differs. Follow docs/operations/runtime-installation.md for a staged upgrade; nothing was replaced.'
-	for relative in scripts runtime bin scripts/minecraft_instance.py scripts/minecraft_content.py scripts/minecraft_access.py runtime/survival.json runtime/content.json runtime/operator.json.example runtime/minecraft@.service bin/minecraft-instance; do
+	for relative in scripts runtime bin scripts/minecraft_instance.py scripts/minecraft_content.py scripts/minecraft_access.py scripts/minecraft_backup.py scripts/minecraft_backup_store.py scripts/minecraft_restore.py runtime/survival.json runtime/content.json runtime/operator.json.example runtime/minecraft@.service bin/minecraft-instance bin/minecraft-backup bin/minecraft-restore; do
 		trusted_path "$install_dir/$relative"
 	done
 fi
-for pair in "bin/minecraft-instance:$launcher" "runtime/minecraft@.service:$unit"; do
+for pair in "bin/minecraft-instance:$launcher" "bin/minecraft-backup:$backup_launcher" "bin/minecraft-restore:$restore_launcher" "runtime/minecraft@.service:$unit"; do
 	relative="${pair%%:*}"
 	target="${pair#*:}"
 	[[ ! -L "$target" ]] || fail 'Installed launcher/service must not be symlinks.'
@@ -115,6 +131,8 @@ if [[ ! -d "$install_dir" ]]; then
 	mv "$copy_dir" "$install_dir"
 fi
 [[ -e "$launcher" ]] || install -m 0755 "$stage/bin/minecraft-instance" "$launcher"
+[[ -e "$backup_launcher" ]] || install -m 0755 "$stage/bin/minecraft-backup" "$backup_launcher"
+[[ -e "$restore_launcher" ]] || install -m 0755 "$stage/bin/minecraft-restore" "$restore_launcher"
 [[ -e "$unit" ]] || install -m 0644 "$stage/runtime/minecraft@.service" "$unit"
 [[ -d "$private_dir" ]] || install -d -m 0700 "$private_dir"
 timeout --kill-after=10s 30s systemctl daemon-reload

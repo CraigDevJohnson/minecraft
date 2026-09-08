@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Bounded S3 operations using the host's AWS CLI and temporary credentials."""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import subprocess
+import tempfile
+import time
+
+PART_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 100 * 1024 * 1024 * 1024
+MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+COMMAND_TIMEOUT = 900
+
+
+class BackupError(Exception):
+    """A backup operation could not be completed or verified."""
+
+
+class _AWSError(BackupError):
+    def __init__(self, operation: str, code: str):
+        super().__init__(f"S3 {operation} failed; no recovery point was verified")
+        self.code = code
+
+
+class S3Store:
+    def __init__(self, bucket: str, region: str | None = None, *, timeout: int = 900):
+        if type(timeout) is not int or not 0 < timeout <= 3000:
+            raise BackupError("backup operation timeout must be between 1 and 3000 seconds")
+        self.bucket = bucket
+        self.region = region
+        self.deadline = time.monotonic() + timeout
+
+    def _call(self, operation: str, *arguments: str, download_limit: tuple[Path, int] | None = None) -> dict:
+        started = time.monotonic()
+        if started >= self.deadline:
+            raise BackupError("S3 operation timed out")
+        deadline = min(self.deadline, started + COMMAND_TIMEOUT)
+        command = ["aws", "s3api", operation, "--bucket", self.bucket,
+                   "--output", "json", "--no-cli-pager", "--no-cli-auto-prompt",
+                   "--cli-connect-timeout", "10", "--cli-read-timeout", "60"]
+        if self.region:
+            command.extend(("--region", self.region))
+        command.extend(arguments)
+        environment = dict(os.environ, AWS_PAGER="", AWS_CLI_AUTO_PROMPT="off",
+                           AWS_RETRY_MODE="standard", AWS_MAX_ATTEMPTS="3", LC_ALL="C")
+        process = None
+        output = {"stdout": bytearray(), "stderr": bytearray()}
+        try:
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       env=environment)
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+                selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+                while selector.get_map():
+                    if download_limit and download_limit[0].exists() and download_limit[0].stat().st_size > download_limit[1]:
+                        raise BackupError("S3 download exceeds the safety limit")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise BackupError("S3 command timed out")
+                    for stream, _ in selector.select(min(remaining, 1)):
+                        chunk = os.read(stream.fileobj.fileno(), 65536)
+                        if not chunk:
+                            selector.unregister(stream.fileobj)
+                            continue
+                        output[stream.data].extend(chunk)
+                        if sum(map(len, output.values())) > MAX_OUTPUT_BYTES:
+                            raise BackupError("S3 command output exceeds the safety limit")
+            result = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+            if result:
+                match = re.search(rb"An error occurred \(([^)\r\n]+)\) when calling the "
+                                  + re.escape(operation.title().replace("-", "").encode())
+                                  + rb" operation", output["stderr"])
+                raise _AWSError(operation, match[1].decode("ascii", "replace") if match else "unknown")
+            value = json.loads(output["stdout"] or b"{}")
+            if not isinstance(value, dict):
+                raise BackupError("S3 returned invalid response metadata")
+            return value
+        except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+            raise BackupError("S3 command failed, timed out, or returned invalid metadata") from error
+        finally:
+            if process is not None:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+                if process.stdout:
+                    process.stdout.close()
+                if process.stderr:
+                    process.stderr.close()
+
+    def upload(self, key: str, source: Path) -> None:
+        try:
+            size = source.stat().st_size
+            if not source.is_file() or size > MAX_ARCHIVE_BYTES:
+                raise BackupError("backup upload is not a file within the archive size limit")
+            if size > PART_BYTES:
+                self._multipart_upload(key, source)
+                return
+            with source.open("rb") as handle:
+                checksum = base64.b64encode(hashlib.file_digest(handle, "sha256").digest()).decode("ascii")
+            try:
+                self._call("put-object", "--key", key, "--body", str(source),
+                           "--if-none-match", "*", "--checksum-sha256", checksum)
+            except _AWSError as error:
+                if error.code not in ("PreconditionFailed", "412"):
+                    raise
+        except OSError as error:
+            raise BackupError("cannot read backup upload source") from error
+
+    def download(self, key: str, target: Path, *, max_bytes: int) -> bool:
+        if type(max_bytes) is not int or not 0 <= max_bytes <= MAX_ARCHIVE_BYTES:
+            raise BackupError("invalid backup download size limit")
+        try:
+            metadata = self._call("head-object", "--key", key)
+        except _AWSError as error:
+            if error.code == "NoSuchKey":
+                return False
+            if error.code in ("404", "NotFound"):
+                # HEAD hides the difference between a missing key and a missing bucket.
+                listing = self._call("list-objects-v2", "--prefix", key, "--max-keys", "1", "--no-paginate")
+                contents = listing.get("Contents", [])
+                if (type(listing.get("IsTruncated")) is not bool or not isinstance(contents, list)
+                        or len(contents) > 1 or any(not isinstance(item, dict)
+                            or not isinstance(item.get("Key"), str) or not item["Key"].startswith(key)
+                            or item["Key"] == key for item in contents)):
+                    raise BackupError("S3 object absence could not be confirmed")
+                return False
+            raise
+        size = metadata.get("ContentLength")
+        etag = metadata.get("ETag")
+        if type(size) is not int or not 0 <= size <= max_bytes or not isinstance(etag, str) or not etag:
+            raise BackupError("S3 object size or revision is invalid or exceeds the download limit")
+        try:
+            with tempfile.TemporaryDirectory(prefix=".minecraft-download-", dir=target.parent) as directory:
+                temporary = Path(directory) / "object"
+                result = self._call("get-object", "--key", key, "--if-match", etag, str(temporary),
+                                    download_limit=(temporary, max_bytes))
+                if (not temporary.is_file() or temporary.stat().st_size != size
+                        or type(result.get("ContentLength")) is not int or result["ContentLength"] != size):
+                    raise BackupError("S3 download size differs from the selected object")
+                os.replace(temporary, target)
+            return True
+        except OSError as error:
+            raise BackupError("cannot write the verified S3 download") from error
+
+    def keys(self, prefix: str) -> list[str]:
+        keys = []
+        seen = set()
+        token = None
+        tokens = set()
+        for _ in range(1000):
+            arguments = ["--prefix", prefix, "--max-keys", "1000", "--no-paginate"]
+            if token is not None:
+                arguments.extend(("--continuation-token", token))
+            page = self._call("list-objects-v2", *arguments)
+            contents = page.get("Contents", [])
+            if not isinstance(contents, list) or type(page.get("IsTruncated")) is not bool:
+                raise BackupError("S3 returned an invalid object listing")
+            for item in contents:
+                key = item.get("Key") if isinstance(item, dict) else None
+                if not isinstance(key, str) or not key.startswith(prefix) or key in seen:
+                    raise BackupError("S3 object listing is invalid, duplicated, or outside the instance prefix")
+                keys.append(key)
+                seen.add(key)
+                if len(keys) > 10000:
+                    raise BackupError("S3 object listing exceeds the safety limit")
+            if not page["IsTruncated"]:
+                return keys
+            token = page.get("NextContinuationToken")
+            if not isinstance(token, str) or not token or token in tokens:
+                raise BackupError("S3 object listing is incomplete or repeated")
+            tokens.add(token)
+        raise BackupError("S3 object listing exceeds the page safety limit")
+
+    def delete(self, key: str) -> None:
+        self._call("delete-object", "--key", key)
+
+    def _multipart_upload(self, key: str, source: Path) -> None:
+        created = self._call("create-multipart-upload", "--key", key,
+                             "--checksum-algorithm", "SHA256", "--checksum-type", "COMPOSITE")
+        upload_id = created.get("UploadId")
+        if not isinstance(upload_id, str) or not upload_id:
+            raise BackupError("S3 did not identify the multipart upload")
+        try:
+            with tempfile.TemporaryDirectory(prefix=".minecraft-upload-", dir=source.parent) as directory:
+                part_path = Path(directory) / "part"
+                parts = []
+                total = 0
+                with source.open("rb") as handle:
+                    while data := handle.read(PART_BYTES):
+                        total += len(data)
+                        if total > MAX_ARCHIVE_BYTES or len(parts) >= 10000:
+                            raise BackupError("backup upload exceeds the archive size or part limit")
+                        part_path.write_bytes(data)
+                        checksum = base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
+                        number = len(parts) + 1
+                        response = self._call("upload-part", "--key", key, "--upload-id", upload_id,
+                                              "--part-number", str(number), "--body", str(part_path),
+                                              "--checksum-sha256", checksum)
+                        etag = response.get("ETag")
+                        if not isinstance(etag, str) or not etag or response.get("ChecksumSHA256") != checksum:
+                            raise BackupError("S3 did not verify an uploaded archive part")
+                        parts.append({"PartNumber": number, "ETag": etag, "ChecksumSHA256": checksum})
+                if not parts:
+                    raise BackupError("backup upload source changed while reading")
+                manifest = Path(directory) / "parts.json"
+                manifest.write_text(json.dumps({"Parts": parts}), encoding="utf-8")
+                try:
+                    self._call("complete-multipart-upload", "--key", key, "--upload-id", upload_id,
+                               "--multipart-upload", "file://" + str(manifest), "--if-none-match", "*")
+                except _AWSError as error:
+                    if error.code not in ("PreconditionFailed", "412"):
+                        raise
+                    self._call("abort-multipart-upload", "--key", key, "--upload-id", upload_id)
+        except BaseException:
+            try:
+                self._call("abort-multipart-upload", "--key", key, "--upload-id", upload_id)
+            except BackupError:
+                pass
+            raise

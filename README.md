@@ -1,6 +1,6 @@
 # Minecraft
 
-One fresh family survival server for up to six Java and Bedrock players. The repository defines the replaceable host, retained storage, state bootstrap, pinned crossplay runtime, and guarded session commands, with reproducible tools and credential-free checks. Live AWS deployment and demonstrated S3 recovery remain separate deliveries.
+One fresh family survival server for up to six Java and Bedrock players. The repository defines the replaceable host, retained storage, state bootstrap, pinned crossplay runtime, guarded session commands, verified cold backup publication, and isolated restore, with reproducible tools and credential-free checks. Live AWS deployment and demonstrated S3 recovery remain separate deliveries.
 
 Use feature branches and pull requests for changes. Keep credentials, local configuration, and generated server data out of Git.
 
@@ -14,6 +14,7 @@ Report suspected vulnerabilities using the [security policy](SECURITY.md).
 - [State bootstrap and recovery](docs/operations/state-bootstrap.md)
 - [Runtime installation and private configuration](docs/operations/runtime-installation.md)
 - [Instance commands and backup-hook contract](docs/operations/runtime-operations.md)
+- [Backup commands, retention, and isolated recovery](docs/operations/backup-recovery.md)
 - [Pinned content and explicit local runtime validation](docs/operations/runtime-content.md)
 - [Foundation issue #3](https://github.com/CraigDevJohnson/minecraft/issues/3) and [current issues](https://github.com/CraigDevJohnson/minecraft/issues)
 
