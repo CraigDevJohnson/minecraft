@@ -42,18 +42,18 @@ Use one committed JSON manifest containing each tool's version and, for each sup
 
 Implement a Python standard-library installer with `main()`, using `platform.system()/machine()`, `hashlib.sha256`, `urllib.request`, and the appropriate archive reader. Install only the expected regular member, write to a temporary sibling and atomically replace the destination after verification. Do not extract arbitrary archive paths. A failed download/hash/member validation must preserve an existing tool. Re-running setup must work safely; unknown platforms fail clearly.
 
-Tests use fixture bytes and a temporary destination, not live release downloads. Include a successful archive install and rejection of a wrong hash, missing/non-regular member, and download failure without overwriting an existing executable. Representative behavior:
+Expose `install_payload(payload, expected_sha256, archive_kind, member, destination)`, where payload is bytes, the checksum and archive kind are strings, member is a string or None, and destination is a pathlib.Path. Invalid data raises ValueError before changing destination. Tests use fixture bytes and a temporary destination, not live release downloads. Include a successful archive install and rejection of a wrong hash, missing/non-regular member, and download failure without overwriting an existing executable. The wrong-hash test is:
 
 ```python
 with tempfile.TemporaryDirectory() as directory:
     destination = Path(directory) / "tool"
     destination.write_bytes(b"existing executable")
-    # Feed a bad-digest fixture through the installer verification path.
-    # Assert a failure is returned/raised and the bytes stay unchanged.
+    with self.assertRaises(ValueError):
+        install_payload(b"invalid download", "0" * 64, "raw", None, destination)
     self.assertEqual(destination.read_bytes(), b"existing executable")
 ```
 
-Replace the fixture invocation with the actual installer API and ensure the failing-path test would fail if verification or atomic preservation were removed.
+Ensure this test fails if verification or atomic preservation is removed.
 
 - [ ] **Step 2: Install pinned tools and establish the OpenTofu root.**
 
