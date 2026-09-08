@@ -2,6 +2,18 @@
 
 Approved direction: 2026-09-07. The user chose to build the first survival instance and evaluate specific mods/add-ons later. GitHub issues hold implementation acceptance criteria; this document defines the shared design.
 
+## Delivery sequence
+
+| Order | Issue | Dependency |
+| --- | --- | --- |
+| 1 | [Tooling foundation #3](https://github.com/CraigDevJohnson/minecraft/issues/3) | None |
+| 2 | [Infrastructure #4](https://github.com/CraigDevJohnson/minecraft/issues/4) and [runtime #5](https://github.com/CraigDevJohnson/minecraft/issues/5) | #3; runtime tests also need EULA acceptance |
+| 3 | [Backup and restore #6](https://github.com/CraigDevJohnson/minecraft/issues/6) | #4, #5 |
+| 4 | [AWS bootstrap and deployment #7](https://github.com/CraigDevJohnson/minecraft/issues/7) | #4, #5, #6; human authorization |
+| 5 | [Live recovery #8](https://github.com/CraigDevJohnson/minecraft/issues/8) and [family devices #9](https://github.com/CraigDevJohnson/minecraft/issues/9) | #7 |
+
+Both #8 and #9 must pass for the milestone to be complete. Future content selection does not block the initial vanilla-style survival instance.
+
 ## Deliverable
 
 One fresh private survival instance, `survival`, for up to six simultaneous family players. Java clients on macOS/Windows and Bedrock clients on iPad/tablets, PlayStation, Switch, and Windows must be tested as applicable. Reproduce the entire machine and infrastructure, preserve world/player state, and demonstrate backup recovery.

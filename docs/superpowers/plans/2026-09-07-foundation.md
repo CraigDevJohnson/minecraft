@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Deliver the first backlog issue: reproducible local tooling and credential-free infrastructure validation with a precise instance contract.
+**Goal:** Deliver [issue #3](https://github.com/CraigDevJohnson/minecraft/issues/3): reproducible local tooling and credential-free infrastructure validation with a precise instance contract.
 
 **Architecture:** A thin OpenTofu root establishes tool/provider constraints without creating cloud resources. A shared Taskfile invokes pinned tools installed under the checkout and runs the same checks locally and in CI. Documentation defines the private deployment inputs and instance boundary consumed by later infrastructure/runtime work.
 
