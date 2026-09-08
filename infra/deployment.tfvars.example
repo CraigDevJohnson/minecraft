@@ -1,0 +1,15 @@
+# Copy to ignored operator-config/<environment>/deployment.tfvars and replace all
+# examples with reviewed private inputs during issue #7. Never commit real values.
+account_id                = "111122223333"
+operator_role_arn         = "arn:aws:iam::111122223333:role/minecraft-operator"
+environment               = "family"
+resource_prefix           = "minecraft-family"
+region                    = "us-west-2"
+availability_zone         = "us-west-2a"
+ami_id                    = "ami-0123456789abcdef0"
+ami_owner_account_id      = "111122223333"
+backup_bucket_name        = "replace-with-reviewed-unique-private-backup-name"
+data_filesystem_uuid      = "12345678-1234-4234-8234-123456789abc"
+instance_ids              = ["survival"]
+monthly_budget_usd        = 25
+budget_notification_email = "operator@example.invalid"

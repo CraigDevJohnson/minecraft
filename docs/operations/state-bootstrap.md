@@ -1,27 +1,78 @@
-# State bootstrap contract
+# State bootstrap and recovery
 
-The current foundation validates OpenTofu locally without an AWS identity or remote backend. Authenticated bootstrap creation and migration are later operator actions that require a reviewed implementation and Craig's approval.
+`infra/state-bootstrap` owns only the state bucket and its protection settings. `infra` owns the replaceable host, data disk, backup bucket, network, and budget. The two roots use separate state object keys. State storage has no dependency on compute. All commands below are **reviewable operator procedures for issue #7**, requiring Craig's concrete account/bootstrap/plan/apply approval. They are not part of `check`, and have not been executed against AWS.
 
-## Private inputs
+## Private configuration
 
-Before bootstrap work, record these outside Git for the selected AWS target:
+Use an existing authorized operator role and temporary AWS credentials. Both providers restrict the target account and assume the supplied role. Backend authentication must independently assume the same role; provider authentication does not configure the backend. Never place credentials in backend files or tfvars.
 
-- AWS account ID and authorized operator role
-- environment name and region (initially `us-west-2`)
-- globally unique state bucket name and state object key
-- state encryption key identifier
-- locking configuration and recovery contacts
+Copy `infra/state-bootstrap/deployment.tfvars.example` and `infra/backend.hcl.example` into a private directory outside Git. Supply the real account, operator role, environment, region, unique state bucket, and two distinct keys. Use the default OpenTofu workspace; environment isolation comes from explicit private backend coordinates. The state bucket must differ from the backup bucket. Keep inputs, initialized working copies, plan text/binaries, outputs, and state private, with directory mode 700 and file mode 600.
 
-Do not place account IDs, role identifiers, bucket names, credentials, state, or generated plans in tracked files. Safe example files may document field names with non-live values.
+State encryption uses S3-managed AES256 keys (SSE-S3); there is no customer-managed KMS key or associated key-lifecycle dependency. Record this choice in the private inventory. Versioning has no age expiration. Public access is blocked, ACLs are disabled, TLS is required, and a bucket policy denies every principal except the operator role. Current and historical state objects cannot be deleted through the ordinary policy. State locking uses OpenTofu's native S3 lock objects, one beside each state key.
 
-## Reviewed creation and migration
+`operator_backend_policy` is a reviewable, sensitive policy output for the existing operator role: list this bucket, read/write exactly the two state objects, and read/write/delete their `.tflock` objects. It is not attached automatically. #7 must review the role's effective permissions, including the separate permissions needed to provision resources and to assume the role. Host credentials have no state access. Recovery-specific `GetObjectVersion` and `ListBucketVersions` permissions require a separate operator grant when needed.
 
-The infrastructure issue must define a small, separately reviewable bootstrap configuration for a private bucket with encryption, versioning, public-access blocking, least-privilege access, and state locking. Review its concrete plan before creating anything. Record the resulting resource identifiers in private operator configuration.
+## Create, protect, and migrate
 
-After the backend exists, initialize an isolated working copy against the reviewed target, migrate the bootstrap state into the versioned and locked backend, and verify that the remote state can be read under the intended operator role. Preserve a protected encrypted recovery copy until the remote state and locking behavior have been verified. None of those authenticated creation or migration commands is implemented by this foundation.
+Run repository checks first. In #7, verify the selected identity and role, region, unique names, and the concrete saved creation plan before apply. Use a private bootstrap working copy, leaving the repository configuration unchanged. In this example, `private_dir` is an operator-selected absolute directory on encrypted storage and `repo_dir` is the checked-out repository root:
 
-## Bootstrap-state recovery
+```sh
+umask 077
+repo_dir="$PWD"
+private_dir="/absolute/private/minecraft/example"
+mkdir -p "$private_dir"
+cp -R infra/state-bootstrap "$private_dir/bootstrap"
+# Fill $private_dir/bootstrap.tfvars from the safe example before planning.
+"$repo_dir/.tools/bin/tofu" -chdir="$private_dir/bootstrap" init -input=false -lockfile=readonly
+"$repo_dir/.tools/bin/tofu" -chdir="$private_dir/bootstrap" plan \
+  -var-file="$private_dir/bootstrap.tfvars" -out="$private_dir/state-create.tfplan"
+"$repo_dir/.tools/bin/tofu" -chdir="$private_dir/bootstrap" show -no-color \
+  "$private_dir/state-create.tfplan" > "$private_dir/state-create.txt"
+```
 
-Keep the bucket's version history and the protected recovery copy independent of a workstation. Recovery starts in an isolated directory: restore the last known-good bootstrap state or import the existing bootstrap resources, compare their real encryption, versioning, access, and locking settings with the reviewed configuration, and only then reconnect or migrate to the backend. Never overwrite the active state object while another operation may hold the lock.
+After Craig approves that exact plan, the authorized operator can apply it:
 
-Repository validation remains the first check after a recovery, but it does not prove AWS access, backend health, resource creation, or recoverability. Those claims require authenticated operator checks in the later infrastructure and recovery issues.
+```sh
+"$repo_dir/.tools/bin/tofu" -chdir="$private_dir/bootstrap" apply "$private_dir/state-create.tfplan"
+"$repo_dir/.tools/bin/tofu" -chdir="$private_dir/bootstrap" output -json backend_configs \
+  > "$private_dir/backend-configs.json"
+"$repo_dir/.tools/bin/tofu" -chdir="$private_dir/bootstrap" output -raw operator_backend_policy \
+  > "$private_dir/operator-backend-policy.json"
+```
+
+Before migration, create a protected recovery copy of the local `bootstrap/terraform.tfstate`. Use an independently retained encryption identity, for example the operator's reviewed `age` installation and recovery recipient:
+
+```sh
+age -r "$recovery_recipient" -o "$private_dir/bootstrap-recovery.tfstate.age" \
+  "$private_dir/bootstrap/terraform.tfstate"
+```
+
+Store the encrypted copy in a protected recovery location independent of this workstation and state bucket, with restricted access and the decryption identity held separately. Verify that a designated operator can decrypt it into a separate protected scratch directory and compare its bytes to the source before relying on it. Keep original plaintext state and migration backups confined to encrypted private storage. Do not print state, copy it into an issue, or upload it as a CI artifact.
+
+Prepare private `bootstrap.backend.hcl` and `infrastructure.backend.hcl` from the backend example and the corresponding `backend_configs` values. They must use the same reviewed bucket/role/account/region, distinct keys, `encrypt = true`, and `use_lockfile = true`. After verifying the intended operator role's backend permissions:
+
+```sh
+cp "$repo_dir/infra/state-bootstrap/remote-backend.tf.example" "$private_dir/bootstrap/backend.tf"
+"$repo_dir/.tools/bin/tofu" -chdir="$private_dir/bootstrap" init -migrate-state \
+  -backend-config="$private_dir/bootstrap.backend.hcl"
+"$repo_dir/.tools/bin/tofu" -chdir="$private_dir/bootstrap" state pull \
+  > "$private_dir/bootstrap-remote.tfstate"
+"$repo_dir/.tools/bin/tofu" -chdir="$private_dir/bootstrap" plan \
+  -var-file="$private_dir/bootstrap.tfvars" -out="$private_dir/bootstrap-verify.tfplan"
+```
+
+Inspect the remote state lineage, serial, and all resource addresses/IDs against the protected pre-migration copy, and require a no-change verification plan. Confirm encryption, versioning, public blocking, bucket policy, and lock creation/release through authenticated AWS inspection. Test contention using overlapping read-only plans from two isolated initialized operator copies pointing to the same backend key. Start the first plan, then run the second with `-lock-timeout=0s` while the first holds its lock; retain the second plan's lock-acquisition failure and verify a later plan succeeds after the first finishes. If both plans finish without contention, the overlap was insufficient: repeat the check, including against the host configuration after deployment if necessary. Do not report contention as proven until it is observed. Do not apply merely to test locking. Never use `-lock=false` or force-unlock an active operation.
+
+Retain and refresh the independent encrypted recovery copy after verified state changes. Creation may partially succeed before a later resource fails; preserve that local state, inspect the created resources, and re-plan. Do not blindly create another bucket or discard partial state.
+
+## Recovery
+
+Quiesce operators and confirm there is no active writer/lock. Record the actual bucket/key, last good object version, state lineage/serial, and incident before changing anything. A forgotten active lock is not permission to overwrite state.
+
+In a new private directory, restore and decrypt the independent recovery copy or retrieve the selected known-good S3 object version using explicitly authorized recovery permissions. If the state bucket is available, preserve the current state first, compare the candidate state with actual resources, and review a refresh-only plan. Reconnect the isolated bootstrap copy to the same backend only after verifying its settings. Prefer a reviewed state push with normal lineage/serial safeguards; do not use `-force` to bypass an unresolved mismatch. Recovery makes a new current version while retaining the old history.
+
+If state has been lost but resources remain, use local state in the isolated bootstrap copy and import the existing resources at their declared addresses. The bucket name is the import ID for `aws_s3_bucket.state`, `aws_s3_bucket_versioning.state`, `aws_s3_bucket_server_side_encryption_configuration.state`, `aws_s3_bucket_public_access_block.state`, `aws_s3_bucket_ownership_controls.state`, and `aws_s3_bucket_policy.state`. Review each import and a no-change plan before repeating the protected-copy/migration procedure. If the bucket itself is lost, restore its protected configuration and states from the independent recovery copies under a separately reviewed creation/recovery plan.
+
+`prevent_destroy` protects the state bucket and each protection resource in normal plans; the bucket refuses forced emptying. These are trusted-operator guardrails, not protection against someone deliberately removing the configuration or policy. Deleting state, disabling protection, changing ownership, or emptying/removing either retained bucket requires the separate destructive workflow in [infrastructure operations](infrastructure.md). Offline checks do not prove deployed access, locking, migration, or recovery.
+
+References: [OpenTofu S3 backend and locking](https://opentofu.org/docs/language/settings/backends/s3/), [AWS role restrictions using PrincipalArn](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_notprincipal.html).

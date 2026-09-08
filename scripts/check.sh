@@ -12,50 +12,25 @@ require_tool() {
 	fi
 }
 
-validate_infra() (
-	local tofu_data_dir
-	tofu_data_dir="$(mktemp -d "${TMPDIR:-/tmp}/minecraft-tofu.XXXXXX")"
-	trap 'rm -rf -- "$tofu_data_dir"' EXIT
-	: >"$tofu_data_dir/validation.tfrc"
-
-	local -a tofu_env=(
-		env
-		-u AWS_ACCESS_KEY_ID
-		-u AWS_SECRET_ACCESS_KEY
-		-u AWS_SESSION_TOKEN
-		-u AWS_SECURITY_TOKEN
-		-u AWS_PROFILE
-		-u AWS_DEFAULT_PROFILE
-		-u AWS_ROLE_ARN
-		-u AWS_WEB_IDENTITY_TOKEN_FILE
-		-u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
-		-u AWS_CONTAINER_CREDENTIALS_FULL_URI
-		-u TOFU_CONFIG_FILE
-		-u TF_PLUGIN_CACHE_DIR
-		TF_CLI_CONFIG_FILE="$tofu_data_dir/validation.tfrc"
-		AWS_EC2_METADATA_DISABLED=true
-		AWS_CONFIG_FILE="$tofu_data_dir/nonexistent-aws-config"
-		AWS_SHARED_CREDENTIALS_FILE="$tofu_data_dir/nonexistent-aws-credentials"
-		TF_DATA_DIR="$tofu_data_dir"
-	)
-
-	"${tofu_env[@]}" "$tools_dir/tofu" -chdir="$root_dir/infra" init \
-		-backend=false -input=false -lockfile=readonly
-
-	"${tofu_env[@]}" "$tools_dir/tofu" -chdir="$root_dir/infra" validate -no-color
-)
+validate_infra() {
+	python3 "$root_dir/scripts/validate_infra.py"
+}
 
 require_tool tofu
+python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11 or newer is required"'
 
 case "$mode" in
 check)
 	require_tool shellcheck
 	require_tool shfmt
-	bash -n "$root_dir"/scripts/*.sh
-	"$tools_dir/shellcheck" "$root_dir"/scripts/*.sh
-	"$tools_dir/shfmt" -d "$root_dir"/scripts/*.sh
+	for script in "$root_dir"/scripts/*.sh "$root_dir"/scripts/*.sh.tftpl; do
+		[[ -f "$script" ]] || continue
+		bash -n "$script"
+		"$tools_dir/shellcheck" "$script"
+		"$tools_dir/shfmt" -d "$script"
+	done
 	"$tools_dir/tofu" -chdir="$root_dir/infra" fmt -check -diff -recursive
-	python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11 or newer is required"'
+	python3 -m compileall -q "$root_dir/scripts" "$root_dir/tests"
 	python3 -m unittest discover -s "$root_dir/tests" -p 'test_*.py'
 	validate_infra
 	;;
