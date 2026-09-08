@@ -19,7 +19,7 @@ Stop warns players, requires `save-all flush` confirmation, sends `stop`, and wa
 
 Commands and installation share a bounded Linux lock, serializing the small configured host through cold backup and allowlist changes. Competing commands fail after ten seconds and can be retried. Compose is the only runtime owner.
 
-The retained disk stores `instances/<id>/operation.json` beside mutable `data/` and generated `runtime/`. It records the session identity, manifest digest, clean-stop progress and backup outcome using atomic writes and filesystem synchronization. Container UID/GID 1000 owns data; root owns adjacent control files. Generated Compose is private because it contains RCON credentials and EULA acceptance. Never edit operation metadata or invoke Compose directly to bypass a failed state.
+The retained disk stores `instances/<id>/operation.json` beside mutable `data/` and generated `runtime/`. It records startup intent before preparation creates data, then tracks the session identity, manifest digest, clean-stop progress and backup outcome using atomic writes and filesystem synchronization. Container UID/GID 1000 owns data; root owns adjacent control files. Generated Compose is private because it contains RCON credentials and EULA acceptance. Never edit operation metadata or invoke Compose directly to bypass a failed state.
 
 | Situation | Outcome |
 | --- | --- |
@@ -27,6 +27,8 @@ The retained disk stores `instances/<id>/operation.json` beside mutable `data/` 
 | Save or clean shutdown fails | No backup success is claimed; investigate and retry stop. |
 | Clean stop succeeds but backup fails | Pending session persists. Fix/install the hook and retry stop without restarting or resaving the world. |
 | Completed stop is repeated | Reports stopped/complete without another backup. |
+| First preparation fails after creating data but before a container executes | The durable intent reconciles to prepared/not-required, allowing a fresh controller process to retry preparation. |
+| A container runs with a stopped/prepared journal or a completed backup | Start/status/stop refuse the untracked execution and preserve the earlier journal for investigation. A legitimate shutdown timeout remains pending and can retry stop. |
 | Compose fails before another container execution starts | The journal retains the prior container execution and session. Inspection can restore the completed backup state and permit retry when that execution is unchanged; a new failed execution still requires investigation. |
 | Start follows a pending session backup | Refused until stop/backup succeeds. |
 | Existing data has no operation record, or Minecraft exited unexpectedly | Ordinary operation refuses to adopt data or certify a crash as a clean save. Investigate and follow the reviewed recovery procedure. |
@@ -38,6 +40,8 @@ The [operator host commands](host-commands.md) control EC2 separately. Instance 
 ## Required backup hook for #6
 
 Private `backup_hook` is an argument array starting with an absolute executable, such as `["/usr/local/sbin/minecraft-backup"]`. The example leaves it `null`; no successful no-op hook is installed. The hook runs on the host with existing instance-role S3 access. The container gains neither AWS credentials nor EC2 permissions.
+
+Immediately before invocation, the runtime checks the executable and every ancestor directory without following symlinks. Each must be owned by the effective operator (root on the production host) and have no group or other write permission; the executable must be a regular file executable by its owner. Symlinks, parent traversal, missing paths, and untrusted ownership or permissions block the backup. Install the reviewed hook under a trusted path such as `/usr/local/sbin`, outside the UID-1000-owned instance data tree. The remaining argument array is explicitly authorized by the private operator configuration: this executable check does not certify arbitrary interpreter arguments, script files, or programs the hook invokes. Those dependencies must also be reviewed and protected when deploying the hook.
 
 One request is supplied on standard input:
 

@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import minecraft_instance
@@ -170,6 +171,79 @@ class InstanceTests(unittest.TestCase):
         self.machine.launch = launch
         self.assertTrue(self.manager.execute("start", "survival")["ready"])
         self.assertEqual(self.machine.events.count("backup"), 1)
+
+    def test_first_preparation_failure_after_data_creation_can_retry(self):
+        prepare = self.machine.prepare
+        def interrupt_preparation(instance):
+            (self.root / "instances" / instance / "data").mkdir(parents=True)
+            raise minecraft_instance.OperationError("preparation interrupted after data creation")
+        self.machine.prepare = interrupt_preparation
+        with self.assertRaisesRegex(minecraft_instance.OperationError, "preparation interrupted"):
+            self.manager.execute("start", "survival")
+        self.assertIsNotNone(self.manager.state("survival"))
+        self.assertNotIn("launch", self.machine.events)
+        self.assertEqual(self.manager.execute("status", "survival")["backup"], "not-required")
+        self.machine.prepare = prepare
+        self.manager = minecraft_instance.Manager(self.root, self.machine, ["survival"])
+        self.assertTrue(self.manager.execute("start", "survival")["ready"])
+        self.assertEqual(self.machine.starts, 1)
+
+    def test_failed_intent_write_never_reaches_preparation(self):
+        with mock.patch.object(minecraft_instance, "write_json", side_effect=OSError("journal unavailable")):
+            with self.assertRaises(OSError):
+                self.manager.execute("start", "survival")
+        self.assertEqual(self.machine.events, [])
+
+    def test_failed_update_preparation_preserves_previous_recovery_point(self):
+        self.machine.backup_works = True
+        self.manager.execute("start", "survival")
+        self.manager.execute("stop", "survival")
+        completed = self.manager.state("survival")
+        self.machine.revision = "b" * 64
+        prepare = self.machine.prepare
+        with mock.patch.object(self.machine, "prepare", side_effect=OSError("interrupted preparation")):
+            with self.assertRaises(OSError):
+                self.manager.execute("update", "survival")
+        self.manager = minecraft_instance.Manager(self.root, self.machine, ["survival"])
+        self.assertEqual(self.manager.execute("status", "survival")["backup"], "complete")
+        self.assertEqual(self.manager.state("survival"), completed)
+        self.machine.prepare = prepare
+        self.assertTrue(self.manager.execute("update", "survival")["ready"])
+        self.assertEqual(self.machine.events.count("backup"), 1)
+
+    def test_running_container_cannot_reuse_a_completed_or_prepared_session(self):
+        self.machine.backup_works = True
+        self.manager.execute("start", "survival")
+        self.manager.execute("stop", "survival")
+        completed = self.manager.state("survival")
+        self.machine.running = True
+        before_events = self.machine.events.copy()
+        for phase, backup in (("stopped", "complete"), ("prepared", "not-required"),
+                              ("running", "complete"), ("stopped", "pending")):
+            state = {**completed, "phase": phase, "backup": backup}
+            minecraft_instance.write_json(self.manager.state_path("survival"), state)
+            for action in ("start", "status", "stop"):
+                with self.subTest(phase=phase, backup=backup, action=action):
+                    with self.assertRaisesRegex(minecraft_instance.OperationError, "untracked container execution"):
+                        self.manager.execute(action, "survival")
+                    self.assertEqual(self.manager.state("survival"), state)
+                    self.assertEqual(self.machine.events, before_events)
+
+    def test_tracked_readiness_and_shutdown_failures_remain_retryable(self):
+        self.machine.ready = False
+        with self.assertRaisesRegex(minecraft_instance.OperationError, "readiness"):
+            self.manager.execute("start", "survival")
+        session = self.manager.state("survival")["session"]
+        self.machine.ready = True
+        self.assertTrue(self.manager.execute("start", "survival")["ready"])
+        self.assertEqual(self.manager.state("survival")["session"], session)
+        self.machine.stop_works = False
+        with self.assertRaisesRegex(minecraft_instance.OperationError, "shutdown"):
+            self.manager.execute("stop", "survival")
+        self.assertEqual(self.manager.execute("status", "survival")["backup"], "pending")
+        self.machine.stop_works = self.machine.backup_works = True
+        self.assertEqual(self.manager.execute("stop", "survival")["backup"], "complete")
+        self.assertEqual(self.manager.state("survival")["session"], session)
 
     def test_failed_new_execution_is_not_mistaken_for_safe_prelaunch_failure(self):
         self.machine.backup_works = True

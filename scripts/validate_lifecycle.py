@@ -67,6 +67,13 @@ class LocalMachine(runtime.LinuxMachine):
         for instance in self.definitions:
             self.inspect(instance)
 
+    def verify_backup_hook(self, hook):
+        # Local macOS paths cannot establish Linux root-owned executable ancestry.
+        expected = [str(Path(sys.executable).resolve()), str(self.root.parent / "fixture-backup.py"),
+                    str(self.root.parent / "fixture-backup-requests")]
+        if hook != expected or runtime.private_text(hook[1]) != HOOK:
+            raise runtime.OperationError("only the exact local fixture backup hook is permitted")
+
 
 def validate(operator_config: Path, output: Path) -> dict:
     private = runtime.private_json(operator_config)
@@ -106,7 +113,7 @@ def validate(operator_config: Path, output: Path) -> dict:
     report = {"status": "incomplete", "platform": platform, "instance": instance,
               "manifest_sha256": content.manifest_digest(manifest),
               "real_boundaries": ["Manager state transitions and persisted operation records", "LinuxMachine prepare, Docker Compose, readiness and RCON", "backup subprocess request and receipt validation", "bounded file flock"],
-              "simulated_boundaries": ["Linux root privilege and retained EBS/service checks", "host chown (Docker still assigns container data ownership)", "boot identity", "inventory limited to the configured test project", "fixture backup receipt, without S3 or a recovery copy"],
+              "simulated_boundaries": ["Linux root privilege and retained EBS/service checks", "host chown (Docker still assigns container data ownership)", "boot identity", "inventory limited to the configured test project", "root-owned backup executable ancestry (only the exact local fixture hook is permitted)", "fixture backup receipt, without S3 or a recovery copy"],
               "network_override": "The real renderer receives bind_address=127.0.0.1 for local game ports."}
 
     def require(condition, message):
@@ -125,6 +132,17 @@ def validate(operator_config: Path, output: Path) -> dict:
     with mock.patch.object(runtime.os, "chown", return_value=None), mock.patch.object(
             content, "render_compose", side_effect=lambda *args, **kwargs: render(*args, **kwargs, bind_address="127.0.0.1")):
         try:
+            prepare = machine.prepare
+            def interrupted_preparation(configured):
+                prepare(configured)
+                raise runtime.OperationError("fixture interruption after preparation")
+            with mock.patch.object(machine, "prepare", side_effect=interrupted_preparation):
+                expect_error("start", "fixture interruption after preparation")
+            require((local_root / "instances" / instance / "data").is_dir(), "preparation fixture did not create real data")
+            require(manager.state(instance)["phase"] == "starting" and not machine.inspect(instance)["exists"],
+                    "preparation interruption lost intent or executed a container")
+            manager = runtime.Manager(local_root, machine, [instance])
+            require(manager.execute("status", instance)["backup"] == "not-required", "unexecuted preparation could not reconcile")
             require(manager.execute("start", instance)["ready"], "initial start did not become ready")
             first_state = manager.state(instance)
             first_container = machine.inspect(instance)["container_id"]
@@ -171,6 +189,7 @@ def validate(operator_config: Path, output: Path) -> dict:
             require(drained["draining"] and drained["instances"][instance] == {"instance": instance, "application": "stopped", "backup": "complete"}, "running host drain did not stop and back up its instance")
             require(len(list(receipts.glob("*.json"))) == 2, "both distinct sessions did not receive completion evidence")
             report.update(status="passed", healthy_starts=2, clean_stops=2, backup_receipts=2,
+                          interrupted_first_preparation_retry_succeeded=True,
                           duplicate_start_preserved_session=True, missing_hook_persisted_failure=True,
                           backup_retry_preserved_session=True, duplicate_stop_reused_receipt=True,
                           same_boot_start_blocked=True, next_boot_start_allowed=True,

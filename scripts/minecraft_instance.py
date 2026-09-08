@@ -82,7 +82,10 @@ class Manager:
             return None
         return {"container_id": container["container_id"], "started_at": container["started_at"]}
 
-    def reconcile_start(self, instance, state, container):
+    def reconcile_session(self, instance, state, container):
+        if container["running"] and (not state or state["phase"] not in ("starting", "running", "stopping")
+                                     or state["backup"] != "pending"):
+            raise OperationError("untracked container execution; preserve the prior session and investigate before operating")
         if state and state["phase"] == "starting" and not container["running"]:
             unchanged = self.execution(container) == state.get("previous_execution")
             never_started = container["exists"] and container.get("started_at", "").startswith("0001-01-01")
@@ -95,7 +98,7 @@ class Manager:
     def status(self, instance):
         state = self.state(instance)
         container = self.machine.inspect(instance)
-        state = self.reconcile_start(instance, state, container)
+        state = self.reconcile_session(instance, state, container)
         return {
             "instance": instance,
             "application": "running" if container["running"] else "stopped",
@@ -109,7 +112,7 @@ class Manager:
         state = self.state(instance)
         revision = self.machine.desired_revision(instance)
         container = self.machine.inspect(instance)
-        state = self.reconcile_start(instance, state, container)
+        state = self.reconcile_session(instance, state, container)
         if not state and (container["exists"] or (self.root / "instances" / instance / "data").exists()):
             raise OperationError("untracked instance data; investigate or restore before operating")
         if state and state["revision"] != revision and not updating:
@@ -119,10 +122,10 @@ class Manager:
         if not container["running"]:
             if state and (state["phase"] == "running" or (state["phase"] == "starting" and container["exists"])):
                 raise OperationError("instance stopped unexpectedly; clean shutdown is not proven")
-            self.machine.prepare(instance)
             state = {"phase": "starting", "backup": "pending", "revision": revision, "session": str(uuid.uuid4()),
                      "previous_execution": self.execution(container), "previous_state": state}
             write_json(self.state_path(instance), state)
+            self.machine.prepare(instance)
             self.machine.verify_storage()
             self.machine.launch(instance)
         self.machine.wait_ready(instance)
@@ -135,7 +138,7 @@ class Manager:
     def stop(self, instance):
         state = self.state(instance)
         container = self.machine.inspect(instance)
-        state = self.reconcile_start(instance, state, container)
+        state = self.reconcile_session(instance, state, container)
         if not state:
             if container["exists"] or (self.root / "instances" / instance / "data").exists():
                 raise OperationError("untracked instance data; investigate or restore before operating")
@@ -285,6 +288,26 @@ def verify_retained_paths(root: Path) -> None:
             raise OperationError("instance control/data path is outside the retained filesystem")
 
 
+def verify_trusted_executable(executable: str) -> None:
+    path = Path(executable)
+    if not path.is_absolute() or ".." in path.parts:
+        raise OperationError("backup executable requires an absolute path without parent traversal")
+    for component in (*reversed(path.parents), path):
+        try:
+            metadata = os.lstat(component)
+        except OSError as error:
+            raise OperationError("cannot inspect backup executable path") from error
+        if stat.S_ISLNK(metadata.st_mode):
+            raise OperationError("backup executable path must not contain symlinks")
+        if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022:
+            raise OperationError("backup executable and ancestors must be operator-owned without other-account write access")
+        if component == path:
+            if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode & stat.S_IXUSR:
+                raise OperationError("backup executable must be a regular file executable by its owner")
+        elif not stat.S_ISDIR(metadata.st_mode):
+            raise OperationError("backup executable ancestors must be directories")
+
+
 class LinuxMachine:
     """The real Linux/storage, Docker, RCON, and backup-hook boundary."""
 
@@ -431,6 +454,9 @@ class LinuxMachine:
             time.sleep(1)
         raise OperationError("Minecraft shutdown timed out; no force kill or backup was attempted")
 
+    def verify_backup_hook(self, hook):
+        verify_trusted_executable(hook[0])
+
     def backup(self, instance, state):
         hook = self.config.get("backup_hook")
         if (not isinstance(hook, list) or not hook or not all(isinstance(arg, str) and arg for arg in hook)
@@ -445,6 +471,7 @@ class LinuxMachine:
                    "manifest_path": str(manifest_path), "manifest_sha256": state["revision"],
                    "definition_path": str(self.runtime(instance) / "definition.json"),
                    "destination": {"bucket": self.deployment["backup_bucket_name"], "prefix": f"instances/{instance}/"}}
+        self.verify_backup_hook(hook)
         return json.loads(command(hook, timeout=self.backup_timeout, input_text=json.dumps(request) + "\n"))
 
 
