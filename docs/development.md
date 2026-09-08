@@ -18,9 +18,11 @@ Use the project-local Task binary for all repository commands:
 .tools/bin/task infra:validate
 ```
 
-`check` runs Bash syntax checks, ShellCheck, shfmt verification, OpenTofu formatting verification, Python unit tests, and backend-free OpenTofu initialization and validation. `fmt` updates shell and OpenTofu formatting. `infra:validate` runs only the isolated OpenTofu initialization and validation path.
+`check` runs Bash syntax checks, ShellCheck, shfmt verification (including the host template), OpenTofu formatting, Python syntax/behavioral checks, and backend-free OpenTofu validation and mocked plan assertions for both `infra` and `infra/state-bootstrap`. `fmt` updates shell/template and OpenTofu formatting. `infra:validate` runs only the isolated OpenTofu validation and assertion path. Python is not statically typechecked; OpenTofu validation checks its configuration types and provider schemas.
 
-OpenTofu uses a temporary `TF_DATA_DIR` for validation. Both initialization and validation explicitly use an empty temporary CLI configuration, so per-user settings such as provider development overrides and credentials helpers do not affect these checks. The check removes inherited AWS credentials, disables instance metadata access, and points AWS configuration paths at nonexistent files. It cannot alter an operator's initialized backend or use an AWS identity, although it downloads the locked public provider.
+OpenTofu runs against a temporary copy of source, with temporary home, data and provider cache directories and an empty CLI configuration. The clean environment discards inherited AWS credentials, OpenTofu variables/arguments and debug settings. AWS configuration paths point to nonexistent files and metadata access is disabled. Local auto-tfvars, overrides, state and initialized backend metadata are not copied. The regression test runs both roots with poisoned private files and CLI arguments and verifies that they remain unchanged. Public pinned provider downloads still require network access.
+
+The approved test seams are infrastructure plan/policy assertions and the storage command's Linux boundary. Mocked plans cover configured resource behavior; source-policy checks cover retention/ownership declarations. Storage behavior tests use an in-memory OS boundary and never access host disks. See [infrastructure operations](operations/infrastructure.md) for the live evidence still required.
 
 ## Shared instance contract
 
@@ -28,4 +30,4 @@ The first server instance is `survival`. Instance IDs begin with a lowercase let
 
 Desired instance configuration and the content manifest stay separate from mutable data. Instance configuration supplies ports, memory, runtime/content revision, manifest, and data paths. Private deployment output supplies the AWS account and region, resource IDs, Elastic IP, data-volume and filesystem identities, and bucket names. Store that output under the ignored `operator-config/<environment>/` directory. AWS resource names and tags identify the project, environment, and purpose, adding the stable instance ID only for instance-scoped resources; an EC2 host ID never becomes an instance ID.
 
-Instance start, stop, status, backup, restore, and update operations always take an explicit instance ID. Host lifecycle is separate. Runtime implementation and AWS resource creation belong to later issues; the [server operations design](superpowers/specs/2026-09-07-server-operations-design.md) is authoritative.
+Instance start, stop, status, backup, restore, and update operations always take an explicit instance ID. Host lifecycle is separate. Runtime implementation and authenticated AWS plan/apply belong to later issues; the [server operations design](superpowers/specs/2026-09-07-server-operations-design.md) is authoritative.

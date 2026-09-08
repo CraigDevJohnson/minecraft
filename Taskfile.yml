@@ -8,9 +8,9 @@ tasks:
   fmt:
     desc: Format shell and OpenTofu source files
     cmds:
-      - ./.tools/bin/shfmt -w scripts/*.sh
+      - ./.tools/bin/shfmt -w scripts/*.sh scripts/*.sh.tftpl
       - ./.tools/bin/tofu -chdir=infra fmt -recursive
 
   infra:validate:
-    desc: Initialize and validate OpenTofu without a backend or AWS credentials
+    desc: Validate and test both OpenTofu roots without a backend or AWS credentials
     cmd: ./scripts/check.sh infra:validate

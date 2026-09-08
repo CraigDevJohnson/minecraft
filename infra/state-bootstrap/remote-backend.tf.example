@@ -1,0 +1,7 @@
+# Copy to backend.tf in the PRIVATE bootstrap working copy only after creation.
+terraform {
+  backend "s3" {
+    encrypt      = true
+    use_lockfile = true
+  }
+}

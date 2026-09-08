@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+trap 'printf "host bootstrap failed; Minecraft storage/runtime remain gated. Inspect cloud-init and minecraft-storage.service logs.\n" >&2' ERR
+
+[[ "$(id -u)" == 0 ]]
+# shellcheck source=/dev/null
+source /etc/os-release
+[[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 && "$(uname -m)" == aarch64 ]]
+command -v python3 >/dev/null
+command -v timeout >/dev/null
+
+# Package maintenance is safe only before runtime installation or with every instance stopped.
+if timeout --kill-after=10s 30s systemctl is-active --quiet docker.service; then
+	running_containers="$(timeout --kill-after=10s 30s docker ps --quiet)"
+	if [[ -n "$running_containers" ]]; then
+		printf 'Refusing host bootstrap while containers are running; complete the approved instance stop/backup workflow first.\n' >&2
+		exit 1
+	fi
+fi
+if ! timeout --kill-after=10s 30s systemctl is-active --quiet amazon-ssm-agent.service &&
+	! timeout --kill-after=10s 30s systemctl is-active --quiet snap.amazon-ssm-agent.amazon-ssm-agent.service; then
+	printf 'The reviewed AMI must provide a running SSM agent.\n' >&2
+	exit 1
+fi
+
+install -d -m 0755 /usr/local/sbin /etc/minecraft /etc/systemd/system/docker.service.d
+base64 --decode >/usr/local/sbin/minecraft-storage <<'STORAGE_SCRIPT'
+${storage_script_base64}
+STORAGE_SCRIPT
+chmod 0755 /usr/local/sbin/minecraft-storage
+cat >/etc/minecraft/storage.conf <<'STORAGE_CONFIG'
+DATA_VOLUME_ID=${data_volume_id}
+DATA_FILESYSTEM_UUID=${data_filesystem_uuid}
+STORAGE_CONFIG
+chmod 0600 /etc/minecraft/storage.conf
+cat >/etc/systemd/system/minecraft-storage.service <<'STORAGE_UNIT'
+[Unit]
+Description=Verify and mount the retained Minecraft EBS filesystem
+After=local-fs.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/minecraft/storage.conf
+ExecStart=/usr/local/sbin/minecraft-storage mount --volume-id $DATA_VOLUME_ID --filesystem-uuid $DATA_FILESYSTEM_UUID
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
+STORAGE_UNIT
+cat >/etc/systemd/system/docker.service.d/10-minecraft-storage.conf <<'DOCKER_GATE'
+[Unit]
+Requires=minecraft-storage.service
+After=minecraft-storage.service
+
+[Service]
+EnvironmentFile=/etc/minecraft/storage.conf
+ExecStartPre=/usr/local/sbin/minecraft-storage verify --volume-id $DATA_VOLUME_ID --filesystem-uuid $DATA_FILESYSTEM_UUID
+DOCKER_GATE
+
+# Prevent distribution package scripts from starting Docker before its storage gate exists.
+timeout --kill-after=10s 30s systemctl mask docker.service docker.socket
+timeout --kill-after=10s 30s systemctl daemon-reload
+export DEBIAN_FRONTEND=noninteractive
+timeout --kill-after=10s 300s apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 update
+timeout --kill-after=10s 600s apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 install --yes --no-install-recommends docker.io docker-compose-v2 util-linux e2fsprogs diffutils
+
+# Active oneshot units are cached by systemd; validate storage on every bootstrap run.
+# shellcheck source=/dev/null
+source /etc/minecraft/storage.conf
+
+timeout --kill-after=10s 30s systemctl unmask docker.service docker.socket
+timeout --kill-after=10s 30s systemctl daemon-reload
+timeout --kill-after=10s 30s systemctl enable minecraft-storage.service docker.service
+timeout --kill-after=10s 120s /usr/local/sbin/minecraft-storage mount --volume-id "$DATA_VOLUME_ID" --filesystem-uuid "$DATA_FILESYSTEM_UUID"
+timeout --kill-after=10s 120s systemctl start minecraft-storage.service
+timeout --kill-after=10s 120s systemctl start docker.service
+timeout --kill-after=10s 30s docker compose version
+timeout --kill-after=10s 120s /usr/local/sbin/minecraft-storage verify --volume-id "$DATA_VOLUME_ID" --filesystem-uuid "$DATA_FILESYSTEM_UUID"
+printf 'Host prerequisites and retained storage are ready; instance runtime is configured separately.\n'
