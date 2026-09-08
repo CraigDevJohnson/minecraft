@@ -1,6 +1,6 @@
 # Minecraft
 
-Foundation for one fresh family survival server for up to six Java and Bedrock players. The repository defines the replaceable host, retained storage, state bootstrap, and safe mount prerequisites, with reproducible tools and credential-free checks. The game runtime and live AWS deployment are separate deliveries.
+One fresh family survival server for up to six Java and Bedrock players. The repository defines the replaceable host, retained storage, state bootstrap, pinned crossplay runtime, and guarded session commands, with reproducible tools and credential-free checks. Live AWS deployment and demonstrated S3 recovery remain separate deliveries.
 
 Use feature branches and pull requests for changes. Keep credentials, local configuration, and generated server data out of Git.
 
@@ -12,6 +12,9 @@ Report suspected vulnerabilities using the [security policy](SECURITY.md).
 - [Server operations design](docs/superpowers/specs/2026-09-07-server-operations-design.md)
 - [Infrastructure ownership, setup, costs, and handoff](docs/operations/infrastructure.md)
 - [State bootstrap and recovery](docs/operations/state-bootstrap.md)
+- [Runtime installation and private configuration](docs/operations/runtime-installation.md)
+- [Instance commands and backup-hook contract](docs/operations/runtime-operations.md)
+- [Pinned content and explicit local runtime validation](docs/operations/runtime-content.md)
 - [Foundation issue #3](https://github.com/CraigDevJohnson/minecraft/issues/3) and [current issues](https://github.com/CraigDevJohnson/minecraft/issues)
 
 Python 3.11 or newer is the only host-language prerequisite. Install the pinned tools and run the shared gate from the repository root:

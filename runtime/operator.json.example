@@ -1,0 +1,13 @@
+{
+  "deployment": "/etc/minecraft/deployment.json",
+  "definitions": {
+    "survival": "/opt/minecraft/runtime/survival.json"
+  },
+  "eula_accepted": false,
+  "rcon_password_file": "/etc/minecraft/rcon.secret",
+  "backup_hook": null,
+  "readiness_timeout": 300,
+  "shutdown_timeout": 120,
+  "backup_timeout": 900,
+  "warning_seconds": 10
+}
