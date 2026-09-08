@@ -49,3 +49,19 @@ The test checks real Minecraft readiness, loaded crossplay plugins, a Bedrock UD
 The explicit command passed on 2026-09-08 using Docker Engine 29.7.2 on Linux ARM64, the full configured 5 GiB heap, and a two-CPU container limit. Manifest SHA-256 was `9562abd45e889c598a5f8883d1b37e9be0c5d39a3fb10ad8be1194977625b9bf`. Paper reported `26.2-121-main@a2a42c5`, Geyser reported `2.11.2-b1234`, and Floodgate loaded build `140`. Bedrock UDP discovery returned a valid `MCPE` response advertising protocol `2169`, version `26.45`, and six player slots.
 
 The run completed two healthy starts and two clean saves/shutdowns with exit code zero, verified a different container ID after recreation, and checked retained diamond blocks in all three dimensions. Eight fixture/state files were unchanged: synthetic player NBT/stats/advancements, two mutable plugin markers, both plugin configurations, and the real generated Floodgate key. The runtime's actual RCON socket was limited to loopback; only the temporary game ports were published, both on host loopback. Its stopped test containers and network were removed, and private retained test data/report/logs were kept for review. No authenticated player or family device connected, and no AWS or S3 operation was performed.
+
+## Controller integration with real Docker
+
+The separate lifecycle harness exercises the actual `minecraft_instance.Manager` and `LinuxMachine` together:
+
+```sh
+python3 scripts/validate_lifecycle.py \
+  --operator-config /private/path/operator.json \
+  --output-dir /private/path/new-lifecycle-evidence
+```
+
+It uses a unique configured instance and Compose project, the canonical content renderer, real Docker preparation/start/readiness, real RCON warning/save/shutdown, durable controller journals, a real bounded file lock, and the backup-hook subprocess/request/receipt protocol. The generated game ports bind only to loopback. Its test subclass substitutes the Linux root/service/EBS/ownership prerequisites, boot ID, and inventory of unrelated local containers; no production CLI option can bypass those checks. The backup subprocess returns explicitly marked fixture completion evidence and records its input privately. It does not copy a recovery point or contact S3.
+
+The sequence confirms duplicate start, a real clean stop followed by persisted failure because the backup hook is absent, restart refusal while that backup is unresolved, successful retry with the same session ID, and duplicate stop without another receipt. It then checks the same-boot drain barrier, simulates a new boot, deliberately submits an invalid Compose launch flag while the previous container remains stopped, and verifies that a normal retry preserves the completed backup and starts a new session. A running host drain saves, stops and records the second session's fixture receipt. A real world block and Floodgate key must remain intact across the controller-managed restart. The simulated boot and inventory boundaries do not establish actual EC2 stop/start or whole-host inventory behavior; those remain separately tested at their controlled boundaries.
+
+This controller integration passed on 2026-09-08 against the same ARM64 content manifest: two healthy starts, two clean stops, two distinct fixture backup receipts, and every rejection/retry check above passed. The intentional real Compose prelaunch failure left the stopped container ID and `StartedAt` unchanged; status recovered the completed session's backup evidence, and the following real start succeeded. The test container/network were removed after clean shutdown. Private operation journals, fixture hook requests, container logs and the report were retained for review.
