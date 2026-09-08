@@ -298,6 +298,48 @@ class HostCommandTests(unittest.TestCase):
                 self.assertEqual(self.invoke(aws, "stop")[0], 0)
                 self.assertEqual(sum(call[1] == "send-command" for call in aws.calls), 2)
 
+    def test_actual_lifecycle_backup_failures_block_ec2_stop_on_stopped_session_retries(self):
+        import minecraft_instance
+        from test_minecraft_instance import FakeMachine
+
+        retained = Path(self.temp.name) / "retained"
+        machine = FakeMachine(retained)
+        manager = minecraft_instance.Manager(retained, machine, ["survival"])
+        manager.execute("start", "survival")
+        session = manager.state("survival")["session"]
+
+        class LifecycleAWS(FakeAWS):
+            def run(self, service, operation, *arguments, timeout):
+                response = super().run(service, operation, *arguments, timeout=timeout)
+                if operation == "send-command":
+                    parameters = json.loads(arguments[arguments.index("--parameters") + 1])
+                    if parameters["commands"] != ["/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json host-drain"]:
+                        raise AssertionError("host stop did not request guarded lifecycle drain")
+                    try:
+                        self.remote = manager.execute("host-drain")
+                        self.invocation_status = "Success"
+                    except minecraft_instance.OperationError:
+                        self.invocation_status = "Failed"
+                return response
+
+        aws = LifecycleAWS()
+        aws.state = "running"
+        for _ in range(2):
+            result, output = self.invoke(aws, "stop")
+            self.assertEqual(result, 1, output)
+            self.assertFalse(machine.running)
+            self.assertEqual(manager.state("survival")["backup"], "failed")
+            self.assertEqual(manager.state("survival")["session"], session)
+            self.assertFalse(any(call[1] == "stop-instances" for call in aws.calls))
+        machine.backup_works = True
+        result, output = self.invoke(aws, "stop")
+        self.assertEqual(result, 0, output)
+        self.assertEqual(output["host"], "stopped")
+        self.assertEqual(machine.events.count("backup"), 3)
+        self.assertEqual(machine.events.count("save"), 1)
+        self.assertEqual(machine.events.count("shutdown"), 1)
+        self.assertEqual(sum(call[1] == "stop-instances" for call in aws.calls), 1)
+
     def test_drain_accounts_for_all_configured_instances_including_never_started(self):
         deployment = json.loads(self.deployment.read_text())
         deployment["instances"]["creative"] = {}

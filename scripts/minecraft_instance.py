@@ -136,6 +136,10 @@ class Manager:
             raise OperationError("untracked instance data; investigate or restore before operating")
         if state and state["revision"] != revision and not updating:
             raise OperationError("content changed; use update after a successful backup")
+        if state and state["phase"] == "prepared" and state.get("restored_from"):
+            if container["exists"]:
+                raise OperationError("restored data requires an isolated target without an existing container")
+            self.machine.verify_restored(instance, state)
         if state and state["phase"] in ("stopping", "stopped") and state["backup"] != "complete":
             raise OperationError("previous session needs a successful backup; retry stop")
         if not container["running"]:
@@ -170,7 +174,8 @@ class Manager:
             write_json(self.state_path(instance), state)
             self.machine.shutdown(instance)
             container = self.machine.inspect(instance)
-        if container["running"] or (state["phase"] not in ("stopping", "stopped")):
+        if (container["running"] or state["phase"] not in ("stopping", "stopped")
+                or (state["phase"] == "stopping" and not container["exists"])):
             raise OperationError("clean shutdown is not proven; investigate before backing up")
         if container["exists"] and container["exit_code"] != 0:
             raise OperationError("container did not exit cleanly")
@@ -216,7 +221,7 @@ class Manager:
                 return self.start(instance)
             if action == "status":
                 return self.status(instance)
-            if action == "stop":
+            if action in ("stop", "backup"):
                 return self.stop(instance)
             if action == "update":
                 if self.draining():
@@ -481,6 +486,15 @@ class LinuxMachine:
         write_json(runtime / "definition.json", self.definitions[instance])
         write_json(runtime / "compose.json", compose)
 
+    def verify_restored(self, instance, state):
+        from minecraft_content import load_definition, load_manifest, manifest_digest
+        runtime = self.runtime(instance)
+        manifest = load_manifest(runtime / "manifest.json")
+        definition = load_definition(runtime / "definition.json")
+        if (manifest_digest(manifest) != state["revision"] or manifest != self.manifests[instance]
+                or definition != self.definitions[instance]):
+            raise OperationError("restored data requires its exact recorded content manifest and instance definition")
+
     def compose(self, instance, *arguments, timeout=30):
         return command(["docker", "compose", "--project-name", f"minecraft-{instance}",
                         "--file", str(self.runtime(instance) / "compose.json"), *arguments], timeout=timeout)
@@ -542,6 +556,8 @@ class LinuxMachine:
                    "data_path": str(self.root / "instances" / instance / "data"),
                    "manifest_path": str(manifest_path), "manifest_sha256": state["revision"],
                    "definition_path": str(self.runtime(instance) / "definition.json"),
+                   "source": {"volume_id": self.deployment["data_volume_id"],
+                              "filesystem_uuid": self.deployment["data_filesystem_uuid"]},
                    "destination": {"bucket": self.deployment["backup_bucket_name"], "prefix": f"instances/{instance}/"}}
         self.verify_backup_hook(hook)
         return json.loads(command(hook, timeout=self.backup_timeout, input_text=json.dumps(request) + "\n"))
@@ -550,7 +566,7 @@ class LinuxMachine:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    parser.add_argument("action", choices=("start", "stop", "status", "update", "host-status", "host-drain", "allowlist"))
+    parser.add_argument("action", choices=("start", "stop", "backup", "status", "update", "host-status", "host-drain", "allowlist"))
     parser.add_argument("instance", nargs="?")
     parser.add_argument("operation", nargs="?", choices=("add", "remove"))
     parser.add_argument("--edition", choices=("java", "bedrock"))

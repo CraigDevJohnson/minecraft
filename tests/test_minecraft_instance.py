@@ -29,10 +29,15 @@ class FakeMachine:
         self.stop_works = True
         self.ready = True
         self.starts = 0
+        self.locked = False
 
     @contextlib.contextmanager
     def lock(self):
-        yield
+        self.locked = True
+        try:
+            yield
+        finally:
+            self.locked = False
 
     def verify_storage(self):
         if not self.storage_ok:
@@ -56,6 +61,9 @@ class FakeMachine:
             raise minecraft_instance.OperationError("EULA acceptance is required")
         self.events.append("prepare")
 
+    def verify_restored(self, instance, state):
+        self.events.append("verify-restored")
+
     def launch(self, instance):
         self.events.append("launch")
         self.starts += 1
@@ -77,6 +85,8 @@ class FakeMachine:
 
     def backup(self, instance, state):
         self.events.append("backup")
+        if not self.locked:
+            raise AssertionError("backup ran outside lifecycle exclusion")
         if self.running:
             raise AssertionError("backup observed a writer")
         if not self.backup_works:
@@ -113,6 +123,66 @@ class InstanceTests(unittest.TestCase):
         self.machine.backup_works = True
         self.assertEqual(self.manager.execute("update", "survival")["application"], "running")
         self.assertEqual(self.machine.events.count("prepare"), 2)
+
+    def test_on_demand_backup_cleanly_stops_and_retries_the_same_session(self):
+        self.manager.execute("start", "survival")
+        session = self.manager.state("survival")["session"]
+        with self.assertRaisesRegex(minecraft_instance.OperationError, "backup"):
+            self.manager.execute("backup", "survival")
+        self.assertFalse(self.machine.running)
+        self.assertEqual(self.manager.state("survival")["backup"], "failed")
+        self.machine.backup_works = True
+        result = self.manager.execute("backup", "survival")
+        self.assertEqual(result["backup"], "complete")
+        self.assertEqual(self.manager.state("survival")["session"], session)
+        self.manager.execute("backup", "survival")
+        self.assertEqual(self.machine.events.count("save"), 1)
+        self.assertEqual(self.machine.events.count("shutdown"), 1)
+        self.assertEqual(self.machine.events.count("backup"), 2)
+        self.assertEqual(self.machine.events.count("launch"), 1)
+
+    def test_on_demand_backup_rejects_unexpected_or_unclean_exit(self):
+        for tracked_stop, exit_code in ((False, 0), (True, 137)):
+            with self.subTest(tracked_stop=tracked_stop, exit_code=exit_code):
+                self.setUp()
+                self.manager.execute("start", "survival")
+                self.machine.running = False
+                self.machine.exit_code = exit_code
+                if tracked_stop:
+                    state = self.manager.state("survival")
+                    state["phase"] = "stopping"
+                    minecraft_instance.write_json(self.manager.state_path("survival"), state)
+                with self.assertRaises(minecraft_instance.OperationError):
+                    self.manager.execute("backup", "survival")
+                self.assertNotIn("backup", self.machine.events)
+
+    def test_disappeared_container_cannot_prove_an_interrupted_stop_was_clean(self):
+        self.manager.execute("start", "survival")
+        self.machine.stop_works = False
+        with self.assertRaisesRegex(minecraft_instance.OperationError, "shutdown"):
+            self.manager.execute("stop", "survival")
+        self.machine.running = self.machine.exists = False
+        self.machine.backup_works = True
+        with self.assertRaisesRegex(minecraft_instance.OperationError, "clean shutdown"):
+            self.manager.execute("backup", "survival")
+        self.assertNotIn("backup", self.machine.events)
+
+    def test_restored_prepared_data_starts_only_with_exact_revision_and_acceptance(self):
+        (self.root / "instances/survival/data").mkdir(parents=True)
+        restored = {"phase": "prepared", "backup": "not-required", "revision": self.machine.revision,
+                    "session": "restored-session", "restored_from": "instances/survival/checkpoint"}
+        minecraft_instance.write_json(self.manager.state_path("survival"), restored)
+        self.machine.revision = "b" * 64
+        with self.assertRaisesRegex(minecraft_instance.OperationError, "content changed"):
+            self.manager.execute("start", "survival")
+        self.machine.revision = restored["revision"]
+        self.machine.accepted = False
+        with self.assertRaisesRegex(minecraft_instance.OperationError, "EULA"):
+            self.manager.execute("start", "survival")
+        self.assertNotIn("launch", self.machine.events)
+        self.machine.accepted = True
+        self.assertTrue(self.manager.execute("start", "survival")["ready"])
+        self.assertNotEqual(self.manager.state("survival")["session"], restored["session"])
 
     def test_readiness_and_shutdown_timeouts_never_back_up_running_world(self):
         self.machine.ready = False
