@@ -21,17 +21,45 @@ id_ed25519
 *.tfstate
 *.tfstate.*
 *.tfplan
+*.plan
+.terraform.tfstate.lock.info
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
 
-# Minecraft server runtime data in the repository root
-/world/
-/world_nether/
-/world_the_end/
-/logs/
-/backups/
-/crash-reports/
-/usercache.json
-/banned-ips.json
-/banned-players.json
-/ops.json
-/whitelist.json
-/server.properties
+# Project-local tools and linked worktrees
+.tools/
+.worktrees/
+__pycache__/
+*.py[cod]
+
+# Provider selections are reproducible inputs, not local data
+!.terraform.lock.hcl
+
+# Private operator configuration (safe examples remain trackable)
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+!*.tfvars.json.example
+.aws/
+operator-config/
+secrets/
+
+# Minecraft server runtime data and secrets
+**/instances/*/data/
+**/world/
+**/world_nether/
+**/world_the_end/
+**/logs/
+**/backups/
+**/crash-reports/
+**/usercache.json
+**/banned-ips.json
+**/banned-players.json
+**/ops.json
+**/whitelist.json
+**/server.properties
+**/eula.txt
