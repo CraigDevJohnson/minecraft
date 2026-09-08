@@ -1,0 +1,16 @@
+version: '3'
+
+tasks:
+  check:
+    desc: Run the credential-free local and CI validation gate
+    cmd: ./scripts/check.sh
+
+  fmt:
+    desc: Format shell and OpenTofu source files
+    cmds:
+      - ./.tools/bin/shfmt -w scripts/*.sh
+      - ./.tools/bin/tofu -chdir=infra fmt -recursive
+
+  infra:validate:
+    desc: Initialize and validate OpenTofu without a backend or AWS credentials
+    cmd: ./scripts/check.sh infra:validate
