@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -23,11 +24,15 @@ class RuntimeInstallTests(unittest.TestCase):
             shutil.copy2(ROOT / "runtime" / name, source / "runtime" / name)
         script = (ROOT / "scripts/install_runtime.sh").read_text()
         # Replace only OS path boundaries; exercise the actual installer logic.
-        for target in ("/opt", "/usr/local/sbin", "/etc/systemd/system", "/etc/minecraft", "/run/lock"):
+        for target in ("/opt", "/usr/local/sbin", "/etc/systemd/system", "/etc/minecraft", "/run"):
             replacement = root / target.lstrip("/")
             replacement.mkdir(parents=True, exist_ok=True)
-            script = script.replace(target, str(replacement))
+            if target == "/run":
+                script = re.sub(r"/run(?=/|[\s\"')]|$)", lambda _: str(replacement), script)
+            else:
+                script = script.replace(target, str(replacement))
         (root / "etc/minecraft").chmod(0o700)
+        (root / "run/lock").mkdir(mode=0o1777)
         deployment = root / "etc/minecraft/deployment.json"
         deployment.write_text('{"private": "deployment fixture"}\n')
         deployment.chmod(0o600)
@@ -202,6 +207,43 @@ elif name == "stat":
                 self.assertEqual(marker.read_text(), '{"existing": true}\n')
                 self.assertFalse((root / "opt/minecraft").exists())
                 self.assertFalse((root / "usr/local/sbin/minecraft-instance").exists())
+
+    def test_shared_runtime_lock_uses_a_private_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, script, environment, _ = self.fixture(root)
+            result = self.run_installer(script, environment)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            private_lock_dir = root / "run/minecraft"
+            self.assertEqual(private_lock_dir.stat().st_mode & 0o777, 0o700)
+            self.assertTrue((private_lock_dir / "runtime.lock").is_file())
+            self.assertFalse((root / "run/lock/minecraft-runtime.lock").exists())
+
+    def test_untrusted_lock_parent_or_directory_prevents_installation_without_repair(self):
+        for condition in ("public-parent", "foreign-parent", "public-child", "foreign-child", "symlink-child"):
+            with self.subTest(condition=condition), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                _, script, environment, _ = self.fixture(root)
+                parent = root / "run"
+                child = parent / "minecraft"
+                if condition == "public-parent":
+                    parent.chmod(0o777)
+                elif condition == "foreign-parent":
+                    environment["UNTRUSTED_OWNER_PATH"] = str(parent)
+                elif condition == "symlink-child":
+                    child.symlink_to(root / "attacker-target")
+                else:
+                    child.mkdir(mode=0o700)
+                    if condition == "public-child":
+                        child.chmod(0o755)
+                    else:
+                        environment["UNTRUSTED_OWNER_PATH"] = str(child)
+                result = self.run_installer(script, environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((root / "opt/minecraft").exists())
+                self.assertFalse((root / "attacker-target").exists())
+                if condition == "public-child":
+                    self.assertEqual(child.stat().st_mode & 0o777, 0o755)
 
 
 if __name__ == "__main__":

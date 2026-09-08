@@ -75,7 +75,7 @@ Exit zero alone is insufficient. Standard output must be one JSON object:
 
 #6 must verify S3 publication before issuing this receipt, include the complete data directory plus supplied manifest/definition, and make retries for the same session/content idempotent. Missing, malformed, mismatched, failed or timed-out receipts block normal stop/update success. A timed-out hook process group is terminated; Minecraft has already exited cleanly. Diagnostics are not copied into public results.
 
-The default hook timeout is 900 seconds, maximum 3000, keeping the initial single-instance stop within the one-hour SSM envelope. Larger worlds/additional instances require revisiting measured bounds. Test doubles prove orchestration; #6/#8 establish real backup/recovery.
+The default hook timeout is 900 seconds, maximum 3000, keeping the initial single-instance stop within the one-hour SSM envelope. Runtime child processes share a 1 MiB budget across standard output and standard error, enforced while the process runs. Exceeding that budget fails the command and terminates its process group, just like a timeout; an oversized diagnostic stream cannot accumulate in host memory throughout the backup window. Keep hook output to the completion receipt and bounded diagnostics. Larger worlds/additional instances require revisiting measured bounds. Test doubles prove orchestration; #6/#8 establish real backup/recovery.
 
 ## Controlled updates and validation
 

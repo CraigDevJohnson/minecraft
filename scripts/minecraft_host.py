@@ -116,13 +116,13 @@ class HostSession:
         self.state = state
         return state
 
-    def wait_host(self, expected: str, transitional: str) -> None:
+    def wait_host(self, expected: str, transitional: str, *, previous=None) -> None:
         deadline = self.aws.monotonic() + HOST_TIMEOUT
         while True:
             state = self.host_state(deadline)
             if state == expected:
                 return
-            if state != transitional:
+            if state not in (transitional, previous):
                 raise HostError(f"host cannot reach {expected} from {state}")
             self.aws.sleep(min(3, max(0, deadline - self.aws.monotonic())))
 
@@ -170,7 +170,7 @@ class HostSession:
         state = self.host_state()
         if state == "stopped":
             self.call("ec2", "start-instances", "--instance-ids", self.deployment["host_id"])
-            self.wait_host("running", "pending")
+            self.wait_host("running", "pending", previous="stopped")
         elif state == "pending":
             self.wait_host("running", "pending")
         elif state != "running":
@@ -201,7 +201,7 @@ class HostSession:
         if response.get("draining") is not True or any(value["application"] != "stopped" or value["backup"] not in ("complete", "not-required") for value in instances.values()):
             raise HostError("host drain lacks complete shutdown and backup evidence; EC2 stop forbidden")
         self.call("ec2", "stop-instances", "--instance-ids", self.deployment["host_id"])
-        self.wait_host("stopped", "stopping")
+        self.wait_host("stopped", "stopping", previous="running")
         return {"host": self.state, "draining": True, "instances": instances}
 
     def status(self) -> dict:

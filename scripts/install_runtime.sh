@@ -7,7 +7,8 @@ install_dir=/opt/minecraft
 launcher=/usr/local/sbin/minecraft-instance
 unit=/etc/systemd/system/minecraft@.service
 private_dir=/etc/minecraft
-lock_file=/run/lock/minecraft-runtime.lock
+lock_dir=/run/minecraft
+lock_file="$lock_dir/runtime.lock"
 
 fail() {
 	printf '%s\n' "$1" >&2
@@ -50,6 +51,13 @@ for directory in /opt /usr/local/sbin /etc/systemd/system \
 	fi
 done
 trusted_path /usr/local/sbin/minecraft-storage
+[[ -d /run && ! -L /run ]] || fail 'The runtime lock parent must be a trusted directory.'
+trusted_path /run
+if [[ ! -e "$lock_dir" && ! -L "$lock_dir" ]]; then
+	mkdir -m 0700 "$lock_dir" 2>/dev/null || [[ -d "$lock_dir" ]] || fail 'Cannot create the private runtime lock directory.'
+fi
+[[ -d "$lock_dir" && ! -L "$lock_dir" ]] || fail 'The runtime lock directory must be a trusted directory.'
+[[ "$(stat -c '%u:%a' -- "$lock_dir")" == 0:700 ]] || fail 'The runtime lock directory must be root-owned mode 0700; inspect and repair it explicitly.'
 if [[ -e "$lock_file" || -L "$lock_file" ]]; then
 	[[ -f "$lock_file" ]] || fail 'The runtime lock must be a trusted regular file.'
 	trusted_path "$lock_file"

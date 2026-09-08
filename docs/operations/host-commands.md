@@ -34,6 +34,7 @@ Failed operations exit nonzero. If EC2 stop fails after a successful drain, outp
 
 - Each AWS CLI process is bounded to 30 seconds, or the remaining phase deadline when shorter.
 - EC2 transitions and SSM online readiness each have a 300-second deadline.
+- After an acknowledged EC2 start or stop request, polling also accepts the previous `stopped` or `running` state within that same 300-second deadline. [EC2 eventual consistency](https://docs.aws.amazon.com/ec2/latest/devguide/eventual-consistency.html) can delay visibility of the request. The command sends the mutation once; a persistently old state times out, and unrelated or terminal states still fail immediately. Observing an already-pending start without submitting a mutation does not enable this previous-state retry.
 - SSM delivery has a 60-second timeout and the remote command has a 3,600-second execution timeout. Local invocation polling is bounded to 3,660 seconds and handles initial `InvocationDoesNotExist` propagation.
 - Missing, failed, incomplete, or timed-out drain evidence forbids EC2 stop. No timeout path force-stops EC2.
 - An AWS transport timeout can leave the requested action in progress. Local timeout does not cancel an already-submitted SSM operation. Inspect status and retry the same lifecycle command; host-side locking, backup state, and the boot-bound drain barrier govern the retry. A host already stopping returns a retry instruction until its transition finishes.

@@ -68,6 +68,19 @@ class FakeAWS:
         raise AssertionError(f"unexpected AWS operation: {operation}")
 
 
+class ScriptedStatesAWS(FakeAWS):
+    def __init__(self, states):
+        super().__init__()
+        self.states = list(states)
+
+    def run(self, service, operation, *arguments, timeout):
+        response = super().run(service, operation, *arguments, timeout=timeout)
+        if operation == "describe-instances":
+            state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+            response["Reservations"][0]["Instances"][0]["State"]["Name"] = state
+        return response
+
+
 class HostCommandTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -108,6 +121,66 @@ class HostCommandTests(unittest.TestCase):
                 self.assertIn("account", output["error"])
                 for private_value in (ACCOUNT_ID, aws.account_id, "private-operator-identity", "private-user-id"):
                     self.assertNotIn(private_value, json.dumps(output))
+
+    def test_acknowledged_ec2_mutations_retry_the_previous_state_before_transition(self):
+        for action, states, expected in (
+            ("start", ["stopped", "stopped", "pending", "running"], "running"),
+            ("stop", ["running", "running", "stopping", "stopped"], "stopped"),
+        ):
+            with self.subTest(action=action):
+                aws = ScriptedStatesAWS(states)
+                if action == "stop":
+                    aws.remote = {"draining": True, "instances": {"survival": {
+                        "instance": "survival", "application": "stopped", "backup": "complete"}}}
+                result, output = self.invoke(aws, action, *(["--instance", "survival"] if action == "start" else []))
+                self.assertEqual(result, 0, output)
+                self.assertEqual(output["host"], expected)
+                self.assertEqual(sum(call[1] == action + "-instances" for call in aws.calls), 1)
+                self.assertEqual(sum(call[1] == "describe-instances" for call in aws.calls), 4)
+                self.assertEqual(aws.calls[0], ("sts", "get-caller-identity", ()))
+                self.assertGreater(aws.now, 0)
+
+    def test_persistent_previous_state_times_out_without_reissuing_mutation(self):
+        for action, previous in (("start", "stopped"), ("stop", "running")):
+            with self.subTest(action=action):
+                aws = ScriptedStatesAWS([previous])
+                if action == "stop":
+                    aws.remote = {"draining": True, "instances": {"survival": {
+                        "instance": "survival", "application": "stopped", "backup": "complete"}}}
+                result, output = self.invoke(aws, action, *(["--instance", "survival"] if action == "start" else []))
+                self.assertEqual(result, 1, output)
+                self.assertIn("timed out", output["error"])
+                self.assertEqual(output["host"], previous)
+                self.assertEqual(aws.now, 300)
+                self.assertEqual(sum(call[1] == action + "-instances" for call in aws.calls), 1)
+                self.assertEqual(sum(call[1] == "send-command" for call in aws.calls), 1 if action == "stop" else 0)
+                if action == "stop":
+                    self.assertEqual(output["instances"]["survival"]["backup"], "complete")
+
+    def test_unsupported_state_after_mutation_still_fails_immediately(self):
+        for action, previous, unsupported in (
+            ("start", "stopped", "stopping"), ("start", "stopped", "terminated"),
+            ("start", "stopped", "shutting-down"), ("stop", "running", "pending"),
+            ("stop", "running", "terminated"), ("stop", "running", "shutting-down"),
+        ):
+            with self.subTest(action=action, unsupported=unsupported):
+                aws = ScriptedStatesAWS([previous, unsupported])
+                if action == "stop":
+                    aws.remote = {"draining": True, "instances": {"survival": {
+                        "instance": "survival", "application": "stopped", "backup": "complete"}}}
+                result, output = self.invoke(aws, action, *(["--instance", "survival"] if action == "start" else []))
+                self.assertEqual(result, 1, output)
+                self.assertIn(unsupported, output["error"])
+                self.assertEqual(aws.now, 0)
+                self.assertEqual(sum(call[1] == action + "-instances" for call in aws.calls), 1)
+
+    def test_previous_state_retry_requires_an_acknowledged_mutation(self):
+        aws = ScriptedStatesAWS(["pending", "stopped"])
+        result, output = self.invoke(aws, "start", "--instance", "survival")
+        self.assertEqual(result, 1, output)
+        self.assertIn("cannot reach running from stopped", output["error"])
+        self.assertEqual(aws.now, 0)
+        self.assertFalse(any(call[1] in ("start-instances", "send-command") for call in aws.calls))
 
     def test_missing_or_malformed_deployment_account_blocks_every_aws_call(self):
         for account_id in (None, "", "12345678901", "1234567890123", 123456789012, "12345678901x", "123456789012\n", "１２３４５６７８９０１２"):

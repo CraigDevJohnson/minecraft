@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import re
+import selectors
 import signal
 import stat
 import subprocess
@@ -20,6 +21,24 @@ from pathlib import Path
 
 class OperationError(Exception):
     pass
+
+
+def ensure_runtime_lock_directory(parent: Path = Path("/run")) -> Path:
+    """Protect the shared lock name from replacement by non-operator accounts."""
+    metadata = os.lstat(parent)
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o022):
+        raise OperationError("runtime lock parent must be an operator-owned directory without other-account write access")
+    directory = parent / "minecraft"
+    try:
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    metadata = os.lstat(directory)
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700):
+        raise OperationError("runtime lock directory must be operator-owned mode 0700; inspect and repair it explicitly")
+    return directory
 
 
 @contextlib.contextmanager
@@ -221,19 +240,72 @@ class Manager:
 def command(argv, *, timeout=30, input_text=None):
     """Only the external process boundary; subprocess diagnostics can contain secrets."""
     try:
-        with subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              text=True, start_new_session=True) as process:
-            try:
-                output, _ = process.communicate(input_text, timeout=timeout)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
-                raise OperationError(f"{Path(argv[0]).name} command timed out") from None
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   bufsize=0, start_new_session=True)
+        try:
+            deadline = time.monotonic() + timeout
+            pending = memoryview((input_text or "").encode("utf-8"))
+            output = bytearray()
+            received = 0
+            with selectors.DefaultSelector() as streams:
+                for pipe, name in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+                    os.set_blocking(pipe.fileno(), False)
+                    streams.register(pipe, selectors.EVENT_READ, name)
+                if pending:
+                    os.set_blocking(process.stdin.fileno(), False)
+                    streams.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+                else:
+                    process.stdin.close()
+                while streams.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(argv[0], timeout)
+                    for key, _ in streams.select(remaining):
+                        pipe = key.fileobj
+                        if key.data == "stdin":
+                            try:
+                                sent = os.write(pipe.fileno(), pending[:65536])
+                                pending = pending[sent:]
+                            except BrokenPipeError:
+                                pending = memoryview(b"")
+                            except BlockingIOError:
+                                continue
+                            if not pending:
+                                streams.unregister(pipe)
+                                pipe.close()
+                            continue
+                        try:
+                            chunk = os.read(pipe.fileno(), 65536)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            streams.unregister(pipe)
+                            pipe.close()
+                            continue
+                        received += len(chunk)
+                        if received > 1024 * 1024:
+                            raise OperationError("command output exceeded its limit")
+                        if key.data == "stdout":
+                            output.extend(chunk)
+            # EOF on both pipes does not prove that the process has exited.
+            process.wait(timeout=max(0, deadline - time.monotonic()))
             if process.returncode:
                 raise OperationError(f"{Path(argv[0]).name} command failed (exit {process.returncode})")
-            if len(output) > 1024 * 1024:
-                raise OperationError("command output exceeded its limit")
-            return output
+            try:
+                return output.decode("utf-8")
+            except UnicodeDecodeError:
+                raise OperationError("command returned invalid UTF-8 output") from None
+        except BaseException:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=5)
+            raise
+        finally:
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                pipe.close()
+    except subprocess.TimeoutExpired:
+        raise OperationError(f"{Path(argv[0]).name} command timed out") from None
     except OSError as error:
         raise OperationError(f"cannot execute {Path(argv[0]).name}") from error
 
@@ -342,7 +414,7 @@ class LinuxMachine:
     def lock(self):
         if os.geteuid() != 0:
             raise OperationError("instance operations require root on the Linux host")
-        with operation_lock("/run/lock/minecraft-runtime.lock"):
+        with operation_lock(ensure_runtime_lock_directory() / "runtime.lock"):
             yield
 
     def verify_storage(self):
