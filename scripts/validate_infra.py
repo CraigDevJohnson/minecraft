@@ -41,7 +41,11 @@ def main() -> None:
             "AWS_EC2_METADATA_DISABLED": "true",
             "TF_IN_AUTOMATION": "true",
         }
-        roots = [workspace / "infra", workspace / "infra/state-bootstrap"]
+        roots = [
+            workspace / "infra",
+            workspace / "infra/state-bootstrap",
+            workspace / "infra/recovery-rehearsal",
+        ]
         for module in roots:
             if not module.is_dir():
                 continue

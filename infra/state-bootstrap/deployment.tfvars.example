@@ -5,6 +5,7 @@ environment      = "example"
 region           = "us-west-2"
 state_bucket_name = "example-replace-with-private-unique-state-name"
 state_keys = {
-  bootstrap      = "bootstrap/terraform.tfstate"
-  infrastructure = "infrastructure/terraform.tfstate"
+  bootstrap          = "bootstrap/terraform.tfstate"
+  infrastructure     = "infrastructure/terraform.tfstate"
+  recovery_rehearsal = "recovery-rehearsal/terraform.tfstate"
 }
