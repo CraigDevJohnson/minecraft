@@ -135,7 +135,7 @@ class BackupStoreTests(unittest.TestCase):
 
     def test_listing_follows_continuation_pages_with_an_instance_prefix(self):
         self.steps(
-            {"operation": "list-objects-v2", "response": {"Contents": [{"Key": "survival/one", "LastModified": "2026-09-08T10:00:00Z"}], "IsTruncated": True, "NextContinuationToken": "page-two"}},
+            {"operation": "list-objects-v2", "response": {"Contents": [{"Key": "survival/one", "LastModified": "2026-09-08T11:00:00+01:00"}], "IsTruncated": True, "NextContinuationToken": "page-two"}},
             {"operation": "list-objects-v2", "response": {"Contents": [{"Key": "survival/two", "LastModified": "2026-09-08T11:00:00Z"}], "IsTruncated": False}},
         )
         self.assertEqual(self.store.list_objects("survival/"), [

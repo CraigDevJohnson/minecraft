@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -176,7 +176,10 @@ class S3Store:
                         raise BackupError("S3 object listing has invalid publication metadata") from error
                     if modified.tzinfo is None:
                         raise BackupError("S3 object listing has invalid publication metadata")
-                    objects.append({"key": key, "last_modified": last_modified})
+                    objects.append({
+                        "key": key,
+                        "last_modified": modified.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    })
                 else:
                     objects.append(key)
                 seen.add(key)
