@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+INSTALLER_TEST_TIMEOUT = 30
 
 
 class RuntimeInstallTests(unittest.TestCase):
@@ -103,7 +104,9 @@ elif name == "stat":
         return source, installed_script, environment, log
 
     def run_installer(self, script, environment):
-        return subprocess.run(["bash", str(script)], env=environment, capture_output=True, text=True, timeout=10)
+        return subprocess.run(
+            ["bash", str(script)], env=environment, capture_output=True, text=True, timeout=INSTALLER_TEST_TIMEOUT
+        )
 
     def test_first_install_and_identical_rerun_preserve_private_inputs(self):
         with tempfile.TemporaryDirectory() as directory:

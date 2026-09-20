@@ -135,16 +135,30 @@ class BackupStoreTests(unittest.TestCase):
 
     def test_listing_follows_continuation_pages_with_an_instance_prefix(self):
         self.steps(
-            {"operation": "list-objects-v2", "response": {"Contents": [{"Key": "survival/one"}], "IsTruncated": True, "NextContinuationToken": "page-two"}},
-            {"operation": "list-objects-v2", "response": {"Contents": [{"Key": "survival/two"}], "IsTruncated": False}},
+            {"operation": "list-objects-v2", "response": {"Contents": [{"Key": "survival/one", "LastModified": "2026-09-08T10:00:00Z"}], "IsTruncated": True, "NextContinuationToken": "page-two"}},
+            {"operation": "list-objects-v2", "response": {"Contents": [{"Key": "survival/two", "LastModified": "2026-09-08T11:00:00Z"}], "IsTruncated": False}},
         )
-        self.assertEqual(self.store.keys("survival/"), ["survival/one", "survival/two"])
+        self.assertEqual(self.store.list_objects("survival/"), [
+            {"key": "survival/one", "last_modified": "2026-09-08T10:00:00Z"},
+            {"key": "survival/two", "last_modified": "2026-09-08T11:00:00Z"},
+        ])
         for call in self.calls():
             args = call["args"]
             self.assertEqual(args[args.index("--prefix") + 1], "survival/")
             self.assertIn("--no-paginate", args)
         args = self.calls()[1]["args"]
         self.assertEqual(args[args.index("--continuation-token") + 1], "page-two")
+
+    def test_listing_metadata_fails_closed_on_missing_or_invalid_last_modified(self):
+        for value in (None, "not-a-timestamp", 123):
+            with self.subTest(value=value):
+                item = {"Key": "survival/one"}
+                if value is not None:
+                    item["LastModified"] = value
+                self.steps({"operation": "list-objects-v2", "response": {
+                    "Contents": [item], "IsTruncated": False}})
+                with self.assertRaises(backup_store.BackupError):
+                    self.store.list_objects("survival/")
 
     def test_listing_fails_closed_on_missing_token_and_out_of_prefix_keys(self):
         for response in (
