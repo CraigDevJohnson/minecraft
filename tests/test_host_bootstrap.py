@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+import http.server
 import json
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -12,10 +14,53 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class HostBootstrapTests(unittest.TestCase):
-    def fixture(self, root: Path, *, ready: bool):
+    def fixture(self, root: Path, *, ready: bool, public_ip_after: int = 1, wait_seconds: float = 300):
         binaries = root / "bin"
         binaries.mkdir()
         log = root / "commands.jsonl"
+
+        metadata_reads = 0
+
+        class MetadataHandler(http.server.BaseHTTPRequestHandler):
+            def respond(self, status: int, payload: bytes = b"") -> None:
+                with log.open("a") as commands:
+                    commands.write(json.dumps(["metadata", self.command, self.path, status]) + "\n")
+                self.send_response(status)
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_PUT(self) -> None:
+                if (self.path == "/latest/api/token"
+                        and self.headers.get("X-aws-ec2-metadata-token-ttl-seconds") == "60"):
+                    self.respond(200, b"fixture-token")
+                else:
+                    self.respond(400)
+
+            def do_GET(self) -> None:
+                nonlocal metadata_reads
+                if (self.path != "/latest/meta-data/public-ipv4"
+                        or self.headers.get("X-aws-ec2-metadata-token") != "fixture-token"):
+                    self.respond(401)
+                    return
+                metadata_reads += 1
+                if metadata_reads < public_ip_after:
+                    self.respond(404)
+                else:
+                    self.respond(200, b"203.0.113.10")
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), MetadataHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def stop_server() -> None:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1)
+
+        self.addCleanup(stop_server)
         fake = binaries / "fake.py"
         fake.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, subprocess, sys
@@ -48,6 +93,9 @@ sys.exit(0 if os.environ["STORAGE_" + sys.argv[1].upper() + "_READY"] == "yes" e
         script = script.replace("${storage_script_base64}", base64.b64encode(payload).decode())
         script = script.replace("${data_volume_id}", "vol-0123456789abcdef0")
         script = script.replace("${data_filesystem_uuid}", "01234567-89ab-4cde-8fab-0123456789ab")
+        script = script.replace("169.254.169.254", f"127.0.0.1:{server.server_port}")
+        script = script.replace("time.monotonic() + 300", f"time.monotonic() + {wait_seconds}")
+        script = script.replace("time.sleep(min(2,", "time.sleep(min(0.01,")
         script = script.replace("/etc/os-release", str(release))
         for target in ("/etc/minecraft", "/etc/systemd/system", "/usr/local/sbin"):
             script = script.replace(target, str(root / target.lstrip("/")))
@@ -80,6 +128,35 @@ sys.exit(0 if os.environ["STORAGE_" + sys.argv[1].upper() + "_READY"] == "yes" e
             install = next(call for call in calls if call[0] == "apt-get" and "install" in call)
             self.assertIn("docker.io", install)
             self.assertIn("docker-compose-v2", install)
+            self.assertIn("time", install)
+
+    def test_package_commands_wait_for_public_ip_association(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script, environment, log, _ = self.fixture(root, ready=True, public_ip_after=3)
+            result = subprocess.run(["bash", str(script)], env=environment, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            pending = [index for index, call in enumerate(calls) if call == [
+                "metadata", "GET", "/latest/meta-data/public-ipv4", 404]]
+            assigned = calls.index(["metadata", "GET", "/latest/meta-data/public-ipv4", 200])
+            update = next(index for index, call in enumerate(calls) if call[0] == "apt-get")
+            self.assertEqual(len(pending), 2)
+            self.assertLess(max(pending), assigned)
+            self.assertLess(assigned, update)
+
+    def test_missing_public_ip_fails_before_package_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script, environment, log, _ = self.fixture(
+                root, ready=True, public_ip_after=1_000_000, wait_seconds=0.05)
+            result = subprocess.run(["bash", str(script)], env=environment, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Timed out waiting for the host's public IPv4 association", result.stderr)
+            self.assertIn("bootstrap failed", result.stderr)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertTrue(any(call[0] == "metadata" for call in calls))
+            self.assertFalse(any(call[0] == "apt-get" for call in calls))
 
     def test_storage_failure_stops_bootstrap_before_docker_can_start(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -6,10 +6,11 @@ Issue #8 remains incomplete until a deployed `survival` instance passes every ch
 
 ## Prepare the evidence directory
 
-Set these paths on the operator computer. Use the repository revision that issue #7 deployed.
+Set these paths in one Bash or zsh session on the operator computer and keep using that session for the operator commands. Use the repository revision that issue #7 deployed.
 
 ```sh
 umask 077
+set -euo pipefail
 repo_dir="$PWD"
 evidence_dir="/absolute/private/minecraft/issue-8-$(date -u +%Y%m%dT%H%M%SZ)"
 source_dir="/absolute/private/minecraft/family"
@@ -64,8 +65,8 @@ Before the tests, record recognizable checkpoints in all three dimensions. Recor
 Time the backup on the source host through SSM. This command cleanly stops `survival`, publishes the recovery point, and leaves EC2 running.
 
 ```sh
-/usr/bin/time -p -o /root/source-backup-time.txt \
-  sudo /usr/local/sbin/minecraft-instance \
+sudo /usr/bin/time -p -o /root/source-backup-time.txt \
+  /usr/local/sbin/minecraft-instance \
   --config /etc/minecraft/operator.json backup survival
 ```
 
@@ -110,11 +111,12 @@ shasum -a 256 "$evidence_dir/host-replacement.tfplan" \
 Stop if the plan replaces or deletes the data volume, filesystem identity, EIP allocation, backup bucket, state bucket, network, or IAM role. The plan may replace the host, its root disk, the volume attachment, and the EIP association. Apply only the exact saved plan that Craig approved.
 
 ```sh
+set -o pipefail || exit 1
 "$repo_dir/.tools/bin/tofu" -chdir="$source_dir/infra" apply \
   "$evidence_dir/host-replacement.tfplan" \
-  2>&1 | tee "$evidence_dir/host-replacement-apply.txt"
+  2>&1 | tee "$evidence_dir/host-replacement-apply.txt" || exit 1
 "$repo_dir/.tools/bin/tofu" -chdir="$source_dir/infra" output -json deployment \
-  >"$source_dir/deployment-after-replacement.json"
+  >"$source_dir/deployment-after-replacement.json" || exit 1
 chmod 0600 "$source_dir/deployment-after-replacement.json"
 source_deployment="$source_dir/deployment-after-replacement.json"
 ```
@@ -200,18 +202,19 @@ The plan may create only the temporary host, root disk, data disk, attachment, t
 Apply only the exact saved plan that Craig approved. Save both sensitive outputs with mode 0600.
 
 ```sh
+set -o pipefail || exit 1
 "$repo_dir/.tools/bin/tofu" -chdir="$recovery_dir" apply \
   "$evidence_dir/recovery-create.tfplan" \
-  2>&1 | tee "$evidence_dir/recovery-create-apply.txt"
+  2>&1 | tee "$evidence_dir/recovery-create-apply.txt" || exit 1
 "$repo_dir/.tools/bin/tofu" -chdir="$recovery_dir" output -json deployment \
-  >"$evidence_dir/recovery-deployment.json"
+  >"$evidence_dir/recovery-deployment.json" || exit 1
 "$repo_dir/.tools/bin/tofu" -chdir="$recovery_dir" output -json cleanup_inventory \
-  >"$evidence_dir/recovery-cleanup-inventory.json"
+  >"$evidence_dir/recovery-cleanup-inventory.json" || exit 1
 chmod 0600 "$evidence_dir/recovery-deployment.json" \
   "$evidence_dir/recovery-cleanup-inventory.json"
 ```
 
-The first cloud-init run stops at the blank-disk storage gate. Through SSM, read `DATA_VOLUME_ID` and `DATA_FILESYSTEM_UUID` from root-only `/etc/minecraft/storage.conf` and compare both with the approved recovery deployment output. Initialize that exact zero-filled disk once; stop if either value differs.
+Cloud-init waits up to 300 seconds for the separately associated EIP to appear through IMDSv2 before package installation. If that wait fails, inspect the EIP association and subnet rather than bypassing bootstrap. The first cloud-init run then stops at the blank-disk storage gate. Through SSM, read `DATA_VOLUME_ID` and `DATA_FILESYSTEM_UUID` from root-only `/etc/minecraft/storage.conf` and compare both with the approved recovery deployment output. Initialize that exact zero-filled disk once; stop if either value differs.
 
 ```sh
 sudo bash -c 'set -euo pipefail; source /etc/minecraft/storage.conf; printf "volume_id=%s filesystem_uuid=%s\n" "$DATA_VOLUME_ID" "$DATA_FILESYSTEM_UUID"'
@@ -238,14 +241,14 @@ On the recovery host, run:
 ```sh
 recovery_point="$(sudo cat /etc/minecraft/recovery-point)" || exit 1
 printf '%s\n' "$recovery_point" | grep -Eq '^[0-9a-f]{64}$' || exit 1
-/usr/bin/time -p -o /root/restore-time.txt \
-  sudo /usr/local/sbin/minecraft-restore \
+sudo /usr/bin/time -p -o /root/restore-time.txt \
+  /usr/local/sbin/minecraft-restore \
   --config /etc/minecraft/operator.json \
   --source-deployment /etc/minecraft/source-deployment.json \
   survival "$recovery_point"
 
-/usr/bin/time -p -o /root/restored-start-time.txt \
-  sudo /usr/local/sbin/minecraft-instance \
+sudo /usr/bin/time -p -o /root/restored-start-time.txt \
+  /usr/local/sbin/minecraft-instance \
   --config /etc/minecraft/operator.json start survival
 sudo /usr/local/sbin/minecraft-instance \
   --config /etc/minecraft/operator.json status survival
@@ -288,9 +291,10 @@ After the update rehearsal and checkpoint verification, remove only the temporar
   >"$evidence_dir/recovery-disable-backups.txt"
 shasum -a 256 "$evidence_dir/recovery-disable-backups.tfplan" \
   >"$evidence_dir/recovery-disable-backups.tfplan.sha256"
+set -o pipefail || exit 1
 "$repo_dir/.tools/bin/tofu" -chdir="$recovery_dir" apply \
   "$evidence_dir/recovery-disable-backups.tfplan" \
-  2>&1 | tee "$evidence_dir/recovery-disable-backups-apply.txt"
+  2>&1 | tee "$evidence_dir/recovery-disable-backups-apply.txt" || exit 1
 ```
 
 Wait for the instance-profile credentials and IAM policy change to take effect. Confirm through SSM that `s3api put-object` to a unique key in the temporary recovery prefix receives `AccessDenied`. Do not test against the source bucket. Then stop the restored instance. The backup hook must fail after the clean application stop.
@@ -344,9 +348,10 @@ shasum -a 256 "$evidence_dir/recovery-destroy.tfplan" \
 The plan must delete only resources in the approved cleanup inventory, including the temporary no-ingress security group and its outbound rules. Apply only the saved destroy plan that Craig approved.
 
 ```sh
+set -o pipefail || exit 1
 "$repo_dir/.tools/bin/tofu" -chdir="$recovery_dir" apply \
   "$evidence_dir/recovery-destroy.tfplan" \
-  2>&1 | tee "$evidence_dir/recovery-destroy-apply.txt"
+  2>&1 | tee "$evidence_dir/recovery-destroy-apply.txt" || exit 1
 ```
 
 Check every entry in the private cleanup inventory against AWS after destroy, and save each response or exact not-found error with its exit status in the evidence directory. Query these IDs and names from `$evidence_dir/recovery-cleanup-inventory.json`:
