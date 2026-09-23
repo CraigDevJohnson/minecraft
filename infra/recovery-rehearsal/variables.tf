@@ -134,6 +134,24 @@ variable "restore_uncompressed_size_bytes" {
   }
 }
 
+variable "max_recovery_backup_archive_size_bytes" {
+  description = "Operator-reviewed maximum archive size for a new backup of the restored world; at least the selected completed marker archive.size_bytes and no more than the backup program's 100 GiB limit."
+  type        = number
+  validation {
+    condition     = var.max_recovery_backup_archive_size_bytes >= var.restore_archive_size_bytes && var.max_recovery_backup_archive_size_bytes <= 100 * 1073741824 && floor(var.max_recovery_backup_archive_size_bytes) == var.max_recovery_backup_archive_size_bytes
+    error_message = "max_recovery_backup_archive_size_bytes must be whole bytes from the selected archive size through 100 GiB."
+  }
+}
+
+variable "recovery_root_volume_size_gib" {
+  description = "Encrypted replaceable root disk size in GiB; the plan reserves 20 GiB plus 10 percent headroom for the captured and verification copies of the maximum expected backup archive."
+  type        = number
+  validation {
+    condition     = var.recovery_root_volume_size_gib >= 20 && floor(var.recovery_root_volume_size_gib) == var.recovery_root_volume_size_gib
+    error_message = "recovery_root_volume_size_gib must be a whole number of at least 20 GiB."
+  }
+}
+
 variable "recovery_data_volume_size_gib" {
   description = "Temporary target disk size in GiB; the recovery plan requires 10 percent staging headroom beyond the measured archive and extracted files."
   type        = number

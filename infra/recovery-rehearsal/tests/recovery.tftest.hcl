@@ -1,31 +1,33 @@
 mock_provider "aws" {}
 
 variables {
-  account_id                      = "111122223333"
-  operator_role_arn               = "arn:aws:iam::111122223333:role/minecraft-operator"
-  environment                     = "family-recovery"
-  resource_prefix                 = "minecraft-family-recovery"
-  deployment_revision             = "113b9e1c719a24fa0b65b6e7a33faf6573a394a5"
-  availability_zone               = "us-west-2a"
-  ami_id                          = "ami-0123456789abcdef0"
-  ami_owner_account_id            = "099720109477"
-  source_vpc_id                   = "vpc-0123456789abcdef0"
-  source_subnet_id                = "subnet-0123456789abcdef0"
-  source_backup_bucket_name       = "minecraft-family-source-backups"
-  recovery_backup_bucket_name     = "minecraft-family-recovery-backups"
-  restore_archive_size_bytes      = 17179869184
-  restore_uncompressed_size_bytes = 34359738368
-  recovery_data_volume_size_gib   = 64
-  source_data_filesystem_uuid     = "aaaaaaaa-1234-4234-8234-123456789abc"
-  data_filesystem_uuid            = "12345678-1234-4234-8234-123456789abc"
+  account_id                             = "111122223333"
+  operator_role_arn                      = "arn:aws:iam::111122223333:role/minecraft-operator"
+  environment                            = "family-recovery"
+  resource_prefix                        = "minecraft-family-recovery"
+  deployment_revision                    = "113b9e1c719a24fa0b65b6e7a33faf6573a394a5"
+  availability_zone                      = "us-west-2a"
+  ami_id                                 = "ami-0123456789abcdef0"
+  ami_owner_account_id                   = "099720109477"
+  source_vpc_id                          = "vpc-0123456789abcdef0"
+  source_subnet_id                       = "subnet-0123456789abcdef0"
+  source_backup_bucket_name              = "minecraft-family-source-backups"
+  recovery_backup_bucket_name            = "minecraft-family-recovery-backups"
+  restore_archive_size_bytes             = 17179869184
+  restore_uncompressed_size_bytes        = 34359738368
+  recovery_data_volume_size_gib          = 64
+  max_recovery_backup_archive_size_bytes = 17179869184
+  recovery_root_volume_size_gib          = 64
+  source_data_filesystem_uuid            = "aaaaaaaa-1234-4234-8234-123456789abc"
+  data_filesystem_uuid                   = "12345678-1234-4234-8234-123456789abc"
 }
 
 run "temporary_host_has_guarded_storage_and_endpoint" {
   command = plan
 
   assert {
-    condition     = aws_instance.recovery.instance_type == "m7g.large" && aws_instance.recovery.root_block_device[0].encrypted && aws_instance.recovery.root_block_device[0].delete_on_termination
-    error_message = "The recovery host must use the reviewed ARM64 size and an encrypted replaceable root disk."
+    condition     = aws_instance.recovery.instance_type == "m7g.large" && aws_instance.recovery.root_block_device[0].encrypted && aws_instance.recovery.root_block_device[0].volume_size == 64 && aws_instance.recovery.root_block_device[0].delete_on_termination
+    error_message = "The recovery host must use the reviewed ARM64 size and reviewed encrypted replaceable root disk."
   }
 
   assert {
@@ -159,4 +161,36 @@ run "reject_insufficient_restore_staging_capacity" {
     recovery_data_volume_size_gib = 52
   }
   expect_failures = [aws_ebs_volume.recovery]
+}
+
+run "reject_root_disk_too_small_for_backup_workspace" {
+  command = plan
+  variables {
+    recovery_root_volume_size_gib = 55
+  }
+  expect_failures = [aws_instance.recovery]
+}
+
+run "larger_backup_ceiling_requires_larger_root_disk" {
+  command = plan
+  variables {
+    max_recovery_backup_archive_size_bytes = 34359738368
+  }
+  expect_failures = [aws_instance.recovery]
+}
+
+run "reject_backup_ceiling_below_selected_archive" {
+  command = plan
+  variables {
+    max_recovery_backup_archive_size_bytes = 17179869183
+  }
+  expect_failures = [var.max_recovery_backup_archive_size_bytes]
+}
+
+run "reject_backup_ceiling_above_program_limit" {
+  command = plan
+  variables {
+    max_recovery_backup_archive_size_bytes = 107374182401
+  }
+  expect_failures = [var.max_recovery_backup_archive_size_bytes]
 }

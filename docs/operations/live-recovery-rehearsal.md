@@ -132,6 +132,15 @@ Require a new EC2 instance ID. Require the original EBS volume ID, filesystem UU
 
 Before creating the isolated recovery host, perform the final source backup that will supply the restore. Wait for its completed marker, then select that completed 64-character recovery point. Record its marker and archive object keys, sizes, ETags, and current version IDs with `aws s3api head-object` and `aws s3api list-object-versions`; hash each JSON evidence file after capture. Selecting the point after the final source backup keeps it recent if retention is run before restore.
 
+Set the selected identity in the operator shell from the final completed backup status and save a private transfer copy. Replace the placeholder before running these commands:
+
+```sh
+recovery_point="REPLACE_WITH_64_CHARACTER_COMPLETED_ID"
+printf '%s\n' "$recovery_point" | grep -Eq '^[0-9a-f]{64}$' || exit 1
+printf '%s\n' "$recovery_point" >"$evidence_dir/selected-recovery-point.txt"
+chmod 0600 "$evidence_dir/selected-recovery-point.txt"
+```
+
 Download the selected completed marker privately from `instances/survival/completed/$recovery_point.json` in the source bucket named by `$source_deployment`. Confirm that its `status` is `complete`, its `instance` is `survival`, and its `recovery_point` matches the selection. Measure the compressed archive from `archive.size_bytes` and the uncompressed recovery set by summing `size_bytes` for every `files[]` entry with `type == "file"`. Compare the archive size with the recorded `head-object` `ContentLength`:
 
 ```sh
@@ -147,15 +156,22 @@ jq -e --arg point "$recovery_point" \
 archive_bytes="$(jq -er '.archive.size_bytes' "$evidence_dir/selected-recovery-marker.json")"
 uncompressed_bytes="$(jq -er '[.files[] | select(.type == "file") | .size_bytes] | add' \
   "$evidence_dir/selected-recovery-marker.json")"
-python3 - "$archive_bytes" "$uncompressed_bytes" <<'PY'
+# Raise this ceiling if the reviewed update can grow the restored world's next backup.
+max_backup_archive_bytes="$archive_bytes"
+python3 - "$archive_bytes" "$uncompressed_bytes" "$max_backup_archive_bytes" <<'PY'
 import sys
-total = sum(int(value) for value in sys.argv[1:])
+archive, uncompressed, maximum_backup = (int(value) for value in sys.argv[1:])
+total = archive + uncompressed
 required_bytes = (total * 11 + 9) // 10
-print(f"Minimum whole GiB with 10% margin: {max(40, (required_bytes + (1 << 30) - 1) // (1 << 30))}")
+gib = 1 << 30
+data_gib = max(40, (required_bytes + gib - 1) // gib)
+root_gib = 20 + (22 * maximum_backup + 10 * gib - 1) // (10 * gib)
+print(f"Minimum recovery data volume GiB: {data_gib}")
+print(f"Minimum recovery root volume GiB: {root_gib}")
 PY
 ```
 
-Record `restore_archive_size_bytes` and `restore_uncompressed_size_bytes` from these measurements in private `recovery.tfvars`. Set `recovery_data_volume_size_gib` to at least the calculated whole-GiB minimum, and increase it if other target files need space. The restore stages the compressed archive and full uncompressed data together on `/srv/minecraft`; source disk size alone is insufficient. Inspect the resulting disk size and cost in the saved recovery plan and obtain approval for that exact plan before applying it.
+Record `restore_archive_size_bytes` and `restore_uncompressed_size_bytes` from these measurements in private `recovery.tfvars`. Set `recovery_data_volume_size_gib` to at least the calculated whole-GiB minimum, and increase it if other target files need space. The restore stages the compressed archive and full uncompressed data together on `/srv/minecraft`; source disk size alone is insufficient. Set `max_recovery_backup_archive_size_bytes` to an operator-reviewed ceiling at least as large as the selected archive, allowing for growth from any approved update. Set `recovery_root_volume_size_gib` to at least its calculated minimum: the root disk holds `/tmp`, where backup publication may need both a captured archive and its verification download plus 20 GiB of operating-system/workspace reserve. If the expected backup can exceed the reviewed ceiling, stop and replan. Inspect **both** disk sizes and costs in the saved recovery plan and obtain approval for that exact plan before applying it.
 
 ## Create the isolated recovery host
 
@@ -205,13 +221,23 @@ sudo systemctl restart minecraft-storage.service
 sudo systemctl start docker.service
 ```
 
-Before installing the runtime, transfer `$evidence_dir/recovery-deployment.json` to `/etc/minecraft/deployment.json` on the recovery host and the refreshed `$source_deployment` to `/etc/minecraft/source-deployment.json`. Both must be root-owned regular files with mode 0600 inside root-owned mode-0700 `/etc/minecraft`; compare each on-host SHA-256 with its private operator copy. `scripts/install_runtime.sh` reads the target deployment file during preflight. Install the reviewed runtime revision, then supply a fresh RCON secret and recorded EULA acceptance in target-private configuration. Configure the target operator file from the recovery deployment output and stage the selected point's original definition and manifest as described in [step 3 of the isolated restore procedure](backup-recovery.md#restore-onto-an-isolated-host). Its backup destination is the temporary recovery bucket. The restore command reads the source bucket only through `--source-deployment`.
+Before installing the runtime, transfer `$evidence_dir/recovery-deployment.json` to `/etc/minecraft/deployment.json` on the recovery host, the refreshed `$source_deployment` to `/etc/minecraft/source-deployment.json`, and `$evidence_dir/selected-recovery-point.txt` to `/etc/minecraft/recovery-point`. All three must be root-owned regular files with mode 0600 inside root-owned mode-0700 `/etc/minecraft`; compare each on-host SHA-256 with its private operator copy. Install a reviewed AWS CLI v2 with conditional object/multipart upload and SHA-256 support first, and confirm `aws --version` reports `aws-cli/2`. Then follow [runtime installation](runtime-installation.md): `scripts/install_runtime.sh` checks CLI capabilities and reads the target deployment file during preflight. Supply a fresh RCON secret and recorded EULA acceptance in target-private configuration. Configure the target operator file from the recovery deployment output and stage the selected point's original definition and manifest as described in [step 3 of the isolated restore procedure](backup-recovery.md#restore-onto-an-isolated-host). Its backup destination is the temporary recovery bucket. The restore command reads the source bucket only through `--source-deployment`.
+
+Before an update or clean stop backs up the restored world, verify that Python's temporary directory is `/tmp` on the sized replaceable root disk and that its available bytes can hold two copies of the reviewed maximum backup archive with 10 percent headroom. A different `TMPDIR`, tmpfs, or insufficient free space invalidates the root-disk plan; stop and revise it. Repeat this check after recreating the recovery host.
+
+```sh
+sudo python3 -c 'import tempfile; print(tempfile.gettempdir())'
+findmnt --target /tmp
+df --block-size=1 --output=source,size,avail,target /tmp
+```
 
 ## Restore and verify the selected recovery point
 
 On the recovery host, run:
 
 ```sh
+recovery_point="$(sudo cat /etc/minecraft/recovery-point)" || exit 1
+printf '%s\n' "$recovery_point" | grep -Eq '^[0-9a-f]{64}$' || exit 1
 /usr/bin/time -p -o /root/restore-time.txt \
   sudo /usr/local/sbin/minecraft-restore \
   --config /etc/minecraft/operator.json \
@@ -246,7 +272,7 @@ sudo /usr/local/sbin/minecraft-instance \
   --config /etc/minecraft/operator.json status survival
 ```
 
-Require the target stop to finish with `application: stopped` and `backup: complete`; if it fails, do not destroy the running recovery host. Do not infer rollback from reinstalling old binaries. To test recovery from an update, remove and recreate only the approved temporary recovery resources. Verify the first removal against its cleanup inventory using the checks below, and retain that inventory and evidence privately. Capture the new recovery deployment output and a new `recovery-cleanup-inventory.json` with mode 0600 for the recreated resources. After the new root host is ready, initialize and mount the new blank target disk using the same guarded sequence above. Transfer and verify both the new `/etc/minecraft/deployment.json` and refreshed `/etc/minecraft/source-deployment.json` handoffs as described above before repeating the reviewed AWS CLI and runtime installation. Restage a fresh RCON secret, recorded EULA acceptance, and target `/etc/minecraft/operator.json` configuration from the new recovery deployment output. Restage the selected point's original definition and manifest using the isolated restore procedure linked above. Restore the selected pre-update recovery point through `minecraft-restore`, then verify its recorded manifest and checkpoints again. Never run this rehearsal against the family data directory.
+Require the target stop to finish with `application: stopped` and `backup: complete`; if it fails, do not destroy the running recovery host. Do not infer rollback from reinstalling old binaries. To test recovery from an update, remove and recreate only the approved temporary recovery resources. Verify the first removal against its cleanup inventory using the checks below, and retain that inventory and evidence privately. Capture the new recovery deployment output and a new `recovery-cleanup-inventory.json` with mode 0600 for the recreated resources. After the new root host is ready, initialize and mount the new blank target disk using the same guarded sequence above. Transfer and verify the new `/etc/minecraft/deployment.json`, refreshed `/etc/minecraft/source-deployment.json`, and selected `/etc/minecraft/recovery-point` handoffs as described above. Install the reviewed AWS CLI v2 before repeating runtime installation. Restage a fresh RCON secret, recorded EULA acceptance, and target `/etc/minecraft/operator.json` configuration from the new recovery deployment output. Restage the selected point's original definition and manifest using the isolated restore procedure linked above. Repeat the restore command block with the staged identity on the new host, then verify its recorded manifest and checkpoints again. Never run this rehearsal against the family data directory.
 
 ## Prove failed backups remain visible
 
