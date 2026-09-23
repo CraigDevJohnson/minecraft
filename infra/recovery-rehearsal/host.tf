@@ -27,7 +27,7 @@ resource "aws_instance" "recovery" {
   instance_type               = "m7g.large"
   availability_zone           = var.availability_zone
   subnet_id                   = var.source_subnet_id
-  vpc_security_group_ids      = [var.source_security_group_id]
+  vpc_security_group_ids      = [aws_security_group.recovery.id]
   associate_public_ip_address = false
   iam_instance_profile        = aws_iam_instance_profile.recovery.name
   monitoring                  = false
@@ -53,8 +53,31 @@ resource "aws_instance" "recovery" {
     instance_metadata_tags      = "disabled"
   }
 
-  tags       = { Name = "${var.resource_prefix}-host", Purpose = "recovery-rehearsal" }
-  depends_on = [aws_iam_role_policy.ssm, aws_iam_role_policy.source_backup_read, aws_iam_role_policy.recovery_backups]
+  tags = { Name = "${var.resource_prefix}-host", Purpose = "recovery-rehearsal" }
+  depends_on = [
+    aws_iam_role_policy.ssm,
+    aws_iam_role_policy.source_backup_read,
+    aws_iam_role_policy.recovery_backup_read,
+    aws_iam_role_policy.recovery_backup_writes,
+    aws_vpc_security_group_egress_rule.web,
+  ]
+}
+
+resource "aws_security_group" "recovery" {
+  name        = "${var.resource_prefix}-host"
+  description = "No-ingress recovery host; administration through outbound SSM sessions only"
+  vpc_id      = var.source_vpc_id
+  tags        = { Name = "${var.resource_prefix}-host", Purpose = "recovery-rehearsal" }
+}
+
+resource "aws_vpc_security_group_egress_rule" "web" {
+  for_each          = toset(["80", "443"])
+  security_group_id = aws_security_group.recovery.id
+  description       = "Package, image, AWS API, and SSM traffic"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "tcp"
+  from_port         = tonumber(each.value)
+  to_port           = tonumber(each.value)
 }
 
 resource "aws_ebs_volume" "recovery" {

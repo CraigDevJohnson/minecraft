@@ -98,15 +98,6 @@ variable "source_subnet_id" {
   }
 }
 
-variable "source_security_group_id" {
-  description = "Existing game security group, consumed but never managed by this root."
-  type        = string
-  validation {
-    condition     = can(regex("^sg-[0-9a-f]{8,17}$", var.source_security_group_id))
-    error_message = "source_security_group_id must be a security group ID."
-  }
-}
-
 variable "source_backup_bucket_name" {
   description = "Existing source backup bucket; this host receives read-only access to one instance prefix."
   type        = string

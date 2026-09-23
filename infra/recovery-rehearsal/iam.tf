@@ -70,10 +70,9 @@ resource "aws_iam_role_policy" "source_backup_read" {
   })
 }
 
-resource "aws_iam_role_policy" "recovery_backups" {
-  count = var.backup_writes_enabled ? 1 : 0
-  name  = "temporary-recovery-backups"
-  role  = aws_iam_role.recovery.id
+resource "aws_iam_role_policy" "recovery_backup_read" {
+  name = "temporary-recovery-backup-read"
+  role = aws_iam_role.recovery.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -87,15 +86,9 @@ resource "aws_iam_role_policy" "recovery_backups" {
         }
       },
       {
-        Sid    = "ManageTemporaryBackups"
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject",
-          "s3:AbortMultipartUpload",
-          "s3:ListMultipartUploadParts",
-        ]
+        Sid      = "ReadTemporaryBackups"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
         Resource = ["${local.recovery_backup_bucket_arn}/instances/${var.instance_id}/*"]
       },
       {
@@ -105,5 +98,25 @@ resource "aws_iam_role_policy" "recovery_backups" {
         Resource = [local.recovery_backup_bucket_arn]
       },
     ]
+  })
+}
+
+resource "aws_iam_role_policy" "recovery_backup_writes" {
+  count = var.backup_writes_enabled ? 1 : 0
+  name  = "temporary-recovery-backup-writes"
+  role  = aws_iam_role.recovery.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "ManageTemporaryBackups"
+      Effect = "Allow"
+      Action = [
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload",
+        "s3:ListMultipartUploadParts",
+      ]
+      Resource = ["${local.recovery_backup_bucket_arn}/instances/${var.instance_id}/*"]
+    }]
   })
 }

@@ -8,7 +8,7 @@ output "deployment" {
     availability_zone    = var.availability_zone
     vpc_id               = var.source_vpc_id
     subnet_id            = var.source_subnet_id
-    security_group_id    = var.source_security_group_id
+    security_group_id    = aws_security_group.recovery.id
     host_id              = aws_instance.recovery.id
     host_role_arn        = aws_iam_role.recovery.arn
     elastic_ip           = aws_eip.recovery.public_ip
@@ -35,6 +35,7 @@ output "cleanup_inventory" {
     root_volume_id        = one(aws_instance.recovery.root_block_device).volume_id
     data_volume_id        = aws_ebs_volume.recovery.id
     elastic_ip_id         = aws_eip.recovery.id
+    security_group_id     = aws_security_group.recovery.id
     backup_bucket_name    = var.recovery_backup_bucket_name
     iam_role_name         = aws_iam_role.recovery.name
     instance_profile_name = aws_iam_instance_profile.recovery.name

@@ -10,7 +10,6 @@ ami_owner_account_id = "099720109477"
 
 source_vpc_id            = "vpc-0123456789abcdef0"
 source_subnet_id         = "subnet-0123456789abcdef0"
-source_security_group_id = "sg-0123456789abcdef0"
 source_backup_bucket_name = "replace-with-source-backup-bucket"
 recovery_backup_bucket_name = "replace-with-unique-temporary-recovery-bucket"
 instance_id               = "survival"

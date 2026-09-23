@@ -11,7 +11,6 @@ variables {
   ami_owner_account_id        = "099720109477"
   source_vpc_id               = "vpc-0123456789abcdef0"
   source_subnet_id            = "subnet-0123456789abcdef0"
-  source_security_group_id    = "sg-0123456789abcdef0"
   source_backup_bucket_name   = "minecraft-family-source-backups"
   recovery_backup_bucket_name = "minecraft-family-recovery-backups"
   source_data_filesystem_uuid = "aaaaaaaa-1234-4234-8234-123456789abc"
@@ -39,6 +38,16 @@ run "temporary_host_has_guarded_storage_and_endpoint" {
   assert {
     condition     = aws_instance.recovery.metadata_options[0].http_tokens == "required" && aws_instance.recovery.metadata_options[0].http_put_response_hop_limit == 1 && !aws_instance.recovery.associate_public_ip_address && aws_eip.recovery.domain == "vpc"
     error_message = "The recovery host must require IMDSv2 and use its explicit temporary EIP."
+  }
+
+  assert {
+    condition     = length(aws_security_group.recovery.ingress) == 0 && length(aws_security_group.recovery.egress) == 0 && toset(aws_instance.recovery.vpc_security_group_ids) == toset([aws_security_group.recovery.id])
+    error_message = "The recovery host must use its own security group without inline ingress or egress rules."
+  }
+
+  assert {
+    condition     = length(aws_vpc_security_group_egress_rule.web) == 2 && toset([for rule in aws_vpc_security_group_egress_rule.web : rule.from_port]) == toset([80, 443]) && toset([for rule in aws_vpc_security_group_egress_rule.web : rule.to_port]) == toset([80, 443]) && alltrue([for rule in aws_vpc_security_group_egress_rule.web : rule.ip_protocol == "tcp" && rule.cidr_ipv4 == "0.0.0.0/0" && rule.security_group_id == aws_security_group.recovery.id])
+    error_message = "The recovery security group may allow only TCP 80 and 443 egress."
   }
 }
 
@@ -75,8 +84,19 @@ run "temporary_backups_are_private_and_writable_only_when_enabled" {
   }
 
   assert {
-    condition     = length(aws_iam_role_policy.recovery_backups) == 1 && jsondecode(aws_iam_role_policy.recovery_backups[0].policy).Statement[1].Resource == ["arn:aws:s3:::minecraft-family-recovery-backups/instances/survival/*"]
-    error_message = "Enabled backup writes must target only the temporary recovery bucket."
+    condition = (
+      toset(flatten([for statement in jsondecode(aws_iam_role_policy.recovery_backup_read.policy).Statement : statement.Action])) == toset(["s3:GetBucketLocation", "s3:GetObject", "s3:ListBucket"]) &&
+      jsondecode(aws_iam_role_policy.recovery_backup_read.policy).Statement[0].Resource == ["arn:aws:s3:::minecraft-family-recovery-backups"] &&
+      jsondecode(aws_iam_role_policy.recovery_backup_read.policy).Statement[0].Condition.StringLike["s3:prefix"] == ["instances/survival/*"] &&
+      jsondecode(aws_iam_role_policy.recovery_backup_read.policy).Statement[1].Resource == ["arn:aws:s3:::minecraft-family-recovery-backups/instances/survival/*"] &&
+      jsondecode(aws_iam_role_policy.recovery_backup_read.policy).Statement[2].Resource == ["arn:aws:s3:::minecraft-family-recovery-backups"]
+    )
+    error_message = "Temporary backup reads must remain independently available only in the selected temporary namespace."
+  }
+
+  assert {
+    condition     = length(aws_iam_role_policy.recovery_backup_writes) == 1 && toset(flatten([for statement in jsondecode(aws_iam_role_policy.recovery_backup_writes[0].policy).Statement : statement.Action])) == toset(["s3:AbortMultipartUpload", "s3:DeleteObject", "s3:ListMultipartUploadParts", "s3:PutObject"]) && jsondecode(aws_iam_role_policy.recovery_backup_writes[0].policy).Statement[0].Resource == ["arn:aws:s3:::minecraft-family-recovery-backups/instances/survival/*"]
+    error_message = "Enabled temporary backup mutations must be limited to the reviewed actions and temporary instance namespace."
   }
 }
 
@@ -89,7 +109,7 @@ run "private_outputs_identify_target_and_cleanup_boundary" {
   }
 
   assert {
-    condition     = output.cleanup_inventory.purpose == "recovery-rehearsal" && output.cleanup_inventory.host_id == aws_instance.recovery.id && output.cleanup_inventory.data_volume_id == aws_ebs_volume.recovery.id && output.cleanup_inventory.elastic_ip_id == aws_eip.recovery.id && output.cleanup_inventory.backup_bucket_name == "minecraft-family-recovery-backups"
+    condition     = output.cleanup_inventory.purpose == "recovery-rehearsal" && output.cleanup_inventory.host_id == aws_instance.recovery.id && output.cleanup_inventory.data_volume_id == aws_ebs_volume.recovery.id && output.cleanup_inventory.elastic_ip_id == aws_eip.recovery.id && output.cleanup_inventory.security_group_id == aws_security_group.recovery.id && output.cleanup_inventory.backup_bucket_name == "minecraft-family-recovery-backups"
     error_message = "Cleanup output must enumerate only temporary recovery resources."
   }
 }
@@ -101,8 +121,8 @@ run "failed_backup_mode_removes_only_temporary_write_policy" {
   }
 
   assert {
-    condition     = length(aws_iam_role_policy.recovery_backups) == 0 && aws_iam_role_policy.source_backup_read.name == "source-backup-read-only"
-    error_message = "Failed-backup mode must remove temporary writes while retaining source read access."
+    condition     = toset(flatten([for statement in jsondecode(aws_iam_role_policy.recovery_backup_read.policy).Statement : statement.Action])) == toset(["s3:GetBucketLocation", "s3:GetObject", "s3:ListBucket"]) && length(aws_iam_role_policy.recovery_backup_writes) == 0 && aws_iam_role_policy.source_backup_read.name == "source-backup-read-only"
+    error_message = "Failed-backup mode must retain temporary reads while removing only temporary writes."
   }
 }
 

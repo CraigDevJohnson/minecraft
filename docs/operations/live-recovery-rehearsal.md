@@ -13,7 +13,7 @@ umask 077
 repo_dir="$PWD"
 evidence_dir="/absolute/private/minecraft/issue-8-$(date -u +%Y%m%dT%H%M%SZ)"
 source_dir="/absolute/private/minecraft/family"
-recovery_dir="$evidence_dir/recovery-infra"
+recovery_dir="$evidence_dir/infra/recovery-rehearsal"
 mkdir -p "$evidence_dir" "$recovery_dir"
 git rev-parse HEAD >"$evidence_dir/git-revision.txt"
 git status --short --branch >"$evidence_dir/git-status.txt"
@@ -21,7 +21,7 @@ python3 scripts/bootstrap_tools.py
 .tools/bin/task check 2>&1 | tee "$evidence_dir/repository-check.txt"
 ```
 
-Copy `infra/recovery-rehearsal`, its sibling `scripts` directory, and private backend configuration into the private work area. Fill `recovery.tfvars` from `deployment.tfvars.example`. Use the source deployment's account, region, AZ, AMI, VPC, subnet, security group, and backup bucket. Generate a new filesystem UUID. It must differ from the source UUID.
+Copy `infra/recovery-rehearsal`, its sibling `scripts` directory, and private backend configuration into the private work area. Preserve the `infra/recovery-rehearsal` directory depth under `$evidence_dir`; the root's `../../scripts` template references must resolve to `$evidence_dir/scripts`. Fill `recovery.tfvars` from `deployment.tfvars.example`. Use the source deployment's account, region, AZ, AMI, VPC, subnet, and backup bucket as inputs. The recovery root must create its own temporary security group with no ingress; do not reuse the source game security group. Generate a new filesystem UUID. It must differ from the source UUID.
 
 Record the approved scope in `authorization.txt`. Include the issue comment or approval reference, approved plan hashes, temporary resource classes, and exact cleanup boundary. Do not continue if issue #7 is open or the approved scope omits host replacement, the recovery host and disk, the recovery EIP, or cleanup.
 
@@ -56,8 +56,6 @@ sudo findmnt --json --target /srv/minecraft
 sudo df --block-size=1 --output=source,size,used,avail,target /srv/minecraft
 sudo du --bytes --summarize /srv/minecraft/instances/survival
 ```
-
-Select one completed 64-character recovery point from `minecraft-backup status`. Record its marker and archive object keys, sizes, ETags, and current version IDs with `aws s3api head-object` and `aws s3api list-object-versions`. Hash each JSON evidence file after capture.
 
 Before the tests, record recognizable checkpoints in all three dimensions. Record at least one player inventory or state checkpoint, the allowlist and operator state, the active manifest digest, and a Floodgate or plugin-state checkpoint. Keep player names, UUIDs, coordinates, and raw file content private. A player can confirm the same checkpoint for issue #9, but issue #8 still needs server-side evidence.
 
@@ -123,6 +121,8 @@ Wait for SSM. Verify the retained mount before you install or start the runtime.
 
 Require a new EC2 instance ID. Require the original EBS volume ID, filesystem UUID, EIP allocation ID, public address, backup bucket, manifest digest, and checkpoint values.
 
+Before creating the isolated recovery host, perform the final source backup that will supply the restore. Wait for its completed marker, then select that completed 64-character recovery point. Record its marker and archive object keys, sizes, ETags, and current version IDs with `aws s3api head-object` and `aws s3api list-object-versions`; hash each JSON evidence file after capture. Selecting the point only after the final source backup prevents a later stop, start, or replacement backup from pruning the selected point before restore.
+
 ## Create the isolated recovery host
 
 Start the 60-minute operator recovery timer before the first recovery infrastructure command. Initialize the recovery root with its separate backend key. Create and inspect a saved plan.
@@ -144,7 +144,7 @@ shasum -a 256 "$evidence_dir/recovery-create.tfplan" \
   >"$evidence_dir/recovery-create.tfplan.sha256"
 ```
 
-The plan may create only the temporary host, root disk, data disk, attachment, EIP and association, instance role and profile, inline policies, and temporary backup bucket with its protection settings. The source VPC, subnet, security group, bucket, data disk, host, EIP, and state are inputs. Stop if the plan manages any source resource. Source S3 access must remain read-only. Write, delete, and multipart access must name only the temporary recovery bucket.
+The plan may create only the temporary host, root disk, data disk, attachment, temporary no-ingress security group and its reviewed outbound web rules, EIP and association, instance role and profile, inline policies, and temporary backup bucket with its protection settings. The source VPC, subnet, bucket, data disk, host, EIP, and state are inputs; the source game security group must not be attached to the recovery host. The recovery security group must have no ingress and only the approved TCP 80/443 egress needed for package, AWS API, and SSM access. Stop if the plan manages any source resource. Source S3 access must remain read-only. Write, delete, and multipart access must name only the temporary recovery bucket.
 
 Apply only the exact saved plan that Craig approved. Save both sensitive outputs with mode 0600.
 
@@ -171,7 +171,7 @@ sudo systemctl restart minecraft-storage.service
 sudo systemctl start docker.service
 ```
 
-Install the reviewed runtime revision. Supply a fresh RCON secret and the recorded EULA acceptance in target-private configuration. Keep the source deployment as `/etc/minecraft/source-deployment.json`. Configure the target operator file from the recovery deployment output. Its backup destination is the temporary recovery bucket. The restore command reads the source bucket only through `--source-deployment`.
+Install the reviewed runtime revision. Supply a fresh RCON secret and the recorded EULA acceptance in target-private configuration. Keep the source deployment as `/etc/minecraft/source-deployment.json`. Configure the target operator file from the recovery deployment output and stage the selected point's original definition and manifest as described in [step 3 of the isolated restore procedure](backup-recovery.md#restore-onto-an-isolated-host). Its backup destination is the temporary recovery bucket. The restore command reads the source bucket only through `--source-deployment`.
 
 ## Restore and verify the selected recovery point
 
@@ -195,7 +195,7 @@ sudo du --bytes --summarize /srv/minecraft/instances/survival
 
 Copy the timing and storage output into the private evidence directory through SSM. Verify the active manifest digest and every recorded world, player, access, Floodgate, and plugin checkpoint after Minecraft reports ready. Record the UTC time of the last confirmed checkpoint. Compute total operator recovery time from the initial timestamp to that confirmation. If the total exceeds 60 minutes, report the measured time and the slowest phase.
 
-Repeat `head-object` and `list-object-versions` for the selected source marker and archive. Their version IDs, sizes, ETags, and checksums must match the baseline.
+Repeat `head-object` and `list-object-versions` for the selected source marker and archive. Their version IDs, sizes, and ETags must match the baseline.
 
 ## Rehearse update recovery on the isolated host
 
@@ -208,7 +208,7 @@ sudo /usr/local/sbin/minecraft-instance \
   --config /etc/minecraft/operator.json status survival
 ```
 
-Do not infer rollback from reinstalling old binaries. To test recovery from an update, remove and recreate only the approved temporary recovery resources, initialize the new blank target disk, and restore the selected pre-update recovery point through `minecraft-restore`. Verify its recorded manifest and checkpoints again. Never run this rehearsal against the family data directory.
+Do not infer rollback from reinstalling old binaries. To test recovery from an update, remove and recreate only the approved temporary recovery resources. Capture the new private recovery deployment output with mode 0600. After the new root host is ready, initialize and mount the new blank target disk using the same guarded sequence above. Then repeat the reviewed AWS CLI and runtime installation, fresh RCON secret and recorded EULA staging, `/etc/minecraft/source-deployment.json` copy, and target `/etc/minecraft/operator.json` configuration from the new recovery deployment output. Restage the selected point's original definition and manifest using the isolated restore procedure linked above. Restore the selected pre-update recovery point through `minecraft-restore`, then verify its recorded manifest and checkpoints again. Never run this rehearsal against the family data directory.
 
 ## Prove failed backups remain visible
 
@@ -277,7 +277,7 @@ shasum -a 256 "$evidence_dir/recovery-destroy.tfplan" \
   >"$evidence_dir/recovery-destroy.tfplan.sha256"
 ```
 
-The plan must delete only resources in the approved cleanup inventory. Apply only the saved destroy plan that Craig approved.
+The plan must delete only resources in the approved cleanup inventory, including the temporary no-ingress security group and its outbound rules. Apply only the saved destroy plan that Craig approved.
 
 ```sh
 "$repo_dir/.tools/bin/tofu" -chdir="$recovery_dir" apply \
