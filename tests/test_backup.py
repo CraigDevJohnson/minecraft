@@ -16,11 +16,17 @@ import minecraft_backup as backup
 class MemoryStore:
     def __init__(self):
         self.objects = {}
+        self.last_modified = {}
+        self.publication_sequence = 0
         self.fail_upload = False
         self.fail_delete = False
 
     def keys(self, prefix):
         return sorted(key for key in self.objects if key.startswith(prefix))
+
+    def list_objects(self, prefix):
+        return [{'key': key, 'last_modified': self.last_modified[key]}
+                for key in self.keys(prefix)]
 
     def download(self, key, target, *, max_bytes):
         if key not in self.objects:
@@ -34,12 +40,16 @@ class MemoryStore:
     def upload(self, key, source):
         if self.fail_upload:
             raise backup.BackupError('interrupted upload')
-        self.objects.setdefault(key, source.read_bytes())
+        if key not in self.objects:
+            self.publication_sequence += 1
+            self.objects[key] = source.read_bytes()
+            self.last_modified[key] = f'2026-09-08T10:00:{self.publication_sequence:02d}Z'
 
     def delete(self, key):
         if self.fail_delete:
             raise backup.BackupError('delete failed')
         self.objects.pop(key, None)
+        self.last_modified.pop(key, None)
 
 
 class BackupTests(unittest.TestCase):
@@ -187,12 +197,50 @@ class BackupTests(unittest.TestCase):
             self.request['session'] = f'session-{day}'
             self.record_session()
             points.append(self.publish(now=f'2026-08-{day:02d}T10:00:00Z')['recovery_point'])
+        self.assertEqual(backup.prune(self.store, 'survival', self.workspace)['outcome'], 'complete')
         current = backup.status(self.store, 'survival', self.workspace, now='2027-08-16T10:00:00Z')
         retained = [point['recovery_point'] for point in current['recovery_points']]
         self.assertEqual(len(retained), 14)
         self.assertEqual(retained[0], points[-1])
         self.assertNotIn(points[0], retained)
         self.assertEqual(current['recovery_points'][0]['age_seconds'], 365 * 86400)
+
+    def test_retention_protects_published_point_when_host_clock_moves_backward(self):
+        points = []
+        for day in range(1, 15):
+            self.request['session'] = f'session-{day}'
+            self.record_session()
+            points.append(self.publish(now=f'2026-08-{day:02d}T10:00:00Z')['recovery_point'])
+        self.request['session'] = 'session-clock-rollback'
+        self.record_session()
+        result = self.publish(now='2026-07-01T10:00:00Z')
+        point = result['recovery_point']
+        self.assertEqual(backup.prune(self.store, 'survival', self.workspace)['outcome'], 'complete')
+        metadata, _ = backup.load_recovery(self.store, 'survival', point, self.workspace)
+        self.assertEqual(metadata['recovery_point'], point)
+        self.assertEqual(len(self.store.keys('instances/survival/completed/')), 14)
+        self.assertNotIn(backup.marker_key('survival', points[0]), self.store.objects)
+
+    def test_publish_returns_completion_before_destructive_pruning(self):
+        for day in range(1, 15):
+            self.request['session'] = f'session-{day}'
+            self.record_session()
+            self.publish(now=f'2026-08-{day:02d}T10:00:00Z')
+        self.request['session'] = 'session-15'
+        self.record_session()
+        point = backup.point_identity('survival', self.request['session'], self.request['manifest_sha256'])
+        marker = backup.marker_key('survival', point)
+        delete = self.store.delete
+        def remove_returned_point(key):
+            delete(key)
+            if '/completed/' in key and key != marker:
+                metadata = json.loads(self.store.objects[marker])
+                delete(marker)
+                delete(metadata['archive']['key'])
+        self.store.delete = remove_returned_point
+        result = self.publish(now='2026-08-15T10:00:00Z')
+        self.assertEqual(result['status'], 'complete')
+        self.assertIn(marker, self.store.objects)
 
     def test_partial_pruning_is_visible_and_retries_orphan_deletion(self):
         for day in range(1, 15):
@@ -207,8 +255,9 @@ class BackupTests(unittest.TestCase):
         self.store.delete = fail_archive
         self.request['session'] = 'session-15'
         self.record_session()
-        result = self.publish(now='2026-08-15T10:00:00Z')
-        self.assertEqual(result['retention']['outcome'], 'pending')
+        self.publish(now='2026-08-15T10:00:00Z')
+        result = backup.prune(self.store, 'survival', self.workspace)
+        self.assertEqual(result['outcome'], 'pending')
         state = backup.status(self.store, 'survival', self.workspace)
         self.assertEqual(state['retention']['pending_deletions'], 1)
         self.store.delete = delete
@@ -232,11 +281,15 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(result['outcome'], 'pending')
         self.assertEqual(self.store.objects, before)
 
-    def test_retention_listing_failure_keeps_verified_completion_receipt(self):
-        def fail_listing(prefix):
-            raise backup.BackupError('catalog listing unavailable')
-        self.store.keys = fail_listing
+    def test_publish_returns_verified_completion_without_entering_optional_pruning(self):
+        original = backup.prune
+        def block_pruning(*args):
+            raise RuntimeError('optional retention consumed the completion receipt')
+        backup.prune = block_pruning
+        self.addCleanup(setattr, backup, 'prune', original)
+
         result = self.publish()
+
         self.assertEqual(result['status'], 'complete')
         self.assertEqual(result['retention']['outcome'], 'pending')
         metadata, _ = backup.load_recovery(self.store, 'survival', result['recovery_point'], self.workspace)

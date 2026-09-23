@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -150,8 +151,8 @@ class S3Store:
         except OSError as error:
             raise BackupError("cannot write the verified S3 download") from error
 
-    def keys(self, prefix: str) -> list[str]:
-        keys = []
+    def _list_objects(self, prefix: str, *, include_last_modified: bool):
+        objects = []
         seen = set()
         token = None
         tokens = set()
@@ -167,17 +168,36 @@ class S3Store:
                 key = item.get("Key") if isinstance(item, dict) else None
                 if not isinstance(key, str) or not key.startswith(prefix) or key in seen:
                     raise BackupError("S3 object listing is invalid, duplicated, or outside the instance prefix")
-                keys.append(key)
+                if include_last_modified:
+                    last_modified = item.get("LastModified")
+                    try:
+                        modified = datetime.fromisoformat(last_modified.replace("Z", "+00:00"))
+                    except (AttributeError, TypeError, ValueError) as error:
+                        raise BackupError("S3 object listing has invalid publication metadata") from error
+                    if modified.tzinfo is None:
+                        raise BackupError("S3 object listing has invalid publication metadata")
+                    objects.append({
+                        "key": key,
+                        "last_modified": modified.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    })
+                else:
+                    objects.append(key)
                 seen.add(key)
-                if len(keys) > 10000:
+                if len(objects) > 10000:
                     raise BackupError("S3 object listing exceeds the safety limit")
             if not page["IsTruncated"]:
-                return keys
+                return objects
             token = page.get("NextContinuationToken")
             if not isinstance(token, str) or not token or token in tokens:
                 raise BackupError("S3 object listing is incomplete or repeated")
             tokens.add(token)
         raise BackupError("S3 object listing exceeds the page safety limit")
+
+    def list_objects(self, prefix: str) -> list[dict[str, str]]:
+        return self._list_objects(prefix, include_last_modified=True)
+
+    def keys(self, prefix: str) -> list[str]:
+        return self._list_objects(prefix, include_last_modified=False)
 
     def delete(self, key: str) -> None:
         self._call("delete-object", "--key", key)
