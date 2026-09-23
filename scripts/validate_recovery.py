@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,24 @@ from validate_runtime import DIMENSIONS, free_port, player_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_HOOK = ["/fixture-only/minecraft-backup", "hook"]
+
+
+def write_rcon_secret(path, *, exclude=None):
+    while True:
+        value = secrets.token_urlsafe(32)
+        if value != exclude:
+            break
+    path.write_text(value + "\n")
+    path.chmod(0o600)
+    return value
+
+
+def require_rcon_password(path, expected, *, rejected=None):
+    properties = path.read_text()
+    if f"rcon.password={expected}" not in properties.splitlines():
+        raise RuntimeError("effective RCON configuration did not apply the expected private credential")
+    if rejected is not None and rejected in properties:
+        raise RuntimeError("effective RCON configuration retained the source private credential")
 
 
 class LocalStore:
@@ -53,6 +72,11 @@ class LocalStore:
     def keys(self, prefix):
         return sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*")
                       if path.is_file() and path.relative_to(self.root).as_posix().startswith(prefix))
+
+    def list_objects(self, prefix):
+        return [{"key": key, "last_modified": datetime.fromtimestamp(
+                    (self.root / key).stat().st_mtime, timezone.utc).isoformat()}
+                for key in self.keys(prefix)]
 
     def delete(self, key):
         (self.root / key).unlink(missing_ok=True)
@@ -109,11 +133,10 @@ def validate(operator_config, output):
     manifest = content.load_manifest(ROOT / "runtime/content.json")
     runtime.write_json(output / "definition.json", definition)
     runtime.write_json(output / definition["manifest"], manifest)
-    secret = output / "rcon.secret"
-    secret.write_text(secrets.token_urlsafe(32) + "\n")
-    secret.chmod(0o600)
+    source_secret = write_rcon_secret(output / "source-rcon.secret")
+    target_secret = write_rcon_secret(output / "target-rcon.secret", exclude=source_secret)
 
-    def machine(name, number):
+    def machine(name, number, secret_file):
         directory = output / name
         directory.mkdir(mode=0o700)
         deployment = {
@@ -126,12 +149,13 @@ def validate(operator_config, output):
         runtime.write_json(output / f"{name}-deployment.json", deployment)
         config = {"deployment": str(output / f"{name}-deployment.json"),
                   "definitions": {instance: str(output / "definition.json")},
-                  "rcon_password_file": str(secret), "eula_accepted": True,
+                  "rcon_password_file": str(secret_file), "eula_accepted": True,
                   "backup_hook": LOCAL_HOOK, "readiness_timeout": 600,
                   "shutdown_timeout": 120, "backup_timeout": 900, "warning_seconds": 1}
         return RecoveryMachine(config, directory, LocalStore(output / f"{name}-objects"), output)
 
-    source, target = machine("source", 6), machine("target", 7)
+    source = machine("source", 6, output / "source-rcon.secret")
+    target = machine("target", 7, output / "target-rcon.secret")
     manager = runtime.Manager(source.root, source, [instance])
     restored = runtime.Manager(target.root, target, [instance])
     report = {"status": "incomplete", "platform": platform, "instance": instance,
@@ -154,6 +178,8 @@ def validate(operator_config, output):
             content, "render_compose", side_effect=lambda *args, **kwargs: render(*args, **kwargs, bind_address="127.0.0.1")):
         try:
             require(manager.execute("start", instance)["ready"], "source startup did not become ready")
+            data = source.root / "instances" / instance / "data"
+            require_rcon_password(data / "server.properties", source_secret)
             for dimension in DIMENSIONS:
                 source.rcon(instance, f"execute in minecraft:{dimension} run forceload add 0 0")
                 response = source.rcon(instance, f"execute in minecraft:{dimension} run setblock 0 100 0 minecraft:diamond_block")
@@ -168,7 +194,6 @@ def validate(operator_config, output):
             require(not source.inspect(instance)["running"] and manager.state(instance)["backup"] == "failed",
                     "failed upload did not leave a stopped pending session")
             require(not source.store.keys(f"instances/{instance}/completed/"), "failed upload published a recovery point")
-            data = source.root / "instances" / instance / "data"
             fixtures = {
                 "world/players/data/00000000-0000-0000-0000-000000000006.dat": player_fixture(),
                 "world/players/stats/00000000-0000-0000-0000-000000000006.json": b'{"stats":{"minecraft:custom":{"minecraft:jump":6}},"DataVersion":4903}\n',
@@ -192,10 +217,11 @@ def validate(operator_config, output):
             result = recovery.restore(target, source.deployment, instance, point, source.store)
             require(result["status"] == "restored", "restore did not publish a valid isolated target")
             require(restored.execute("start", instance)["ready"], "restored data did not start through the lifecycle controller")
+            target_data = target.root / "instances" / instance / "data"
+            require_rcon_password(target_data / "server.properties", target_secret, rejected=source_secret)
             for dimension in DIMENSIONS:
                 response = target.rcon(instance, f"execute in minecraft:{dimension} if block 0 100 0 minecraft:diamond_block")
                 require("Test passed" in response, "restored dimension checkpoint was not recognized")
-            target_data = target.root / "instances" / instance / "data"
             require(restored.execute("stop", instance)["backup"] == "complete", "restored instance did not cleanly stop and back up")
             for name, value in fixtures.items():
                 require((target_data / name).read_bytes() == value, "restored player/plugin/Floodgate checkpoint changed")
@@ -205,7 +231,8 @@ def validate(operator_config, output):
             report.update(status="passed", recovery_point=point, dimensions=list(DIMENSIONS),
                           preserved_checkpoint_files=len(fixtures), healthy_starts=2, clean_stops=2,
                           local_restore_and_start_seconds=round(time.monotonic() - start, 3),
-                          interrupted_upload_retry=True, source_data_unchanged=True, selected_backup_unchanged=True)
+                          interrupted_upload_retry=True, rcon_secret_rotated=True,
+                          source_data_unchanged=True, selected_backup_unchanged=True)
             return report
         finally:
             for name, local in (("target", target), ("source", source)):

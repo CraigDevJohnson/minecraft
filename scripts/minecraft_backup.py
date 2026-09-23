@@ -293,29 +293,29 @@ def publish(request, store, workspace, *, now=None):
         verified_metadata, _ = load_recovery(store, instance, point, workspace)
         if verified_metadata != metadata:
             raise BackupError('logical recovery point already contains different metadata')
-    try:
-        retention = prune(store, instance, workspace)
-    except (BackupError, OSError):
-        retention = {'policy': 'latest-14-completed', 'outcome': 'pending', 'failed': 1}
     return {'schema_version': 1, 'status': 'complete', 'instance': instance,
             'session': request['session'], 'manifest_sha256': request['manifest_sha256'],
-            'recovery_point': point, 'retention': retention}
+            'recovery_point': point,
+            'retention': {'policy': 'latest-14-completed', 'outcome': 'pending', 'failed': 0}}
 
 
 def catalog(store, instance, workspace):
     check_instance(instance)
     points, invalid = [], 0
+    published = {}
     prefix = f'instances/{instance}/completed/'
-    for key in store.keys(prefix):
+    for item in store.list_objects(prefix):
+        key = item['key']
         point = key.removeprefix(prefix).removesuffix('.json')
         try:
             if key != marker_key(instance, point):
                 raise BackupError('invalid completion key')
             metadata, _ = load_recovery(store, instance, point, workspace)
             points.append(metadata)
+            published[point] = timestamp(item['last_modified'])
         except BackupError:
             invalid += 1
-    points.sort(key=lambda item: (item['created_at'], item['recovery_point']), reverse=True)
+    points.sort(key=lambda item: (published[item['recovery_point']], item['recovery_point']), reverse=True)
     return points, invalid
 
 
