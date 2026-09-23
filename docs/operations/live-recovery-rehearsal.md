@@ -13,6 +13,7 @@ umask 077
 repo_dir="$PWD"
 evidence_dir="/absolute/private/minecraft/issue-8-$(date -u +%Y%m%dT%H%M%SZ)"
 source_dir="/absolute/private/minecraft/family"
+source_deployment="$source_dir/deployment.json"
 recovery_dir="$evidence_dir/infra/recovery-rehearsal"
 mkdir -p "$evidence_dir" "$recovery_dir"
 git rev-parse HEAD >"$evidence_dir/git-revision.txt"
@@ -21,27 +22,27 @@ python3 scripts/bootstrap_tools.py
 .tools/bin/task check 2>&1 | tee "$evidence_dir/repository-check.txt"
 ```
 
-Copy `infra/recovery-rehearsal`, its sibling `scripts` directory, and private backend configuration into the private work area. Preserve the `infra/recovery-rehearsal` directory depth under `$evidence_dir`; the root's `../../scripts` template references must resolve to `$evidence_dir/scripts`. Fill `recovery.tfvars` from `deployment.tfvars.example`. Use the source deployment's account, region, AZ, AMI, VPC, subnet, and backup bucket as inputs. The recovery root must create its own temporary security group with no ingress; do not reuse the source game security group. Generate a new filesystem UUID. It must differ from the source UUID.
+Copy `infra/recovery-rehearsal`, its sibling `scripts` directory, and private backend configuration into the private work area. Preserve the `infra/recovery-rehearsal` directory depth under `$evidence_dir`; the root's `../../scripts` template references must resolve to `$evidence_dir/scripts`. Start `recovery.tfvars` from `deployment.tfvars.example` and fill its restore-size fields after the final source backup below. Use the source deployment's account, region, AZ, AMI, VPC, subnet, and backup bucket as inputs. The recovery root must create its own temporary security group with no ingress; do not reuse the source game security group. Generate a new filesystem UUID. It must differ from the source UUID.
 
 Record the approved scope in `authorization.txt`. Include the issue comment or approval reference, approved plan hashes, temporary resource classes, and exact cleanup boundary. Do not continue if issue #7 is open or the approved scope omits host replacement, the recovery host and disk, the recovery EIP, or cleanup.
 
 ## Record the source baseline
 
-Capture the source deployment and recovery point before a mutation. The examples assume that `$source_dir/deployment.json` is the private `deployment` output and `$source_dir/operator.json` is the installed operator configuration source.
+Capture the source deployment and storage baseline before a mutation. Select the recovery point after the final source backup as directed below. The examples assume that `$source_deployment` is the private `deployment` output and `$source_dir/operator.json` is the installed operator configuration source.
 
 ```sh
 python3 scripts/minecraft_host.py \
-  --deployment "$source_dir/deployment.json" status \
+  --deployment "$source_deployment" status \
   | tee "$evidence_dir/source-status-before.json"
 
 aws ec2 describe-instances \
-  --instance-ids "$(jq -r .host_id "$source_dir/deployment.json")" \
+  --instance-ids "$(jq -r .host_id "$source_deployment")" \
   >"$evidence_dir/source-instance-before.json"
 aws ec2 describe-volumes \
-  --volume-ids "$(jq -r .data_volume_id "$source_dir/deployment.json")" \
+  --volume-ids "$(jq -r .data_volume_id "$source_deployment")" \
   >"$evidence_dir/source-volume-before.json"
 aws ec2 describe-addresses \
-  --allocation-ids "$(jq -r .elastic_ip_id "$source_dir/deployment.json")" \
+  --allocation-ids "$(jq -r .elastic_ip_id "$source_deployment")" \
   >"$evidence_dir/source-address-before.json"
 ```
 
@@ -74,16 +75,16 @@ Copy `source-backup-time.txt` through SSM. Record the completed archive size fro
 ```sh
 /usr/bin/time -p -o "$evidence_dir/clean-stop-time.txt" \
   python3 scripts/minecraft_host.py \
-  --deployment "$source_dir/deployment.json" stop \
+  --deployment "$source_deployment" stop \
   | tee "$evidence_dir/clean-stop.json"
 
 python3 scripts/minecraft_host.py \
-  --deployment "$source_dir/deployment.json" status \
+  --deployment "$source_deployment" status \
   | tee "$evidence_dir/stopped-status.json"
 
 /usr/bin/time -p -o "$evidence_dir/clean-start-time.txt" \
   python3 scripts/minecraft_host.py \
-  --deployment "$source_dir/deployment.json" start --instance survival \
+  --deployment "$source_deployment" start --instance survival \
   | tee "$evidence_dir/clean-start.json"
 ```
 
@@ -115,13 +116,47 @@ Stop if the plan replaces or deletes the data volume, filesystem identity, EIP a
   2>&1 | tee "$evidence_dir/host-replacement-apply.txt"
 "$repo_dir/.tools/bin/tofu" -chdir="$source_dir/infra" output -json deployment \
   >"$source_dir/deployment-after-replacement.json"
+chmod 0600 "$source_dir/deployment-after-replacement.json"
+source_deployment="$source_dir/deployment-after-replacement.json"
 ```
 
-Wait for SSM. Verify the retained mount before you install or start the runtime. Install the same reviewed revision on the new root disk, restore the private operator configuration, and run the normal host start command. Record the startup time and checkpoints.
+Wait for SSM on the new host ID in `$source_deployment`. Verify the retained mount. Through the approved private transfer path, install this refreshed handoff on the replacement host as `/etc/minecraft/deployment.json`, a root-owned regular file with mode 0600 inside root-owned mode-0700 `/etc/minecraft`. Compare its SHA-256 with `$source_deployment` privately before running `scripts/install_runtime.sh`; the installer reads this on-host file during preflight. Install the same reviewed revision on the new root disk, restore the private operator configuration, and use `$source_deployment` for every subsequent source-host command. Time the normal host start and record the checkpoints:
+
+```sh
+/usr/bin/time -p -o "$evidence_dir/replacement-start-time.txt" \
+  python3 scripts/minecraft_host.py \
+  --deployment "$source_deployment" start --instance survival \
+  | tee "$evidence_dir/replacement-start.json"
+```
 
 Require a new EC2 instance ID. Require the original EBS volume ID, filesystem UUID, EIP allocation ID, public address, backup bucket, manifest digest, and checkpoint values.
 
-Before creating the isolated recovery host, perform the final source backup that will supply the restore. Wait for its completed marker, then select that completed 64-character recovery point. Record its marker and archive object keys, sizes, ETags, and current version IDs with `aws s3api head-object` and `aws s3api list-object-versions`; hash each JSON evidence file after capture. Selecting the point only after the final source backup prevents a later stop, start, or replacement backup from pruning the selected point before restore.
+Before creating the isolated recovery host, perform the final source backup that will supply the restore. Wait for its completed marker, then select that completed 64-character recovery point. Record its marker and archive object keys, sizes, ETags, and current version IDs with `aws s3api head-object` and `aws s3api list-object-versions`; hash each JSON evidence file after capture. Selecting the point after the final source backup keeps it recent if retention is run before restore.
+
+Download the selected completed marker privately from `instances/survival/completed/$recovery_point.json` in the source bucket named by `$source_deployment`. Confirm that its `status` is `complete`, its `instance` is `survival`, and its `recovery_point` matches the selection. Measure the compressed archive from `archive.size_bytes` and the uncompressed recovery set by summing `size_bytes` for every `files[]` entry with `type == "file"`. Compare the archive size with the recorded `head-object` `ContentLength`:
+
+```sh
+aws s3api get-object \
+  --bucket "$(jq -r .backup_bucket_name "$source_deployment")" \
+  --key "instances/survival/completed/$recovery_point.json" \
+  "$evidence_dir/selected-recovery-marker.json" \
+  >"$evidence_dir/selected-recovery-marker-download.json"
+chmod 0600 "$evidence_dir/selected-recovery-marker.json"
+jq -e --arg point "$recovery_point" \
+  '.status == "complete" and .instance == "survival" and .recovery_point == $point' \
+  "$evidence_dir/selected-recovery-marker.json" >/dev/null
+archive_bytes="$(jq -er '.archive.size_bytes' "$evidence_dir/selected-recovery-marker.json")"
+uncompressed_bytes="$(jq -er '[.files[] | select(.type == "file") | .size_bytes] | add' \
+  "$evidence_dir/selected-recovery-marker.json")"
+python3 - "$archive_bytes" "$uncompressed_bytes" <<'PY'
+import sys
+total = sum(int(value) for value in sys.argv[1:])
+required_bytes = (total * 11 + 9) // 10
+print(f"Minimum whole GiB with 10% margin: {max(40, (required_bytes + (1 << 30) - 1) // (1 << 30))}")
+PY
+```
+
+Record `restore_archive_size_bytes` and `restore_uncompressed_size_bytes` from these measurements in private `recovery.tfvars`. Set `recovery_data_volume_size_gib` to at least the calculated whole-GiB minimum, and increase it if other target files need space. The restore stages the compressed archive and full uncompressed data together on `/srv/minecraft`; source disk size alone is insufficient. Inspect the resulting disk size and cost in the saved recovery plan and obtain approval for that exact plan before applying it.
 
 ## Create the isolated recovery host
 
@@ -171,7 +206,7 @@ sudo systemctl restart minecraft-storage.service
 sudo systemctl start docker.service
 ```
 
-Install the reviewed runtime revision. Supply a fresh RCON secret and the recorded EULA acceptance in target-private configuration. Keep the source deployment as `/etc/minecraft/source-deployment.json`. Configure the target operator file from the recovery deployment output and stage the selected point's original definition and manifest as described in [step 3 of the isolated restore procedure](backup-recovery.md#restore-onto-an-isolated-host). Its backup destination is the temporary recovery bucket. The restore command reads the source bucket only through `--source-deployment`.
+Before installing the runtime, transfer `$evidence_dir/recovery-deployment.json` to `/etc/minecraft/deployment.json` on the recovery host and the refreshed `$source_deployment` to `/etc/minecraft/source-deployment.json`. Both must be root-owned regular files with mode 0600 inside root-owned mode-0700 `/etc/minecraft`; compare each on-host SHA-256 with its private operator copy. `scripts/install_runtime.sh` reads the target deployment file during preflight. Install the reviewed runtime revision, then supply a fresh RCON secret and recorded EULA acceptance in target-private configuration. Configure the target operator file from the recovery deployment output and stage the selected point's original definition and manifest as described in [step 3 of the isolated restore procedure](backup-recovery.md#restore-onto-an-isolated-host). Its backup destination is the temporary recovery bucket. The restore command reads the source bucket only through `--source-deployment`.
 
 ## Restore and verify the selected recovery point
 
@@ -208,7 +243,7 @@ sudo /usr/local/sbin/minecraft-instance \
   --config /etc/minecraft/operator.json status survival
 ```
 
-Do not infer rollback from reinstalling old binaries. To test recovery from an update, remove and recreate only the approved temporary recovery resources. Capture the new private recovery deployment output with mode 0600. After the new root host is ready, initialize and mount the new blank target disk using the same guarded sequence above. Then repeat the reviewed AWS CLI and runtime installation, fresh RCON secret and recorded EULA staging, `/etc/minecraft/source-deployment.json` copy, and target `/etc/minecraft/operator.json` configuration from the new recovery deployment output. Restage the selected point's original definition and manifest using the isolated restore procedure linked above. Restore the selected pre-update recovery point through `minecraft-restore`, then verify its recorded manifest and checkpoints again. Never run this rehearsal against the family data directory.
+Do not infer rollback from reinstalling old binaries. To test recovery from an update, remove and recreate only the approved temporary recovery resources. Verify the first removal against its cleanup inventory using the checks below, and retain that inventory and evidence privately. Capture the new recovery deployment output and a new `recovery-cleanup-inventory.json` with mode 0600 for the recreated resources. After the new root host is ready, initialize and mount the new blank target disk using the same guarded sequence above. Transfer and verify both the new `/etc/minecraft/deployment.json` and refreshed `/etc/minecraft/source-deployment.json` handoffs as described above before repeating the reviewed AWS CLI and runtime installation. Restage a fresh RCON secret, recorded EULA acceptance, and target `/etc/minecraft/operator.json` configuration from the new recovery deployment output. Restage the selected point's original definition and manifest using the isolated restore procedure linked above. Restore the selected pre-update recovery point through `minecraft-restore`, then verify its recorded manifest and checkpoints again. Never run this rehearsal against the family data directory.
 
 ## Prove failed backups remain visible
 
@@ -253,7 +288,7 @@ Inspect private SSM output for the expected S3 authorization failure. Do not edi
 
 ## Record stopped costs and clean up
 
-Stop the source host through `minecraft_host.py stop`. Inventory the resources that continue to incur charges while compute is stopped:
+Stop the source host through `minecraft_host.py --deployment "$source_deployment" stop`. Inventory the resources that continue to incur charges while compute is stopped:
 
 - the source root and retained data EBS volumes;
 - the allocated source EIP;
@@ -285,7 +320,34 @@ The plan must delete only resources in the approved cleanup inventory, including
   2>&1 | tee "$evidence_dir/recovery-destroy-apply.txt"
 ```
 
-Use `describe-instances`, `describe-volumes`, and `describe-addresses` to prove that the temporary IDs are absent or terminal. Then verify that the source host, source retained volume, source EIP, state, bucket, and selected recovery point remain intact.
+Check every entry in the private cleanup inventory against AWS after destroy, and save each response or exact not-found error with its exit status in the evidence directory. Query these IDs and names from `$evidence_dir/recovery-cleanup-inventory.json`:
+
+| Temporary resource | AWS query | Required result |
+| --- | --- | --- |
+| Host | `aws ec2 describe-instances --instance-ids <host_id>` | Absent or `terminated`; no running or stopped instance. |
+| Root and data disks | `aws ec2 describe-volumes --volume-ids <root_volume_id> <data_volume_id>` | Both absent. Check each ID separately if the combined request fails. |
+| EIP | `aws ec2 describe-addresses --allocation-ids <elastic_ip_id>` | Allocation absent. |
+| No-ingress security group and its rules | `aws ec2 describe-security-groups --group-ids <security_group_id>` | Group absent; its ingress and egress rules cannot remain attached. |
+| Temporary backup bucket and all versions | `aws s3api head-bucket --bucket <backup_bucket_name>` | Bucket absent (`404` or `NoSuchBucket`); `403` is inconclusive. |
+| Instance profile | `aws iam get-instance-profile --instance-profile-name <instance_profile_name>` | `NoSuchEntity`. |
+| Role and inline policies | `aws iam get-role --role-name <iam_role_name>` and `aws iam get-role-policy --role-name <iam_role_name> --policy-name <name>` for `session-manager`, `source-backup-read-only`, `temporary-recovery-backup-read`, and `temporary-recovery-backup-writes` | `NoSuchEntity` for the role and every policy. The write policy may already have been removed by the failed-backup test. |
+
+An authorization error, timeout, or stale result is not proof of cleanup. Also require the recovery OpenTofu state to contain no resource addresses:
+
+```sh
+if ! "$repo_dir/.tools/bin/tofu" -chdir="$recovery_dir" state list \
+  >"$evidence_dir/recovery-state-after-destroy.txt" \
+  2>"$evidence_dir/recovery-state-after-destroy-error.txt"; then
+  printf 'Recovery state could not be inspected; cleanup is unverified.\n' >&2
+  exit 1
+fi
+if test -s "$evidence_dir/recovery-state-after-destroy.txt"; then
+  printf 'Recovery state still contains resources; cleanup is incomplete.\n' >&2
+  exit 1
+fi
+```
+
+Do not report cleanup as successful until every query and the state check pass. Then verify that the source host, source retained volume, source EIP, state, bucket, and selected recovery point remain intact.
 
 ## Publish the redacted result
 

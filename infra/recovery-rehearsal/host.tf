@@ -84,8 +84,15 @@ resource "aws_ebs_volume" "recovery" {
   availability_zone = var.availability_zone
   encrypted         = true
   type              = "gp3"
-  size              = 40
+  size              = var.recovery_data_volume_size_gib
   tags              = { Name = "${var.resource_prefix}-data", Purpose = "recovery-rehearsal" }
+
+  lifecycle {
+    precondition {
+      condition     = var.recovery_data_volume_size_gib * 1073741824 * 10 >= (var.restore_archive_size_bytes + var.restore_uncompressed_size_bytes) * 11
+      error_message = "Recovery data volume must provide at least 10 percent headroom beyond the measured archive and uncompressed restore bytes."
+    }
+  }
 }
 
 resource "aws_volume_attachment" "recovery" {

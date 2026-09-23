@@ -109,7 +109,7 @@ class RecoveryInfrastructurePolicyTests(unittest.TestCase):
         host = self.source("host.tf")
         self.assertIn("encrypted         = true", host)
         self.assertIn("type              = \"gp3\"", host)
-        self.assertIn("size              = 40", host)
+        self.assertIn("size              = var.recovery_data_volume_size_gib", host)
         self.assertIn("delete_on_termination = true", host)
         self.assertIn("http_tokens                 = \"required\"", host)
         self.assertIn("http_put_response_hop_limit = 1", host)

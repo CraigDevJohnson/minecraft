@@ -14,6 +14,11 @@ source_backup_bucket_name = "replace-with-source-backup-bucket"
 recovery_backup_bucket_name = "replace-with-unique-temporary-recovery-bucket"
 instance_id               = "survival"
 
+# Replace with measurements from the selected completed marker; approve the resulting disk size and cost.
+restore_archive_size_bytes      = 17179869184
+restore_uncompressed_size_bytes = 34359738368
+recovery_data_volume_size_gib   = 64
+
 # Copy the source identity, then generate a distinct target identity privately.
 source_data_filesystem_uuid = "12345678-1234-4234-8234-123456789abc"
 data_filesystem_uuid        = "87654321-4321-4321-8321-cba987654321"

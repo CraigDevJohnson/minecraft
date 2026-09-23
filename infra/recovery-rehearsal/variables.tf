@@ -116,6 +116,33 @@ variable "recovery_backup_bucket_name" {
   }
 }
 
+variable "restore_archive_size_bytes" {
+  description = "Selected completed marker archive.size_bytes, measured before the recovery plan."
+  type        = number
+  validation {
+    condition     = var.restore_archive_size_bytes > 0 && floor(var.restore_archive_size_bytes) == var.restore_archive_size_bytes
+    error_message = "restore_archive_size_bytes must be a positive whole number of bytes."
+  }
+}
+
+variable "restore_uncompressed_size_bytes" {
+  description = "Sum of size_bytes for file entries in the selected completed marker."
+  type        = number
+  validation {
+    condition     = var.restore_uncompressed_size_bytes > 0 && floor(var.restore_uncompressed_size_bytes) == var.restore_uncompressed_size_bytes
+    error_message = "restore_uncompressed_size_bytes must be a positive whole number of bytes."
+  }
+}
+
+variable "recovery_data_volume_size_gib" {
+  description = "Temporary target disk size in GiB; the recovery plan requires 10 percent staging headroom beyond the measured archive and extracted files."
+  type        = number
+  validation {
+    condition     = var.recovery_data_volume_size_gib >= 40 && floor(var.recovery_data_volume_size_gib) == var.recovery_data_volume_size_gib
+    error_message = "recovery_data_volume_size_gib must be a whole number of at least 40 GiB."
+  }
+}
+
 variable "backup_writes_enabled" {
   description = "Grant writes to the temporary recovery bucket; set false in a separately reviewed plan for the failed-backup test."
   type        = bool

@@ -1,20 +1,23 @@
 mock_provider "aws" {}
 
 variables {
-  account_id                  = "111122223333"
-  operator_role_arn           = "arn:aws:iam::111122223333:role/minecraft-operator"
-  environment                 = "family-recovery"
-  resource_prefix             = "minecraft-family-recovery"
-  deployment_revision         = "113b9e1c719a24fa0b65b6e7a33faf6573a394a5"
-  availability_zone           = "us-west-2a"
-  ami_id                      = "ami-0123456789abcdef0"
-  ami_owner_account_id        = "099720109477"
-  source_vpc_id               = "vpc-0123456789abcdef0"
-  source_subnet_id            = "subnet-0123456789abcdef0"
-  source_backup_bucket_name   = "minecraft-family-source-backups"
-  recovery_backup_bucket_name = "minecraft-family-recovery-backups"
-  source_data_filesystem_uuid = "aaaaaaaa-1234-4234-8234-123456789abc"
-  data_filesystem_uuid        = "12345678-1234-4234-8234-123456789abc"
+  account_id                      = "111122223333"
+  operator_role_arn               = "arn:aws:iam::111122223333:role/minecraft-operator"
+  environment                     = "family-recovery"
+  resource_prefix                 = "minecraft-family-recovery"
+  deployment_revision             = "113b9e1c719a24fa0b65b6e7a33faf6573a394a5"
+  availability_zone               = "us-west-2a"
+  ami_id                          = "ami-0123456789abcdef0"
+  ami_owner_account_id            = "099720109477"
+  source_vpc_id                   = "vpc-0123456789abcdef0"
+  source_subnet_id                = "subnet-0123456789abcdef0"
+  source_backup_bucket_name       = "minecraft-family-source-backups"
+  recovery_backup_bucket_name     = "minecraft-family-recovery-backups"
+  restore_archive_size_bytes      = 17179869184
+  restore_uncompressed_size_bytes = 34359738368
+  recovery_data_volume_size_gib   = 64
+  source_data_filesystem_uuid     = "aaaaaaaa-1234-4234-8234-123456789abc"
+  data_filesystem_uuid            = "12345678-1234-4234-8234-123456789abc"
 }
 
 run "temporary_host_has_guarded_storage_and_endpoint" {
@@ -26,8 +29,8 @@ run "temporary_host_has_guarded_storage_and_endpoint" {
   }
 
   assert {
-    condition     = aws_ebs_volume.recovery.encrypted && aws_ebs_volume.recovery.type == "gp3" && aws_ebs_volume.recovery.size == 40
-    error_message = "The recovery data disk must be encrypted 40 GiB gp3."
+    condition     = aws_ebs_volume.recovery.encrypted && aws_ebs_volume.recovery.type == "gp3" && aws_ebs_volume.recovery.size == 64
+    error_message = "The recovery data disk must use the reviewed size and encrypted gp3 storage."
   }
 
   assert {
@@ -148,4 +151,12 @@ run "reject_source_filesystem_identity_for_target" {
     data_filesystem_uuid = "aaaaaaaa-1234-4234-8234-123456789abc"
   }
   expect_failures = [var.data_filesystem_uuid]
+}
+
+run "reject_insufficient_restore_staging_capacity" {
+  command = plan
+  variables {
+    recovery_data_volume_size_gib = 52
+  }
+  expect_failures = [aws_ebs_volume.recovery]
 }
