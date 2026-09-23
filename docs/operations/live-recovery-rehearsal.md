@@ -22,7 +22,7 @@ python3 scripts/bootstrap_tools.py
 .tools/bin/task check 2>&1 | tee "$evidence_dir/repository-check.txt"
 ```
 
-Copy `infra/recovery-rehearsal`, its sibling `scripts` directory, and private backend configuration into the private work area. Preserve the `infra/recovery-rehearsal` directory depth under `$evidence_dir`; the root's `../../scripts` template references must resolve to `$evidence_dir/scripts`. Start `recovery.tfvars` from `deployment.tfvars.example` and fill its restore-size fields after the final source backup below. Use the source deployment's account, region, AZ, AMI, VPC, subnet, and backup bucket as inputs. The recovery root must create its own temporary security group with no ingress; do not reuse the source game security group. Generate a new filesystem UUID. It must differ from the source UUID.
+Prepare private backend configuration in the work area. The creation commands below copy `infra/recovery-rehearsal` and its sibling `scripts` directory, preserving the module depth so `../../scripts` resolves to `$evidence_dir/scripts`. Start `recovery.tfvars` from `deployment.tfvars.example` and fill its restore-size fields after the final source backup below. Use the source deployment's account, region, AZ, AMI, VPC, subnet, and backup bucket as inputs. The recovery root must create its own temporary security group with no ingress; do not reuse the source game security group. Generate a new filesystem UUID. It must differ from the source UUID.
 
 Record the approved scope in `authorization.txt`. Include the issue comment or approval reference, approved plan hashes, temporary resource classes, and exact cleanup boundary. Do not continue if issue #7 is open or the approved scope omits host replacement, the recovery host and disk, the recovery EIP, or cleanup.
 
@@ -49,8 +49,7 @@ aws ec2 describe-addresses \
 Through SSM, run these commands on the source host and retain the command IDs and private output:
 
 ```sh
-sudo /usr/local/sbin/minecraft-storage verify \
-  --volume-id "$data_volume_id" --filesystem-uuid "$data_filesystem_uuid"
+sudo bash -c 'set -euo pipefail; source /etc/minecraft/storage.conf; exec /usr/local/sbin/minecraft-storage verify --volume-id "$DATA_VOLUME_ID" --filesystem-uuid "$DATA_FILESYSTEM_UUID"'
 sudo /usr/local/sbin/minecraft-backup status survival \
   --config /etc/minecraft/operator.json
 sudo findmnt --json --target /srv/minecraft
@@ -88,7 +87,7 @@ python3 scripts/minecraft_host.py \
   | tee "$evidence_dir/clean-start.json"
 ```
 
-Require the stop result to show `host: stopped`, `application: stopped`, and `backup: complete`. The stopped status must report the application and backup as unavailable or unverified instead of claiming fresh runtime evidence. Require the start result to show `host: running`, `application: running`, and `ready: true`.
+Require the stop result to show `host: stopped`, `draining: true`, `instances.survival.application: stopped`, and `instances.survival.backup: complete`. The stopped status must report the application and backup as unavailable or unverified instead of claiming fresh runtime evidence. Require the start result to show `host: running`, `application: running`, and `ready: true`.
 
 Compare the source instance, volume, address, filesystem, manifest, and checkpoint evidence. The EC2 instance ID, EBS volume ID, filesystem UUID, EIP allocation ID, public address, manifest digest, and checkpoints must match the baseline.
 
@@ -165,7 +164,8 @@ Start the 60-minute operator recovery timer before the first recovery infrastruc
 ```sh
 date -u +%Y-%m-%dT%H:%M:%SZ >"$evidence_dir/recovery-started.txt"
 cp -R "$repo_dir/infra/recovery-rehearsal/." "$recovery_dir/"
-cp -R "$repo_dir/scripts" "$evidence_dir/scripts"
+mkdir -p "$evidence_dir/scripts"
+cp -R "$repo_dir/scripts/." "$evidence_dir/scripts/"
 "$repo_dir/.tools/bin/tofu" -chdir="$recovery_dir" init \
   -input=false -lockfile=readonly \
   -backend-config="$evidence_dir/recovery.backend.hcl"
@@ -195,13 +195,12 @@ chmod 0600 "$evidence_dir/recovery-deployment.json" \
   "$evidence_dir/recovery-cleanup-inventory.json"
 ```
 
-The first cloud-init run stops at the blank-disk storage gate. Through SSM, compare the target volume ID and fresh UUID with the approved output. Initialize that exact zero-filled disk once.
+The first cloud-init run stops at the blank-disk storage gate. Through SSM, read `DATA_VOLUME_ID` and `DATA_FILESYSTEM_UUID` from root-only `/etc/minecraft/storage.conf` and compare both with the approved recovery deployment output. Initialize that exact zero-filled disk once; stop if either value differs.
 
 ```sh
-sudo /usr/local/sbin/minecraft-storage initialize \
-  --volume-id "$target_data_volume_id" \
-  --confirm-volume-id "$target_data_volume_id" \
-  --filesystem-uuid "$target_data_filesystem_uuid"
+sudo bash -c 'set -euo pipefail; source /etc/minecraft/storage.conf; printf "volume_id=%s filesystem_uuid=%s\n" "$DATA_VOLUME_ID" "$DATA_FILESYSTEM_UUID"'
+# Compare the printed values with the approved output before continuing.
+sudo bash -c 'set -euo pipefail; source /etc/minecraft/storage.conf; exec /usr/local/sbin/minecraft-storage initialize --volume-id "$DATA_VOLUME_ID" --confirm-volume-id "$DATA_VOLUME_ID" --filesystem-uuid "$DATA_FILESYSTEM_UUID"'
 sudo systemctl restart minecraft-storage.service
 sudo systemctl start docker.service
 ```
@@ -241,9 +240,13 @@ sudo /usr/local/sbin/minecraft-instance \
   --config /etc/minecraft/operator.json update survival
 sudo /usr/local/sbin/minecraft-instance \
   --config /etc/minecraft/operator.json status survival
+sudo /usr/local/sbin/minecraft-instance \
+  --config /etc/minecraft/operator.json stop survival
+sudo /usr/local/sbin/minecraft-instance \
+  --config /etc/minecraft/operator.json status survival
 ```
 
-Do not infer rollback from reinstalling old binaries. To test recovery from an update, remove and recreate only the approved temporary recovery resources. Verify the first removal against its cleanup inventory using the checks below, and retain that inventory and evidence privately. Capture the new recovery deployment output and a new `recovery-cleanup-inventory.json` with mode 0600 for the recreated resources. After the new root host is ready, initialize and mount the new blank target disk using the same guarded sequence above. Transfer and verify both the new `/etc/minecraft/deployment.json` and refreshed `/etc/minecraft/source-deployment.json` handoffs as described above before repeating the reviewed AWS CLI and runtime installation. Restage a fresh RCON secret, recorded EULA acceptance, and target `/etc/minecraft/operator.json` configuration from the new recovery deployment output. Restage the selected point's original definition and manifest using the isolated restore procedure linked above. Restore the selected pre-update recovery point through `minecraft-restore`, then verify its recorded manifest and checkpoints again. Never run this rehearsal against the family data directory.
+Require the target stop to finish with `application: stopped` and `backup: complete`; if it fails, do not destroy the running recovery host. Do not infer rollback from reinstalling old binaries. To test recovery from an update, remove and recreate only the approved temporary recovery resources. Verify the first removal against its cleanup inventory using the checks below, and retain that inventory and evidence privately. Capture the new recovery deployment output and a new `recovery-cleanup-inventory.json` with mode 0600 for the recreated resources. After the new root host is ready, initialize and mount the new blank target disk using the same guarded sequence above. Transfer and verify both the new `/etc/minecraft/deployment.json` and refreshed `/etc/minecraft/source-deployment.json` handoffs as described above before repeating the reviewed AWS CLI and runtime installation. Restage a fresh RCON secret, recorded EULA acceptance, and target `/etc/minecraft/operator.json` configuration from the new recovery deployment output. Restage the selected point's original definition and manifest using the isolated restore procedure linked above. Restore the selected pre-update recovery point through `minecraft-restore`, then verify its recorded manifest and checkpoints again. Never run this rehearsal against the family data directory.
 
 ## Prove failed backups remain visible
 
