@@ -349,6 +349,202 @@ fi
 
 Do not report cleanup as successful until every query and the state check pass. Then verify that the source host, source retained volume, source EIP, state, bucket, and selected recovery point remain intact.
 
+## Confirm source-bucket lifecycle expiry
+
+The retained source backup bucket has the lifecycle rule; the temporary recovery bucket is destroyed with the recovery host and cannot supply delayed evidence. Use operator credentials for these checks, not the recovery host's source-read-only role. Keep the recovery resources destroyed while waiting. Record the source bucket's versioning and effective lifecycle configuration privately:
+
+```sh
+source_bucket="$(jq -er .backup_bucket_name "$source_deployment")" || exit 1
+if ! aws s3api get-bucket-versioning --bucket "$source_bucket" \
+  >"$evidence_dir/source-bucket-versioning.json"; then exit 1; fi
+if ! aws s3api get-bucket-lifecycle-configuration --bucket "$source_bucket" \
+  >"$evidence_dir/source-bucket-lifecycle.json"; then exit 1; fi
+if ! jq -e '.Status == "Enabled"' \
+  "$evidence_dir/source-bucket-versioning.json" >/dev/null; then exit 1; fi
+if ! jq -e '
+  ([.Rules[] | select(.Status == "Enabled")] | length == 1) and
+  ([.Rules[] | select(
+    .ID == "remove-superseded-versions-and-incomplete-uploads" and
+    .Status == "Enabled" and
+    ((.Filter == null and (.Prefix == null or .Prefix == "")) or
+     .Filter == {} or .Filter == {"Prefix":""}) and
+    .NoncurrentVersionExpiration.NoncurrentDays == 14 and
+    .NoncurrentVersionExpiration.NewerNoncurrentVersions == null and
+    .AbortIncompleteMultipartUpload.DaysAfterInitiation == 1 and
+    .Expiration == null and (.Transitions == null or .Transitions == []) and
+    (.NoncurrentVersionTransitions == null or .NoncurrentVersionTransitions == [])
+  )] | length == 1)' "$evidence_dir/source-bucket-lifecycle.json" >/dev/null; then exit 1; fi
+```
+
+Configuration proves that the rule is installed, not that S3 has carried out either action. For each action, first look for a previously recorded, safe candidate: an exact noncurrent version ID with its successor version or delete-marker ID and successor creation time, or an already abandoned multipart upload with its exact upload ID and initiation time. Save successful `list-object-versions --prefix <exact-key>` or `list-multipart-uploads --prefix <exact-key>` output before waiting. Do not select an active production upload or infer noncurrent age from the old version's `LastModified`. Record both candidates in a mode-0600 `$evidence_dir/lifecycle-targets.json` with the source `bucket`, `noncurrent` fields `key`, `version_id`, `successor_version_id`, and `successor_created_at`, and `multipart` fields `key`, `upload_id`, and `initiated_at`. A candidate that was not observed before expiry cannot prove an actual lifecycle deletion.
+
+If either safe candidate is unavailable, obtain separate concrete approval before creating a complete probe in the **retained source bucket**, outside `instances/`. Add the approval reference, unique `lifecycle-probe/<run-id>/` prefix, exact allowed S3 write/list/delete/abort actions, cost bound, delayed observation period, and cleanup of exact version and upload IDs to `authorization.txt`. The recovery role must not gain source write access. A probe adds S3 request and object storage charges, including one 5 MiB multipart part until S3 aborts it; use [current S3 pricing](https://aws.amazon.com/s3/pricing/) for the approved estimate. Do not keep EC2, EBS, an EIP, or the temporary bucket for the 14-day observation. If this extra scope is not approved, leave actual expiry **pending** and do not claim Issue #8 complete.
+
+For an approved probe, use a fresh prefix and save every response privately. The two writes to the same tiny key make the first exact version noncurrent; the incomplete upload has one part and is never completed or manually aborted before the observation:
+
+```sh
+probe_prefix="lifecycle-probe/$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import uuid; print(uuid.uuid4())')/" || exit 1
+version_key="${probe_prefix}noncurrent.txt"
+upload_key="${probe_prefix}incomplete.bin"
+printf 'first\n' >"$evidence_dir/lifecycle-first.txt" || exit 1
+printf 'second\n' >"$evidence_dir/lifecycle-second.txt" || exit 1
+aws s3api put-object --output json --bucket "$source_bucket" --key "$version_key" \
+  --body "$evidence_dir/lifecycle-first.txt" --if-none-match '*' \
+  >"$evidence_dir/lifecycle-first-put.json" || exit 1
+aws s3api put-object --output json --bucket "$source_bucket" --key "$version_key" \
+  --body "$evidence_dir/lifecycle-second.txt" \
+  >"$evidence_dir/lifecycle-second-put.json" || exit 1
+aws s3api list-object-versions --output json --bucket "$source_bucket" --prefix "$version_key" \
+  >"$evidence_dir/lifecycle-versions-before.json" || exit 1
+
+dd if=/dev/zero of="$evidence_dir/lifecycle-part.bin" bs=1048576 count=5 || exit 1
+aws s3api create-multipart-upload --output json --bucket "$source_bucket" --key "$upload_key" \
+  >"$evidence_dir/lifecycle-upload-create.json" || exit 1
+upload_id="$(jq -er '.UploadId | select(type == "string" and length > 0)' \
+  "$evidence_dir/lifecycle-upload-create.json")" || exit 1
+aws s3api upload-part --output json --bucket "$source_bucket" --key "$upload_key" \
+  --upload-id "$upload_id" --part-number 1 \
+  --body "$evidence_dir/lifecycle-part.bin" \
+  >"$evidence_dir/lifecycle-part-upload.json" || exit 1
+aws s3api list-parts --output json --bucket "$source_bucket" --key "$upload_key" \
+  --upload-id "$upload_id" >"$evidence_dir/lifecycle-parts-before.json" || exit 1
+aws s3api list-multipart-uploads --output json --bucket "$source_bucket" --prefix "$upload_key" \
+  >"$evidence_dir/lifecycle-uploads-before.json" || exit 1
+```
+
+Confirm the first version is listed as noncurrent, the second as current, and the upload ID has one 5 MiB part. Save both exact version IDs and S3-reported successor `LastModified` and upload `Initiated` timestamps; local command time is not the lifecycle clock:
+
+```sh
+old_version_id="$(jq -er '.VersionId | select(type == "string" and length > 0)' \
+  "$evidence_dir/lifecycle-first-put.json")" || exit 1
+successor_version_id="$(jq -er '.VersionId | select(type == "string" and length > 0)' \
+  "$evidence_dir/lifecycle-second-put.json")" || exit 1
+test "$old_version_id" != "$successor_version_id" || exit 1
+jq -e --arg key "$version_key" --arg old "$old_version_id" \
+  --arg current "$successor_version_id" \
+  '([.Versions[]? | select(.Key == $key and .VersionId == $old and .IsLatest == false)] | length == 1) and
+   ([.Versions[]? | select(.Key == $key and .VersionId == $current and .IsLatest == true)] | length == 1)' \
+  "$evidence_dir/lifecycle-versions-before.json" >/dev/null || exit 1
+jq -e --arg key "$upload_key" --arg id "$upload_id" \
+  '.Key == $key and .UploadId == $id and
+   ([.Parts[]? | select(.PartNumber == 1 and .Size == 5242880)] | length == 1)' \
+  "$evidence_dir/lifecycle-parts-before.json" >/dev/null || exit 1
+jq -e --arg key "$upload_key" --arg id "$upload_id" \
+  '[.Uploads[]? | select(.Key == $key and .UploadId == $id and
+    (.Initiated | type == "string") and (.Initiated | length > 0))] | length == 1' \
+  "$evidence_dir/lifecycle-uploads-before.json" >/dev/null || exit 1
+successor_at="$(jq -er --arg id "$successor_version_id" \
+  '.Versions[] | select(.VersionId == $id) | .LastModified |
+   select(type == "string" and length > 0)' \
+  "$evidence_dir/lifecycle-versions-before.json")" || exit 1
+initiated_at="$(jq -er --arg key "$upload_key" --arg id "$upload_id" \
+  '.Uploads[] | select(.Key == $key and .UploadId == $id) | .Initiated |
+   select(type == "string" and length > 0)' \
+  "$evidence_dir/lifecycle-uploads-before.json")" || exit 1
+jq -n --arg bucket "$source_bucket" --arg version_key "$version_key" \
+  --arg old "$old_version_id" --arg successor "$successor_version_id" \
+  --arg successor_at "$successor_at" --arg upload_key "$upload_key" \
+  --arg upload_id "$upload_id" --arg initiated_at "$initiated_at" \
+  '{bucket:$bucket, origin:"approved-probe",
+    noncurrent:{key:$version_key, version_id:$old, successor_version_id:$successor,
+                successor_created_at:$successor_at},
+    multipart:{key:$upload_key, upload_id:$upload_id, initiated_at:$initiated_at}}' \
+  >"$evidence_dir/lifecycle-targets.json" || exit 1
+chmod 0600 "$evidence_dir/lifecycle-targets.json" || exit 1
+```
+
+Recheck the selected source recovery point's marker and archive key, current version IDs, sizes, and ETags against the pre-probe evidence. The probe must never write or delete an `instances/` key.
+
+[S3 calculates noncurrent age from the successor's creation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/intro-lifecycle-rules.html), adds 14 days, then rounds eligibility up to the next midnight UTC. An incomplete upload becomes [eligible for abort after one day](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpu-abort-incomplete-mpu-lifecycle-config.html) from initiation. [Lifecycle actions are asynchronous](https://docs.aws.amazon.com/AmazonS3/latest/userguide/troubleshoot-lifecycle.html): eligibility is not proof of deletion. Record both eligibility times. On each follow-up, restore the private `$evidence_dir` and `$source_deployment` paths, require the recorded target bucket to match the deployment, and run the corresponding check only after its eligibility time. First check the incomplete upload with successful, fully paginated listings; an upload that was completed also disappears from the multipart listing but leaves an object version:
+
+```sh
+lifecycle_targets="$evidence_dir/lifecycle-targets.json"
+source_bucket="$(jq -er '.bucket | select(type == "string" and length > 0)' \
+  "$lifecycle_targets")" || exit 1
+expected_source_bucket="$(jq -er '.backup_bucket_name | select(type == "string" and length > 0)' \
+  "$source_deployment")" || exit 1
+if test "$source_bucket" != "$expected_source_bucket"; then
+  printf 'Lifecycle target bucket differs from the source deployment.\n' >&2
+  exit 1
+fi
+upload_key="$(jq -er '.multipart.key | select(type == "string" and length > 0)' \
+  "$lifecycle_targets")" || exit 1
+upload_id="$(jq -er '.multipart.upload_id | select(type == "string" and length > 0)' \
+  "$lifecycle_targets")" || exit 1
+if ! aws s3api list-multipart-uploads --bucket "$source_bucket" \
+  --prefix "$upload_key" --output json >"$evidence_dir/lifecycle-uploads-after.json"; then
+  printf 'Multipart lifecycle listing failed; result unverified.\n' >&2
+  exit 1
+fi
+if ! jq -e 'type == "object" and (.Uploads == null or (.Uploads | type == "array"))' \
+  "$evidence_dir/lifecycle-uploads-after.json" >/dev/null; then
+  printf 'Multipart lifecycle listing invalid; result unverified.\n' >&2
+  exit 1
+fi
+if ! aws s3api list-object-versions --bucket "$source_bucket" \
+  --prefix "$upload_key" --output json >"$evidence_dir/lifecycle-upload-versions-after.json"; then
+  printf 'Multipart object-version listing failed; result unverified.\n' >&2
+  exit 1
+fi
+if ! jq -e --arg key "$upload_key" '
+  type == "object" and
+  ([(.Versions[]?, .DeleteMarkers[]?) | select(.Key == $key)] | length == 0)' \
+  "$evidence_dir/lifecycle-upload-versions-after.json" >/dev/null; then
+  printf 'Multipart key has an object or delete marker; abort result unverified.\n' >&2
+  exit 1
+fi
+if jq -e --arg key "$upload_key" --arg id "$upload_id" \
+  '[.Uploads[]? | select(.Key == $key and .UploadId == $id)] | length == 0' \
+  "$evidence_dir/lifecycle-uploads-after.json" >/dev/null; then
+  printf '%s multipart observed absent\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    >"$evidence_dir/lifecycle-multipart-status.txt"
+else
+  printf '%s multipart pending\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    >"$evidence_dir/lifecycle-multipart-status.txt"
+  exit 1
+fi
+```
+
+After the noncurrent version becomes eligible, separately check its exact ID:
+
+```sh
+lifecycle_targets="$evidence_dir/lifecycle-targets.json"
+source_bucket="$(jq -er '.bucket | select(type == "string" and length > 0)' \
+  "$lifecycle_targets")" || exit 1
+expected_source_bucket="$(jq -er '.backup_bucket_name | select(type == "string" and length > 0)' \
+  "$source_deployment")" || exit 1
+if test "$source_bucket" != "$expected_source_bucket"; then
+  printf 'Lifecycle target bucket differs from the source deployment.\n' >&2
+  exit 1
+fi
+version_key="$(jq -er '.noncurrent.key | select(type == "string" and length > 0)' \
+  "$lifecycle_targets")" || exit 1
+old_version_id="$(jq -er '.noncurrent.version_id | select(type == "string" and length > 0)' \
+  "$lifecycle_targets")" || exit 1
+if ! aws s3api list-object-versions --bucket "$source_bucket" \
+  --prefix "$version_key" --output json >"$evidence_dir/lifecycle-versions-after.json"; then
+  printf 'Version lifecycle listing failed; result unverified.\n' >&2
+  exit 1
+fi
+if ! jq -e 'type == "object" and (.Versions == null or (.Versions | type == "array"))' \
+  "$evidence_dir/lifecycle-versions-after.json" >/dev/null; then
+  printf 'Version lifecycle listing invalid; result unverified.\n' >&2
+  exit 1
+fi
+if jq -e --arg key "$version_key" --arg id "$old_version_id" \
+  '[.Versions[]? | select(.Key == $key and .VersionId == $id)] | length == 0' \
+  "$evidence_dir/lifecycle-versions-after.json" >/dev/null; then
+  printf '%s noncurrent version observed absent\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    >"$evidence_dir/lifecycle-noncurrent-status.txt"
+else
+  printf '%s noncurrent version pending\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    >"$evidence_dir/lifecycle-noncurrent-status.txt"
+  exit 1
+fi
+```
+
+If either ID is still present, record **pending**, allow S3 more time, and repeat that action's read-only check. An authorization error, failed/incomplete listing, missing before snapshot, or manual delete/abort is not lifecycle success. If the observation cannot be completed, record an exception and manually clean up only approved probe resources by exact version IDs and upload ID; do not count that cleanup as lifecycle expiry. After successful observation, also remove the probe's surviving current version by its exact version ID and verify the probe prefix has no versions, delete markers, or incomplete uploads. Never clean up a pre-existing backup version as part of the probe. Verify that source backup objects and the current completed recovery point remain intact, allowing for separately recorded normal backup/retention activity during the wait. Keep the private before/after listings, exact IDs, UTC times, approval, and cleanup receipts; report only redacted outcomes.
+
 ## Publish the redacted result
 
 Add a dated result below after the live run. Keep identifiers and player data in the private evidence directory. Include hashes of the private evidence index so the result remains tied to the tested revision.
@@ -363,6 +559,7 @@ Record these fields:
 - source backup integrity before and after the rehearsal;
 - stopped-state billable resource classes;
 - temporary cleanup result;
+- source-bucket lifecycle configuration and versioning check, candidate or approved probe origin, 1-day multipart and 14-day noncurrent eligibility times, observed results or pending/exception status, exact-probe cleanup result, and unchanged source backup result;
 - pass or measured exception for the 60-minute target;
 - private evidence index filename and SHA-256.
 
