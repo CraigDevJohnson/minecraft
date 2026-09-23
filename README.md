@@ -15,6 +15,7 @@ Report suspected vulnerabilities using the [security policy](SECURITY.md).
 - [Runtime installation and private configuration](docs/operations/runtime-installation.md)
 - [Instance commands and backup-hook contract](docs/operations/runtime-operations.md)
 - [Backup commands, retention, and isolated recovery](docs/operations/backup-recovery.md)
+- [Live persistence and recovery rehearsal](docs/operations/live-recovery-rehearsal.md)
 - [Pinned content and explicit local runtime validation](docs/operations/runtime-content.md)
 - [Foundation issue #3](https://github.com/CraigDevJohnson/minecraft/issues/3) and [current issues](https://github.com/CraigDevJohnson/minecraft/issues)
 

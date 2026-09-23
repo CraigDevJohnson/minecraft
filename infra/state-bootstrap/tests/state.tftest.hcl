@@ -38,19 +38,21 @@ run "only_operator_and_exact_locked_keys" {
   assert {
     condition = toset(jsondecode(output.operator_backend_policy).Statement[1].Resource) == toset([
       "arn:aws:s3:::example-minecraft-state-offline/bootstrap/terraform.tfstate",
-      "arn:aws:s3:::example-minecraft-state-offline/infrastructure/terraform.tfstate"
+      "arn:aws:s3:::example-minecraft-state-offline/infrastructure/terraform.tfstate",
+      "arn:aws:s3:::example-minecraft-state-offline/recovery-rehearsal/terraform.tfstate"
     ]) && toset(jsondecode(output.operator_backend_policy).Statement[1].Action) == toset(["s3:GetObject", "s3:PutObject"])
-    error_message = "Ordinary state access must be confined to two keys without deletion."
+    error_message = "Ordinary state access must be confined to three keys without deletion."
   }
   assert {
     condition = toset(jsondecode(output.operator_backend_policy).Statement[2].Resource) == toset([
       "arn:aws:s3:::example-minecraft-state-offline/bootstrap/terraform.tfstate.tflock",
-      "arn:aws:s3:::example-minecraft-state-offline/infrastructure/terraform.tfstate.tflock"
+      "arn:aws:s3:::example-minecraft-state-offline/infrastructure/terraform.tfstate.tflock",
+      "arn:aws:s3:::example-minecraft-state-offline/recovery-rehearsal/terraform.tfstate.tflock"
     ]) && contains(jsondecode(output.operator_backend_policy).Statement[2].Action, "s3:DeleteObject")
-    error_message = "Lock access must include lock release, scoped to the two lock objects."
+    error_message = "Lock access must include lock release, scoped to the three lock objects."
   }
   assert {
-    condition     = output.backend_configs.bootstrap.use_lockfile && output.backend_configs.infrastructure.use_lockfile && output.backend_configs.bootstrap.encrypt && output.backend_configs.bootstrap.key != output.backend_configs.infrastructure.key
-    error_message = "Both states require encryption, native S3 locking, and separate keys."
+    condition     = output.backend_configs.bootstrap.use_lockfile && output.backend_configs.infrastructure.use_lockfile && output.backend_configs.recovery_rehearsal.use_lockfile && output.backend_configs.bootstrap.encrypt && length(toset([output.backend_configs.bootstrap.key, output.backend_configs.infrastructure.key, output.backend_configs.recovery_rehearsal.key])) == 3
+    error_message = "All states require encryption, native S3 locking, and separate keys."
   }
 }

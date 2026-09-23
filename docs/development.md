@@ -18,7 +18,7 @@ Use the project-local Task binary for all repository commands:
 .tools/bin/task infra:validate
 ```
 
-`check` runs Bash syntax checks, ShellCheck, shfmt verification (including the host template), OpenTofu formatting, Python syntax/behavioral checks, and backend-free OpenTofu validation and mocked plan assertions for both `infra` and `infra/state-bootstrap`. `fmt` updates shell/template and OpenTofu formatting. `infra:validate` runs only the isolated OpenTofu validation and assertion path. Python is not statically typechecked; OpenTofu validation checks its configuration types and provider schemas.
+`check` runs Bash syntax checks, ShellCheck, shfmt verification (including the host template), OpenTofu formatting, Python syntax/behavioral checks, and backend-free OpenTofu validation and mocked plan assertions for `infra`, `infra/state-bootstrap`, and `infra/recovery-rehearsal`. `fmt` updates shell/template and OpenTofu formatting. `infra:validate` runs only the isolated OpenTofu validation and assertion path. Python is not statically typechecked; OpenTofu validation checks its configuration types and provider schemas.
 
 OpenTofu runs against a temporary copy of source, with temporary home, data and provider cache directories and an empty CLI configuration. The clean environment discards inherited AWS credentials, OpenTofu variables/arguments and debug settings. AWS configuration paths point to nonexistent files and metadata access is disabled. Local auto-tfvars, overrides, state and initialized backend metadata are not copied. The regression test runs both roots with poisoned private files and CLI arguments and verifies that they remain unchanged. Public pinned provider downloads still require network access.
 

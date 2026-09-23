@@ -72,5 +72,5 @@ resource "aws_eip" "host" {
 resource "aws_eip_association" "host" {
   allocation_id = aws_eip.host.id
   instance_id   = aws_instance.host.id
-  depends_on    = [aws_internet_gateway.public, aws_route.internet]
+  depends_on    = [aws_internet_gateway.public, aws_route.internet, aws_route_table_association.public]
 }

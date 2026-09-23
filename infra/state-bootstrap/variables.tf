@@ -41,19 +41,21 @@ variable "state_bucket_name" {
 }
 
 variable "state_keys" {
-  description = "Separate object keys for bootstrap and host infrastructure state."
+  description = "Separate object keys for bootstrap, host infrastructure, and temporary recovery-rehearsal state."
   type = object({
-    bootstrap      = string
-    infrastructure = string
+    bootstrap          = string
+    infrastructure     = string
+    recovery_rehearsal = string
   })
   default = {
-    bootstrap      = "bootstrap/terraform.tfstate"
-    infrastructure = "infrastructure/terraform.tfstate"
+    bootstrap          = "bootstrap/terraform.tfstate"
+    infrastructure     = "infrastructure/terraform.tfstate"
+    recovery_rehearsal = "recovery-rehearsal/terraform.tfstate"
   }
   validation {
-    condition = var.state_keys.bootstrap != var.state_keys.infrastructure && alltrue([
+    condition = length(toset(values(var.state_keys))) == 3 && alltrue([
       for key in values(var.state_keys) : can(regex("^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*/terraform[.]tfstate$", key))
     ])
-    error_message = "Use distinct paths ending /terraform.tfstate; no wildcards or traversal."
+    error_message = "Use three distinct paths ending /terraform.tfstate; no wildcards or traversal."
   }
 }

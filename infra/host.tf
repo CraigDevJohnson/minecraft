@@ -53,8 +53,12 @@ resource "aws_instance" "host" {
     instance_metadata_tags      = "disabled"
   }
 
-  tags       = { Name = "${var.resource_prefix}-host", Purpose = "replaceable-host" }
-  depends_on = [aws_iam_role_policy.ssm, aws_iam_role_policy.backups]
+  tags = { Name = "${var.resource_prefix}-host", Purpose = "replaceable-host" }
+  depends_on = [
+    aws_iam_role_policy.ssm,
+    aws_iam_role_policy.backups,
+    aws_vpc_security_group_egress_rule.web,
+  ]
 }
 
 resource "aws_ebs_volume" "data" {

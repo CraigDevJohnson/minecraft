@@ -1,0 +1,27 @@
+account_id           = "111122223333"
+operator_role_arn    = "arn:aws:iam::111122223333:role/minecraft-operator"
+environment          = "family-recovery"
+resource_prefix      = "minecraft-family-recovery"
+deployment_revision  = "0000000000000000000000000000000000000000"
+region               = "us-west-2"
+availability_zone    = "us-west-2a"
+ami_id               = "ami-0123456789abcdef0"
+ami_owner_account_id = "099720109477"
+
+source_vpc_id            = "vpc-0123456789abcdef0"
+source_subnet_id         = "subnet-0123456789abcdef0"
+source_backup_bucket_name = "replace-with-source-backup-bucket"
+recovery_backup_bucket_name = "replace-with-unique-temporary-recovery-bucket"
+instance_id               = "survival"
+
+# Use the selected marker's measurements and review a ceiling for the new backup;
+# approve both disk sizes and their cost before applying the recovery plan.
+restore_archive_size_bytes             = 17179869184
+restore_uncompressed_size_bytes        = 34359738368
+recovery_data_volume_size_gib          = 64
+max_recovery_backup_archive_size_bytes = 17179869184
+recovery_root_volume_size_gib           = 64
+
+# Copy the source identity, then generate a distinct target identity privately.
+source_data_filesystem_uuid = "12345678-1234-4234-8234-123456789abc"
+data_filesystem_uuid        = "87654321-4321-4321-8321-cba987654321"
