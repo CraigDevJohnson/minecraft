@@ -12,7 +12,8 @@ resource "aws_iam_role" "recovery" {
       Principal = { Service = "ec2.amazonaws.com" }
     }]
   })
-  tags = { Name = "${var.resource_prefix}-host", Purpose = "recovery-rehearsal" }
+  permissions_boundary = var.host_permissions_boundary_arn
+  tags                 = { Name = "${var.resource_prefix}-host", Purpose = "recovery-rehearsal" }
 }
 
 resource "aws_iam_instance_profile" "recovery" {
