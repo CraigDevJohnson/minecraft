@@ -157,6 +157,14 @@ run "reject_cross_account_host_permissions_boundary" {
   expect_failures = [var.host_permissions_boundary_arn]
 }
 
+run "reject_host_permissions_boundary_inside_resource_prefix" {
+  command = plan
+  variables {
+    host_permissions_boundary_arn = "arn:aws:iam::111122223333:policy/boundaries/minecraft-family-recovery-boundary"
+  }
+  expect_failures = [var.host_permissions_boundary_arn]
+}
+
 run "reject_wrong_region_az" {
   command = plan
   variables {

@@ -6,9 +6,11 @@
      "Resource": "*"},
     {"Sid": "LocateAndListProjectBuckets", "Effect": "Allow",
      "Action": ["s3:GetBucketLocation","s3:ListBucket"],
-     "Resource": "arn:aws:s3:::example-prefix-*"},
+     "Resource": "arn:aws:s3:::example-prefix-*",
+     "Condition": {"StringEquals": {"s3:ResourceAccount": "123456789012"}}},
     {"Sid": "ManageCurrentProjectBackupObjects", "Effect": "Allow",
      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:AbortMultipartUpload","s3:ListMultipartUploadParts"],
-     "Resource": "arn:aws:s3:::example-prefix-*/*"}
+     "Resource": "arn:aws:s3:::example-prefix-*/*",
+     "Condition": {"StringEquals": {"s3:ResourceAccount": "123456789012"}}}
   ]
 }

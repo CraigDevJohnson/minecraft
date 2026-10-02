@@ -16,6 +16,8 @@ from pathlib import Path
 MOUNTPOINT = "/srv/minecraft"
 WHOLE_DEVICE_FLOOR_BYTES_PER_SECOND = 50 * 1024 * 1024
 WHOLE_DEVICE_BASE_SECONDS = 300
+PARTIAL_ZERO_GUIDANCE = ("the disk may be partially zeroed. Do not initialize it "
+                         "until zero-fill is rerun to completion")
 
 
 class StorageError(Exception):
@@ -121,7 +123,8 @@ def whole_device_timeout(size: int) -> int:
 
 
 def device_size(host, disk: dict) -> int:
-    size = int(host.run(["blockdev", "--getsize64", disk["name"]], timeout=10).strip())
+    output = host.run(["blockdev", "--getsize64", disk["name"]], timeout=10).strip()
+    size = int(output) if re.fullmatch(r"[0-9]+", output) else 0
     if size <= 0:
         raise StorageError("cannot establish disk size")
     return size
@@ -147,9 +150,10 @@ def zero_fill(host, disk: dict, volume_id: str) -> None:
         raise StorageError("disk state changed during checks; refusing to zero-fill")
     try:
         host.run(["blkdiscard", "--zeroout", disk["name"]], timeout=whole_device_timeout(size))
+    except KeyboardInterrupt as error:
+        raise StorageError(f"blkdiscard interrupted; {PARTIAL_ZERO_GUIDANCE}") from error
     except StorageError as error:
-        raise StorageError(f"{error}; the disk may be partially zeroed. Do not initialize it "
-                           "until zero-fill is rerun to completion") from error
+        raise StorageError(f"{error}; {PARTIAL_ZERO_GUIDANCE}") from error
 
 
 def initialize(host, disk: dict, volume_id: str, filesystem_uuid: str) -> None:

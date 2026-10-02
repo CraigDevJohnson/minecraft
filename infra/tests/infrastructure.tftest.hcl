@@ -167,6 +167,22 @@ run "reject_a_host_permissions_boundary_that_is_not_a_managed_policy" {
   expect_failures = [var.host_permissions_boundary_arn]
 }
 
+run "reject_a_host_permissions_boundary_named_inside_the_resource_prefix" {
+  command = plan
+  variables {
+    host_permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-test-host-boundary"
+  }
+  expect_failures = [var.host_permissions_boundary_arn]
+}
+
+run "reject_a_host_permissions_boundary_whose_path_hides_a_prefixed_name" {
+  command = plan
+  variables {
+    host_permissions_boundary_arn = "arn:aws:iam::111122223333:policy/boundaries/Minecraft-Test-Boundary"
+  }
+  expect_failures = [var.host_permissions_boundary_arn]
+}
+
 run "reject_data_disk_az_outside_region" {
   command = plan
   variables {
