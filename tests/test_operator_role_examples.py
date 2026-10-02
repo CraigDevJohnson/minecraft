@@ -35,6 +35,11 @@ EC2_SECURITY_SETTINGS = [
     "ec2:EnableSerialConsoleAccess",
     "ec2:ModifySnapshotAttribute",
     "ec2:ModifyImageAttribute",
+    "ec2:ModifyInstanceMetadataDefaults",
+    "ec2:ModifyVpcBlockPublicAccessOptions",
+    "ec2:DisableAllowedImagesSettings",
+    "ec2:DeleteFlowLogs",
+    "ec2:CreateNetworkInterfacePermission",
 ]
 HOST_POLICY_SOURCES = [ROOT / "infra/iam.tf", ROOT / "infra/recovery-rehearsal/iam.tf"]
 

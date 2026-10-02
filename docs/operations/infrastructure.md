@@ -68,7 +68,7 @@ aws cloudtrail lookup-events \
   --query 'Events[].[EventTime,EventName,ReadOnly,Username,EventId,Resources[].ResourceName]' --output text
 aws cloudtrail lookup-events \
   --lookup-attributes AttributeKey=ResourceName,AttributeValue="$host_id" \
-  --query 'Events[?EventName==`RunInstances`].[EventTime,EventName,ReadOnly,Username,EventId]' --output text
+  --query 'Events[?ReadOnly==`false`].[EventTime,EventName,Username,EventId]' --output text
 ```
 
 Each event prints its time, name, read-only flag, user, and event ID, then the resource IDs it references. Current attachments are not history: a volume can be attached elsewhere, written, detached, and reattached.
@@ -82,20 +82,21 @@ Require all of:
 
 - an empty `Snapshot` and `Source` (a volume copy carries data without a snapshot), a `Created` time inside the recorded apply window, and exactly one current attachment, to the new host ID in the private outputs;
 - exactly one `CreateVolume`, inside the recorded apply window, whose `Username` equals that of the host's single `RunInstances` event;
-- at least one `AttachVolume`, each to that host ID;
+- among the host's write events, only that apply's `RunInstances`, `AssociateAddress`, and `AttachVolume`; any other, such as `CreateReplaceRootVolumeTask`, `StopInstances`, or `ModifyInstanceAttribute`, means the host's logs or root disk may not cover first setup;
+- at least one `AttachVolume`, each to that host ID, and the current `AttachTime` inside the recorded apply window and equal, to the second, to the `EventTime` of the apply's own `AttachVolume` (same `Username`). A gp3 volume attaches to one instance at a time, so any detach and use elsewhere changes `AttachTime`, whatever CloudTrail indexed;
 - no other event whose `ReadOnly` is `false`, such as `DetachVolume`, `CreateSnapshot`, `CopyVolumes`, `ModifyVolume`, or `CreateTags`.
 
-The window is the `apply-start` and `apply-end` pair recorded around that one apply; a failed or split apply has none. An apply without a recorded window needs a private bound that Craig accepts, such as the `LastModified` times of the state object versions written just before and by that apply. If an `AttachVolume` lists no instance, read only its target from that event. Keep the raw event private; it contains source IP addresses and ARNs:
+The window is the newest `apply-start` and `apply-end` pair, recorded around that one apply; the host's `RunInstances` must fall inside the same pair; a failed or split apply has none. An apply without a recorded window needs a private bound that Craig accepts, such as the `LastModified` times of the state object versions written just before and by that apply. If an `AttachVolume` lists no instance, read only its target from that event. Keep the raw event private; it contains source IP addresses and ARNs:
 
 ```sh
 aws cloudtrail lookup-events \
   --lookup-attributes AttributeKey=EventId,AttributeValue="$event_id" \
-  --query 'Events[0].CloudTrailEvent' --output text | jq -r .requestParameters.instanceId
+  --query 'Events[0].CloudTrailEvent' --output text | jq -er .requestParameters.instanceId || exit 1
 ```
 
-A 2026-10-02 lookup of the first deployment's data volume showed a clean apply: exactly `CreateVolume` then `AttachVolume`, which listed both the volume and the instance. No `CreateTags` or KMS events were indexed under the volume. Both events and the host's `RunInstances` had the same `Username`, OpenTofu's generated `aws-go-sdk-<digits>` role session name, and all were visible within minutes. An attach and detach of a different volume to the host was indexed under the instance ID only, so always query the volume ID.
+A 2026-10-02 lookup of the first deployment's data volume showed a clean apply: exactly `CreateVolume` then `AttachVolume`, which listed both the volume and the instance. No `CreateTags` or KMS events were indexed under the volume. Both events and the host's `RunInstances` had the same `Username`, OpenTofu's generated `aws-go-sdk-<digits>` role session name, and all were visible within minutes. An attach and detach of a different volume to the host was indexed under the instance ID only. Attach and detach events are therefore not reliably indexed under a volume ID: the identical-`AttachTime` rule, not an absence of events, proves the volume was never reattached.
 
-No completed recovery point may name this volume as its source. This prints each completed point's source volume; stop if it fails or prints `$data_volume_id`:
+No completed recovery point may name this volume as its source. This records each completed point's source volume privately and stops if any equals the data volume or a lookup fails:
 
 ```sh
 aws s3api list-objects-v2 --bucket "$backup_bucket" --prefix instances/ \
@@ -104,7 +105,10 @@ jq -r '.[]? | select(test("/completed/[0-9a-f]{64}[.]json$"))' \
   "$private_dir/backup-keys.json" >"$private_dir/backup-markers.txt" || exit 1
 while IFS= read -r key; do
   aws s3 cp "s3://$backup_bucket/$key" - </dev/null | jq -er .source.volume_id || exit 1
-done <"$private_dir/backup-markers.txt"
+done <"$private_dir/backup-markers.txt" >"$private_dir/backup-sources.txt" || exit 1
+if grep -Fxq "$data_volume_id" "$private_dir/backup-sources.txt"; then
+  echo 'a recovery point records this volume as its source: stop' >&2; exit 1
+fi
 ```
 
 Through SSM, check that the host has not already used storage or the runtime. The data disk is not mounted, so instance data is checked through the backup bucket above. The first boot listed must begin within minutes of the host's `RunInstances` time; otherwise the logs do not cover first setup. Any printed evidence of use, missing log, or nonzero exit is a stop: follow the recovery workflow, never zero-fill.
@@ -124,7 +128,7 @@ ls -A /srv/minecraft 2>/dev/null | grep . && found=1
 test "$found" = 0'
 ```
 
-Install the runtime and transfer deployment handoffs only after initialization; their presence fails this check. Immediately before zero-fill, rerun `describe-volumes` and require the same single attachment with an identical `AttachTime`; if time has passed, repeat the history lookups too. Then, only with Craig's approval, zero-fill and initialize that exact disk, with `data_volume_id` and `data_filesystem_uuid` set in the SSM session to the reviewed outputs.
+Install the runtime and transfer deployment handoffs only after initialization; their presence fails this check. Immediately before zero-fill, rerun the provenance lookups and the host-side check together and require the same single attachment with an identical `AttachTime`; if more than 10 minutes pass before zero-fill starts, rerun both again. Then, only with Craig's approval, zero-fill and initialize that exact disk, with `data_volume_id` and `data_filesystem_uuid` set in the SSM session to the reviewed outputs.
 
 Session Manager ends an interactive session after 20 idle minutes by default, but each step can run up to its size-derived bound below. Run each as a transient systemd unit, which keeps running if the session is lost. The fixed unit name refuses a second concurrent run:
 

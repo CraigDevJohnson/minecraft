@@ -219,7 +219,7 @@ chmod 0600 "$evidence_dir/recovery-deployment.json" \
   "$evidence_dir/recovery-cleanup-inventory.json"
 ```
 
-Cloud-init waits up to 300 seconds for the separately associated EIP to appear through IMDSv2 before package installation. If that wait fails, inspect the EIP association and subnet rather than bypassing bootstrap. The first cloud-init run then stops at the blank-disk storage gate. Through SSM, read `DATA_VOLUME_ID` and `DATA_FILESYSTEM_UUID` from root-only `/etc/minecraft/storage.conf` and compare both with the approved recovery deployment output. Stop if either value differs. A new encrypted EBS volume does not read back as zeros, so it must be zero-filled. This is first setup: the recovery apply created both this volume and this host. Apply every zero-fill rule in [infrastructure operations](infrastructure.md#disk-setup-and-readiness-handoff-to-5-and-7), using `data_volume_id`, `host_id`, and `backup_bucket_name` from `recovery-deployment.json` and the window in `recovery-apply-window.txt`.
+Cloud-init waits up to 300 seconds for the separately associated EIP to appear through IMDSv2 before package installation. If that wait fails, inspect the EIP association and subnet rather than bypassing bootstrap. The first cloud-init run then stops at the blank-disk storage gate. Through SSM, read `DATA_VOLUME_ID` and `DATA_FILESYSTEM_UUID` from root-only `/etc/minecraft/storage.conf` and compare both with the approved recovery deployment output. Stop if either value differs. A new encrypted EBS volume does not read back as zeros, so it must be zero-filled. This is first setup: the recovery apply created both this volume and this host. Apply every zero-fill rule in [infrastructure operations](infrastructure.md#disk-setup-and-readiness-handoff-to-5-and-7), using `data_volume_id`, `host_id`, and `backup_bucket_name` from `recovery-deployment.json` and the newest `apply-start`/`apply-end` pair in `recovery-apply-window.txt` (a recreation appends a new pair; earlier pairs never qualify).
 
 Wait at least 15 minutes after the recovery volume's `AttachTime` before trusting an empty or partial history. This provenance wait runs from `apply-end` to the passing provenance section. Then, from the operator computer, append a timestamped provenance section and review it:
 
@@ -250,17 +250,24 @@ provenance="$evidence_dir/recovery-disk-provenance.txt"
 cat "$provenance"
 ```
 
-Stop if any command fails or is denied. In the newest section, require an empty `Snapshot` and `Source`, a `Created` time inside the recorded window, and one attachment, to the recovery host; exactly one `CreateVolume` inside that window, with the `Username` of the recovery host's single `RunInstances` event; at least one `AttachVolume`, each to the recovery host; no other event whose `ReadOnly` is `false`; and no listed source volume equal to the recovery volume. If an expected event is missing, wait and rerun the block, which appends a new section; if it stays missing, stop. For an `AttachVolume` without an instance resource, use the event-ID lookup in infrastructure operations and keep the raw event private.
+Stop if any command fails or is denied. In the newest section, require an empty `Snapshot` and `Source`, a `Created` time inside the newest `apply-start`/`apply-end` pair in `recovery-apply-window.txt`, with the recovery host's `RunInstances` in the same pair, and one attachment, to the recovery host, whose `AttachTime` equals to the second the `EventTime` of that apply's `AttachVolume`; exactly one `CreateVolume` inside that window, with the `Username` of the recovery host's single `RunInstances` event; at least one `AttachVolume`, each to the recovery host; no other event whose `ReadOnly` is `false`; and no listed source volume equal to the recovery volume. If an expected event is missing, wait and rerun the block, which appends a new section; if it stays missing, stop. For an `AttachVolume` without an instance resource, use the event-ID lookup in infrastructure operations and keep the raw event private.
 
-Through SSM, run the host-side check from infrastructure operations on the recovery host and retain its command ID and private output. Any evidence of prior storage or runtime use is a stop. Transfer the deployment handoffs and install the runtime only after initialization below. Immediately before zero-fill, rerun the provenance block and require the same single attachment with an identical `AttachTime`.
+Through SSM, run the host-side check from infrastructure operations on the recovery host and retain its command ID and private output. Any evidence of prior storage or runtime use is a stop. Transfer the deployment handoffs and install the runtime only after initialization below. Immediately before zero-fill, rerun the provenance block and the host-side check together and require the same single attachment with an identical `AttachTime`; if more than 10 minutes pass before zero-fill starts, rerun both again.
 
 The recovery disk can exceed 40 GiB, so compute its zero-fill and zero-check bounds from its size. Session Manager ends an interactive session after 20 idle minutes by default, so run both as transient systemd units, as below, or through Run Command with `executionTimeout` above the combined bounds of the commands in that invocation. Then, through SSM, zero-fill and initialize that exact disk:
 
 ```sh
-sudo bash -c 'set -euo pipefail; source /etc/minecraft/storage.conf; printf "volume_id=%s filesystem_uuid=%s\n" "$DATA_VOLUME_ID" "$DATA_FILESYSTEM_UUID"' || exit 1
-# Compare the printed values with the approved output before continuing.
-sudo bash -c 'set -euo pipefail; source /etc/minecraft/storage.conf; exec systemd-run --unit=minecraft-storage-zero-fill --collect --wait -p Type=oneshot /usr/local/sbin/minecraft-storage zero-fill --volume-id "$DATA_VOLUME_ID" --confirm-volume-id "$DATA_VOLUME_ID" --filesystem-uuid "$DATA_FILESYSTEM_UUID"' || exit 1
-sudo bash -c 'set -euo pipefail; source /etc/minecraft/storage.conf; exec systemd-run --unit=minecraft-storage-initialize --collect --wait -p Type=oneshot /usr/local/sbin/minecraft-storage initialize --volume-id "$DATA_VOLUME_ID" --confirm-volume-id "$DATA_VOLUME_ID" --filesystem-uuid "$DATA_FILESYSTEM_UUID"' || exit 1
+# Set both from the reviewed recovery-deployment.json, the volume the provenance block passed.
+expected_volume_id='<recovery data_volume_id>'
+expected_filesystem_uuid='<recovery data_filesystem_uuid>'
+for unit in zero-fill initialize; do
+  sudo env EXPECTED_VOLUME_ID="$expected_volume_id" EXPECTED_FILESYSTEM_UUID="$expected_filesystem_uuid" UNIT="$unit" \
+    bash -c 'set -euo pipefail; source /etc/minecraft/storage.conf
+      [[ "$DATA_VOLUME_ID" == "$EXPECTED_VOLUME_ID" && "$DATA_FILESYSTEM_UUID" == "$EXPECTED_FILESYSTEM_UUID" ]] ||
+        { echo "storage.conf does not match the reviewed recovery output: stop" >&2; exit 1; }
+      exec systemd-run --unit="minecraft-storage-$UNIT" --collect --wait -p Type=oneshot /usr/local/sbin/minecraft-storage "$UNIT" \
+        --volume-id "$DATA_VOLUME_ID" --confirm-volume-id "$EXPECTED_VOLUME_ID" --filesystem-uuid "$EXPECTED_FILESYSTEM_UUID"' || exit 1
+done
 sudo systemctl restart minecraft-storage.service || exit 1
 sudo systemctl start docker.service || exit 1
 ```
