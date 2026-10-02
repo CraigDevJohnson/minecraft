@@ -7,8 +7,10 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / 'scripts'))
 from minecraft_content import manifest_digest
 import minecraft_backup as backup
 
@@ -190,6 +192,54 @@ class BackupTests(unittest.TestCase):
                 result = backup.status(self.store, 'survival', self.workspace)
                 self.assertEqual(result['completion'], 'unavailable')
                 self.assertEqual(result['invalid_points'], 1)
+
+    def use_manifest(self, manifest):
+        (self.instance / 'runtime/manifest.json').write_text(json.dumps(manifest))
+        self.request['manifest_sha256'] = manifest_digest(manifest)
+
+    def test_points_recorded_by_the_previous_content_release_stay_cataloged_after_upgrade(self):
+        current = json.loads((REPO / 'runtime/content.json').read_text())
+        previous = json.loads((REPO / 'tests/fixtures/content-survival-2026-09-08-managed-config.json').read_text())
+        self.use_manifest(previous)
+        self.record_session()
+        # This release refuses to back up a session of an earlier content release ...
+        with self.assertRaises(backup.BackupError):
+            self.publish()
+        # ... which the earlier release published before the reviewed upgrade.
+        old_points = []
+        with mock.patch.object(backup, '_validate_manifest'):
+            for day in range(1, 16):
+                self.request['session'] = f'pre-viaversion-{day}'
+                self.record_session()
+                old_points.append(self.publish(now=f'2026-09-{day:02d}T10:00:00Z')['recovery_point'])
+        self.use_manifest(current)
+        self.request['session'] = 'post-viaversion'
+        self.record_session()
+        latest = self.publish(now='2026-10-02T10:00:00Z')['recovery_point']
+        status = backup.status(self.store, 'survival', self.workspace, now='2026-10-02T11:00:00Z')
+        self.assertEqual(status['invalid_points'], 0)
+        self.assertEqual(len(status['recovery_points']), 16)
+        self.assertEqual(status['recovery_points'][0]['recovery_point'], latest)
+        self.assertEqual({item['manifest_sha256'] for item in status['recovery_points'][1:]},
+                         {'ebe2fd621e9328dd708aa77918dbd96f8039670cddc3364c4f45e582b931c29e'})
+        metadata, _ = backup.load_recovery(self.store, 'survival', old_points[-1], self.workspace)
+        self.assertEqual(metadata['manifest'], previous)
+        result = backup.prune(self.store, 'survival', self.workspace)
+        self.assertEqual((result['outcome'], result['removed'], result['invalid_points']), ('complete', 2, 0))
+        retained = [item['recovery_point'] for item in backup.status(self.store, 'survival', self.workspace)['recovery_points']]
+        self.assertEqual(retained, [latest, *reversed(old_points[2:])])
+
+    def test_recorded_content_outside_every_reviewed_release_is_invalid(self):
+        current = json.loads((REPO / 'runtime/content.json').read_text())
+        previous = json.loads((REPO / 'tests/fixtures/content-survival-2026-09-08-managed-config.json').read_text())
+        # ViaVersion added beside the earlier Geyser v7 configuration was never a reviewed release.
+        self.use_manifest(dict(previous, artifacts=previous['artifacts'] + [current['artifacts'][3]]))
+        self.record_session()
+        with mock.patch.object(backup, '_validate_manifest'):
+            self.publish()
+        status = backup.status(self.store, 'survival', self.workspace)
+        self.assertEqual((status['completion'], status['invalid_points']), ('unavailable', 1))
+        self.assertEqual(backup.prune(self.store, 'survival', self.workspace)['outcome'], 'pending')
 
     def test_retention_keeps_fourteen_and_latest_after_long_inactivity(self):
         points = []

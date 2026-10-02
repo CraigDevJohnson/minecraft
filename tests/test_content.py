@@ -15,13 +15,24 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import minecraft_content as content
 
+# The exact manifest active before ViaVersion; live recovery points record it (digest ebe2fd62...).
+PREVIOUS_MANIFEST = ROOT / "tests/fixtures/content-survival-2026-09-08-managed-config.json"
+
+
+def write_manifest(directory: str, manifest: dict) -> Path:
+    path = Path(directory) / "manifest.json"
+    path.write_text(json.dumps(manifest))
+    return path
+
 
 class ContentTests(unittest.TestCase):
     def test_managed_configuration_is_recoverable_from_the_exact_manifest(self):
         manifest = content.load_manifest(ROOT / "runtime/content.json")
         expected = (b'{"bedrock":{"address":"0.0.0.0","clone-remote-port":false,"port":19132},'
-                    b'"config-version":7,"java":{"auth-type":"floodgate"},'
+                    b'"config-version":8,"java":{"auth-type":"floodgate"},'
                     b'"log-player-ip-addresses":false,"saved-user-logins":[]}\n')
+        self.assertEqual(hashlib.sha256(expected).hexdigest(),
+                         "a98d3442120aa0cfe4eb63e28eebb935b01e7c52b0aa1d8e55bb6d618d1c442f")
         artifact_bytes = b"fixture artifact contents"
         for artifact in manifest["artifacts"]:
             artifact["sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
@@ -53,7 +64,10 @@ class ContentTests(unittest.TestCase):
             lambda c: c["java"].update({"auth-type": "offline"}),
             lambda c: c["bedrock"].update(port="19132"),
             lambda c: c["bedrock"].update({"clone-remote-port": True}),
-            lambda c: c.update({"config-version": 7.0}),
+            lambda c: c.update({"config-version": 8.0}),
+            lambda c: c.update({"config-version": 7}),
+            lambda c: c.update({"config-version": 9}),
+            lambda c: c["bedrock"].update(transport="webrtc"),
             lambda c: c.update({"log-player-ip-addresses": True}),
             lambda c: c.update({"saved-user-logins": ["unapproved-fixture"]}),
             lambda c: c["java"].clear(),
@@ -70,6 +84,91 @@ class ContentTests(unittest.TestCase):
                 path.write_text(json.dumps(invalid))
                 with self.assertRaisesRegex(content.ContentError, "configuration schema"):
                     content.load_manifest(path)
+
+    def test_manifest_pins_reviewed_crossplay_content_and_geyser_v8_configuration(self):
+        manifest = content.load_manifest(ROOT / "runtime/content.json")
+        self.assertEqual([(artifact["name"], artifact["path"]) for artifact in manifest["artifacts"]], [
+            ("paper", "paper.jar"), ("geyser", "plugins/Geyser-Spigot.jar"),
+            ("floodgate", "plugins/floodgate-spigot.jar"), ("viaversion", "plugins/ViaVersion.jar")])
+        paper, geyser, floodgate, viaversion = manifest["artifacts"]
+        self.assertEqual((paper["version"], paper["build"]), (manifest["minecraft_version"], 129))
+        self.assertEqual((geyser["version"], geyser["build"]), ("2.11.3", 1247))
+        self.assertEqual((floodgate["version"], floodgate["build"]), ("2.2.5", 141))
+        # A GitHub release asset is identified by its exact tag and SHA-256; it has no CI build number.
+        self.assertEqual(viaversion["version"], "5.12.0")
+        self.assertNotIn("build", viaversion)
+        self.assertEqual(viaversion["url"], "https://github.com/ViaVersion/ViaVersion/releases/download/5.12.0/ViaVersion-5.12.0.jar")
+        managed = manifest["managed_files"][0]
+        self.assertEqual(managed["content"]["config-version"], 8)
+        self.assertEqual(managed["sha256"], "a98d3442120aa0cfe4eb63e28eebb935b01e7c52b0aa1d8e55bb6d618d1c442f")
+        self.assertNotEqual(content.manifest_digest(manifest),
+                            content.manifest_digest(json.loads(PREVIOUS_MANIFEST.read_text())))
+
+    def test_manifest_requires_exactly_paper_geyser_floodgate_and_viaversion(self):
+        manifest = content.load_manifest(ROOT / "runtime/content.json")
+        unknown = dict(manifest["artifacts"][3], name="protocollib", path="plugins/ProtocolLib.jar")
+        via = "https://github.com/ViaVersion/ViaVersion/releases/download/5.12.0/ViaVersion-5.12.0.jar"
+        for mutate in (
+            lambda m: m["artifacts"].pop(),
+            lambda m: m["artifacts"].append(copy.deepcopy(m["artifacts"][3])),
+            lambda m: m["artifacts"].append(unknown),
+            lambda m: m["artifacts"].__setitem__(3, unknown),
+            lambda m: m["artifacts"].insert(0, m["artifacts"].pop()),
+            lambda m: m["artifacts"].__setitem__(3, "viaversion"),
+            lambda m: m["artifacts"][3].update(path="plugins/ViaVersion-5.12.0.jar"),
+            lambda m: m["artifacts"][3].update(path="../ViaVersion.jar"),
+            lambda m: m["artifacts"][3].update(name="ViaVersion"),
+            lambda m: m["artifacts"][3].update(build=1),
+            lambda m: m["artifacts"][3].update(version="latest"),
+            lambda m: m["artifacts"][3].update(version="5.12.1"),
+            lambda m: m["artifacts"][3].update(url=via.replace("/ViaVersion/ViaVersion/", "/Fork/ViaVersion/")),
+            lambda m: m["artifacts"][3].update(url=via.replace("/download/5.12.0/", "/download/5.11.0/")),
+            lambda m: m["artifacts"][3].update(url="https://github.com/ViaVersion/ViaVersion/releases/latest/download/ViaVersion.jar"),
+            lambda m: m["artifacts"][3].update(url=via.replace("https:", "http:")),
+            lambda m: m["artifacts"][3].update(url=via + "?raw=1"),
+            lambda m: m["artifacts"][3].update(url="https://hangarcdn.papermc.io/plugins/ViaVersion/ViaVersion/versions/5.12.0/PAPER/ViaVersion-5.12.0.jar"),
+            lambda m: m["artifacts"][1].update(url="https://github.com/GeyserMC/Geyser/releases/download/2.11.3/Geyser-Spigot.jar"),
+            lambda m: m["artifacts"][1].pop("build"),
+            lambda m: m["artifacts"][1].update(build=True),
+            lambda m: m["artifacts"][3].update(sha256="0" * 63),
+        ):
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as directory:
+                invalid = copy.deepcopy(manifest)
+                mutate(invalid)
+                with self.assertRaises(content.ContentError):
+                    content.load_manifest(write_manifest(directory, invalid))
+
+    def test_previous_release_manifest_is_only_accepted_as_recorded_recovery_content(self):
+        previous = json.loads(PREVIOUS_MANIFEST.read_text())
+        current = content.load_manifest(ROOT / "runtime/content.json")
+        self.assertEqual(content.manifest_digest(previous), "ebe2fd621e9328dd708aa77918dbd96f8039670cddc3364c4f45e582b931c29e")
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(content.ContentError, "exactly Paper, Geyser, Floodgate and ViaVersion"):
+                content.load_manifest(write_manifest(directory, previous))
+            with self.assertRaises(content.ContentError):
+                content.stage_content(previous, Path(directory) / "cache")
+            self.assertFalse((Path(directory) / "cache").exists())
+        # Recovery metadata may name an earlier reviewed release, but this release never stages it.
+        content._validate_manifest(previous, recorded=True)
+        content._validate_manifest(current, recorded=True)
+
+        def with_geyser(manifest, configuration):
+            mixed = copy.deepcopy(manifest)
+            mixed["managed_files"][0]["content"] = copy.deepcopy(configuration)
+            mixed["managed_files"][0]["sha256"] = hashlib.sha256(content._managed_file_bytes(mixed["managed_files"][0])).hexdigest()
+            return mixed
+
+        tampered = copy.deepcopy(previous["managed_files"][0]["content"])
+        tampered["java"]["auth-type"] = "offline"
+        for invalid in (
+            with_geyser(current, previous["managed_files"][0]["content"]),  # ViaVersion release with Geyser v7
+            with_geyser(previous, current["managed_files"][0]["content"]),  # pre-ViaVersion release with Geyser v8
+            with_geyser(previous, tampered),
+            dict(previous, artifacts=previous["artifacts"] + [current["artifacts"][3], current["artifacts"][3]]),
+            dict(previous, artifacts=previous["artifacts"][:2]),
+        ):
+            with self.subTest(invalid=invalid["artifacts"]), self.assertRaises(content.ContentError):
+                content._validate_manifest(invalid, recorded=True)
 
     def test_managed_configuration_integrity_and_file_identity_are_required(self):
         manifest = content.load_manifest(ROOT / "runtime/content.json")
@@ -110,6 +209,10 @@ class ContentTests(unittest.TestCase):
         self.assertNotIn("OPS", env)
         self.assertEqual(service["ports"], ["0.0.0.0:25565:25565/tcp", "0.0.0.0:19132:19132/udp"])
         self.assertTrue(all(not mount["bind"]["create_host_path"] for mount in service["volumes"]))
+        # Every pinned plugin JAR, including ViaVersion, is synced from one read-only staged source.
+        self.assertIn({"type": "bind", "source": "/opt/minecraft/content/fixture/plugins", "target": "/plugins",
+                       "read_only": True, "bind": {"create_host_path": False}}, service["volumes"])
+        self.assertEqual(env["SYNC_SKIP_NEWER_IN_DESTINATION"], "FALSE")
 
     def test_definition_rejects_invalid_identity_and_ports(self):
         definition = json.loads((ROOT / "runtime/survival.json").read_text())
@@ -129,9 +232,12 @@ class ContentTests(unittest.TestCase):
             with mock.patch("urllib.request.urlopen", side_effect=lambda *args, **kwargs: io.BytesIO(data)) as download:
                 staged = content.stage_content(manifest, Path(directory))
                 self.assertEqual((staged / "paper.jar").read_bytes(), data)
-                self.assertEqual(download.call_count, 3)
+                self.assertEqual((staged / "plugins/ViaVersion.jar").read_bytes(), data)
+                self.assertEqual(sorted(path.name for path in (staged / "plugins").iterdir()),
+                                 ["Geyser-Spigot", "Geyser-Spigot.jar", "ViaVersion.jar", "floodgate-spigot.jar"])
+                self.assertEqual(download.call_count, 4)
                 content.stage_content(manifest, Path(directory))
-                self.assertEqual(download.call_count, 3)
+                self.assertEqual(download.call_count, 4)
                 (staged / "paper.jar").write_bytes(b"corrupted")
                 with self.assertRaisesRegex(content.ContentError, "checksum"):
                     content.stage_content(manifest, Path(directory))

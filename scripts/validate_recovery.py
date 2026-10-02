@@ -160,7 +160,7 @@ def validate(operator_config, output):
     restored = runtime.Manager(target.root, target, [instance])
     report = {"status": "incomplete", "platform": platform, "instance": instance,
               "manifest_sha256": content.manifest_digest(manifest),
-              "real_boundaries": ["ARM64 Paper, Geyser and Floodgate startup", "lifecycle locking and journals",
+              "real_boundaries": ["ARM64 Paper, Geyser, Floodgate and ViaVersion startup", "lifecycle locking and journals",
                                   "RCON world checkpoints and confirmed clean stops", "cold archive and file checksums",
                                   "verified publication and restore algorithms", "prepared restored data through normal startup"],
               "simulated_boundaries": ["local filesystem objects instead of S3", "local bind storage instead of EBS",

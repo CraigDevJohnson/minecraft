@@ -18,6 +18,39 @@ class ContentError(ValueError):
     """A runtime definition, artifact, or private input is not safe to use."""
 
 
+# Fixed identity of each pinned server/plugin JAR: name -> (staged path, official download host).
+ARTIFACTS = {
+    "paper": ("paper.jar", "fill-data.papermc.io"),
+    "geyser": ("plugins/Geyser-Spigot.jar", "download.geysermc.org"),
+    "floodgate": ("plugins/floodgate-spigot.jar", "download.geysermc.org"),
+    "viaversion": ("plugins/ViaVersion.jar", "github.com"),
+}
+# GitHub release assets have no CI build number: the exact release tag (the version) names
+# the asset, so the URL must be that tag's official asset and the artifact carries no build.
+RELEASE_ASSETS = {"viaversion": "/ViaVersion/ViaVersion/releases/download/{version}/ViaVersion-{version}.jar"}
+
+
+def _approved_geyser(config_version: int) -> dict:
+    return {
+        "config-version": config_version,
+        "bedrock": {"address": "0.0.0.0", "port": 19132, "clone-remote-port": False},
+        "java": {"auth-type": "floodgate"},
+        "log-player-ip-addresses": False,
+        "saved-user-logins": [],
+    }
+
+
+# This release's content policy: the exact artifact set and its approved Geyser configuration.
+CONTENT_POLICY = (frozenset(ARTIFACTS), _approved_geyser(8))
+# Earlier reviewed policies that completed recovery points may still record. They are accepted
+# only when validating recorded recovery metadata, so catalog, status and retention keep working
+# after a content upgrade; this release never stages or launches them.
+RECORDED_CONTENT_POLICIES = (
+    CONTENT_POLICY,
+    (frozenset({"paper", "geyser", "floodgate"}), _approved_geyser(7)),  # survival-2026-09-08-managed-config
+)
+
+
 def load_definition(path: Path) -> dict:
     definition = json.loads(Path(path).read_text())
     _validate_definition(definition)
@@ -43,7 +76,8 @@ def load_manifest(path: Path) -> dict:
     return manifest
 
 
-def _validate_manifest(manifest: dict) -> None:
+def _validate_manifest(manifest: dict, *, recorded: bool = False) -> None:
+    """Check this release's content policy; ``recorded`` also admits an earlier reviewed policy."""
     if manifest.get("schema_version") != 1 or manifest.get("platform") != "linux/arm64":
         raise ContentError("manifest must use schema 1 and linux/arm64")
     if not re.fullmatch(r"itzg/minecraft-server@sha256:[a-f0-9]{64}", manifest.get("image", "")):
@@ -51,23 +85,31 @@ def _validate_manifest(manifest: dict) -> None:
     for field in ("revision", "java_version", "minecraft_version"):
         if not isinstance(manifest.get(field), str) or not re.fullmatch(r"[a-zA-Z0-9.+_-]+", manifest[field]) or "latest" in manifest[field].lower():
             raise ContentError(f"manifest requires an exact {field}")
-    expected = {"paper": "paper.jar", "geyser": "plugins/Geyser-Spigot.jar", "floodgate": "plugins/floodgate-spigot.jar"}
     artifacts = manifest.get("artifacts", [])
-    if not isinstance(artifacts, list) or len(artifacts) != len(expected):
-        raise ContentError("manifest must contain exactly Paper, Geyser and Floodgate")
+    if not isinstance(artifacts, list):
+        raise ContentError("manifest must contain exactly Paper, Geyser, Floodgate and ViaVersion")
     found = set()
     for artifact in artifacts:
-        name = artifact.get("name")
-        if name not in expected or name in found or artifact.get("path") != expected[name]:
+        name = artifact.get("name") if isinstance(artifact, dict) else None
+        if name not in ARTIFACTS or name in found or artifact.get("path") != ARTIFACTS[name][0]:
             raise ContentError("unexpected or duplicate runtime artifact")
         found.add(name)
         if not re.fullmatch(r"[a-f0-9]{64}", artifact.get("sha256", "")):
             raise ContentError("artifact requires a SHA-256 checksum")
-        if not isinstance(artifact.get("build"), int) or artifact["build"] < 1 or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,2}", artifact.get("version", "")):
+        version = artifact.get("version", "")
+        release = RELEASE_ASSETS.get(name)
+        exact_build = ("build" not in artifact if release
+                       else type(artifact.get("build")) is int and artifact["build"] >= 1)
+        if not exact_build or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,2}", version):
             raise ContentError("artifact requires an exact version and build")
         url = urllib.parse.urlsplit(artifact.get("url", ""))
-        if url.scheme != "https" or url.hostname not in {"fill-data.papermc.io", "download.geysermc.org"} or url.query or url.fragment or url.username or "latest" in url.path.lower():
+        if (url.scheme != "https" or url.netloc != ARTIFACTS[name][1] or url.query or url.fragment
+                or "latest" in url.path.lower() or (release and url.path != release.format(version=version))):
             raise ContentError("artifact requires an exact official HTTPS download URL")
+    policies = RECORDED_CONTENT_POLICIES if recorded else (CONTENT_POLICY,)
+    approved = [geyser for names, geyser in policies if names == found]
+    if not approved:
+        raise ContentError("manifest must contain exactly Paper, Geyser, Floodgate and ViaVersion")
     if artifacts[0]["name"] != "paper" or artifacts[0]["version"] != manifest["minecraft_version"]:
         raise ContentError("Paper and Minecraft versions must match")
     managed_files = manifest.get("managed_files")
@@ -81,18 +123,13 @@ def _validate_manifest(manifest: dict) -> None:
             or hashlib.sha256(_managed_file_bytes(managed)).hexdigest() != managed["sha256"]):
         raise ContentError("managed configuration checksum mismatch")
     configuration = managed["content"]
-    approved_schema = {
-        "config-version": 7,
-        "bedrock": {"address": "0.0.0.0", "port": 19132, "clone-remote-port": False},
-        "java": {"auth-type": "floodgate"},
-        "log-player-ip-addresses": False,
-        "saved-user-logins": [],
-    }
+    approved_schema = approved[0]
     # Policy validation only: staged bytes always come from the manifest payload.
-    # JSON equality keeps scalar types distinct (7.0/7 and false/0 differ).
+    # JSON equality keeps scalar types distinct (8.0/8 and false/0 differ).
     if (not isinstance(configuration, dict)
             or _managed_file_bytes(managed) != _managed_file_bytes({"content": approved_schema})):
-        raise ContentError("managed configuration schema must preserve the approved Geyser v7 authentication, network and privacy settings")
+        raise ContentError(f"managed configuration schema must preserve the approved Geyser v{approved_schema['config-version']} "
+                           "authentication, network and privacy settings")
 
 
 def _managed_file_bytes(managed: dict) -> bytes:
