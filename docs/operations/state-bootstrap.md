@@ -12,7 +12,19 @@ Before the operator role is used, the administrator creates the host boundary ma
 
 Otherwise the role is limited to EC2 in the deployment Region, prefixed instance profiles and S3 buckets, the prefixed budget, public AMI parameters, and CloudTrail event lookup in the deployment Region to prove a volume's attachment history. The operator's bucket statement has no account condition because the operator creates those buckets. SSM commands and sessions require a target instance tagged `Project=minecraft` and the reviewed shell documents. A session can be resumed or ended only by a session of the operator role whose session name is the starting session's name or a prefix of it: the policy prefix-matches the session's AWS-applied `aws:ssmmessages:session-id` tag to `${aws:userid}*`, the form AWS [documents for assumed roles](https://docs.aws.amazon.com/systems-manager/latest/userguide/getting-started-restrict-access-examples.html#restrict-access-example-user-sessions-tags) in place of a `session/${aws:userid}-*` ARN pattern. `ssmmessages:OpenDataChannel` has [no resource type](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ssmmessages.html), so it is limited only to the Region; a data channel needs the token that `StartSession` or `ResumeSession` returns. An explicit deny keeps the operator from disabling EBS encryption by default or changing its default KMS key, disabling snapshot or AMI block public access, enabling EC2 serial console access, changing snapshot or AMI sharing attributes, changing Region-wide instance metadata defaults, VPC block public access options or exclusions, or allowed-images settings or criteria, deleting flow logs, and sharing network interfaces with other accounts; this repository's OpenTofu manages none of these. Region-wide `ec2:*` is the remaining exposure: the operator can still stop, modify, detach, delete, or snapshot other instances and volumes in the same account and Region, and could run code under their instance roles, for example by tagging one into SSM scope or replacing its user data. The operator can also read and cancel any Run Command invocation in the Region (those actions have no resource type), read every management event in the Region's CloudTrail event history, and, because S3 ARNs carry no account, reach same-prefix buckets in other accounts. A dedicated account, tag-scoped EC2 permissions, and `s3:ResourceAccount` conditions on the operator's object statements are the remaining hardening. The role limits the blast radius of operator tooling and mistakes; it is not a boundary against the administrator who assumes it.
 
-The first deployment's operator and host roles predate the boundary. Adopt it in this order:
+The first deployment's operator and host roles predate the boundary. Adopt it in this order. `scripts/adopt_host_boundary.py` runs steps 1, 2, 3 and 6 with the administrator's credentials, one reviewable action at a time, keeping its rendered policies and the rollback copy in a private directory:
+
+```sh
+adopt=(python3 scripts/adopt_host_boundary.py --account-id "$account_id" --region "$region" \
+  --iam-prefix "$iam_prefix" --operator-role minecraft-operator --out-dir "$private_dir/boundary")
+"${adopt[@]}" render && "${adopt[@]}" validate   # step 2 documents, checked by Access Analyzer
+"${adopt[@]}" inventory                          # step 1
+"${adopt[@]}" apply --policy-name <inline policy from inventory> --confirm-operator-role minecraft-operator  # steps 2-3
+"${adopt[@]}" rollback                           # only if the step 4 smoke test fails
+"${adopt[@]}" inventory --expect-all-bounded     # step 6
+```
+
+`apply` stops before any write if the credentials are for another account, the operator role has attached managed policies, the named inline policy is missing, or a boundary policy of that name already exists with a different document. It replaces only the named inline policy, so a separate state-backend inline policy stays as it is.
 
 1. As the administrator, list every prefixed role with its boundary, attached policies, and inline policy names:
 
