@@ -47,6 +47,8 @@ resource "aws_instance" "recovery" {
   }
 
   lifecycle {
+    # EC2 reports a public IPv4 association once the separate Elastic IP is attached.
+    ignore_changes = [associate_public_ip_address]
     precondition {
       condition     = var.recovery_root_volume_size_gib * 1073741824 * 10 >= 20 * 1073741824 * 10 + var.max_recovery_backup_archive_size_bytes * 22
       error_message = "Recovery root volume must reserve 20 GiB plus 10 percent headroom for two maximum-size backup archive copies."
