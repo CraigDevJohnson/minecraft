@@ -14,6 +14,9 @@ source_backup_bucket_name = "replace-with-source-backup-bucket"
 recovery_backup_bucket_name = "replace-with-unique-temporary-recovery-bucket"
 instance_id               = "survival"
 
+# The source deployment's administrator-created host boundary policy.
+host_permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-host-boundary"
+
 # Use the selected marker's measurements and review a ceiling for the new backup;
 # approve both disk sizes and their cost before applying the recovery plan.
 restore_archive_size_bytes             = 17179869184

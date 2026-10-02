@@ -16,6 +16,19 @@ variable "operator_role_arn" {
   }
 }
 
+variable "host_permissions_boundary_arn" {
+  description = "Administrator-owned managed policy, named outside the operator's IAM prefix, that caps every host role the operator can create or pass."
+  type        = string
+  validation {
+    condition     = can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", var.host_permissions_boundary_arn)) && try(split(":", var.host_permissions_boundary_arn)[4], "") == var.account_id
+    error_message = "host_permissions_boundary_arn must name a managed policy in the target account."
+  }
+  validation {
+    condition     = !startswith(lower(reverse(split("/", var.host_permissions_boundary_arn))[0]), "${var.resource_prefix}-")
+    error_message = "host_permissions_boundary_arn must name a policy outside the resource prefix, so prefix-scoped operator permissions never cover it."
+  }
+}
+
 variable "environment" {
   description = "Deployment environment, distinct from a server instance ID."
   type        = string

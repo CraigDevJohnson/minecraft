@@ -20,6 +20,7 @@ variables {
   recovery_root_volume_size_gib          = 64
   source_data_filesystem_uuid            = "aaaaaaaa-1234-4234-8234-123456789abc"
   data_filesystem_uuid                   = "12345678-1234-4234-8234-123456789abc"
+  host_permissions_boundary_arn          = "arn:aws:iam::111122223333:policy/minecraft-host-boundary"
 }
 
 run "temporary_host_has_guarded_storage_and_endpoint" {
@@ -53,6 +54,15 @@ run "temporary_host_has_guarded_storage_and_endpoint" {
   assert {
     condition     = length(aws_vpc_security_group_egress_rule.web) == 2 && toset([for rule in aws_vpc_security_group_egress_rule.web : rule.from_port]) == toset([80, 443]) && toset([for rule in aws_vpc_security_group_egress_rule.web : rule.to_port]) == toset([80, 443]) && alltrue([for rule in aws_vpc_security_group_egress_rule.web : rule.ip_protocol == "tcp" && rule.cidr_ipv4 == "0.0.0.0/0" && rule.security_group_id == aws_security_group.recovery.id])
     error_message = "The recovery security group may allow only TCP 80 and 443 egress."
+  }
+}
+
+run "recovery_credentials_carry_the_host_permissions_boundary" {
+  command = plan
+
+  assert {
+    condition     = aws_iam_role.recovery.permissions_boundary == var.host_permissions_boundary_arn
+    error_message = "The recovery role must carry the administrator-owned permissions boundary that caps any operator-written policy."
   }
 }
 
@@ -137,6 +147,22 @@ run "reject_cross_account_operator" {
     operator_role_arn = "arn:aws:iam::999900001111:role/minecraft-operator"
   }
   expect_failures = [var.operator_role_arn]
+}
+
+run "reject_cross_account_host_permissions_boundary" {
+  command = plan
+  variables {
+    host_permissions_boundary_arn = "arn:aws:iam::999900001111:policy/minecraft-host-boundary"
+  }
+  expect_failures = [var.host_permissions_boundary_arn]
+}
+
+run "reject_host_permissions_boundary_inside_resource_prefix" {
+  command = plan
+  variables {
+    host_permissions_boundary_arn = "arn:aws:iam::111122223333:policy/boundaries/minecraft-family-recovery-boundary"
+  }
+  expect_failures = [var.host_permissions_boundary_arn]
 }
 
 run "reject_wrong_region_az" {
