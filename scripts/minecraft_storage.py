@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 
 MOUNTPOINT = "/srv/minecraft"
+WHOLE_DEVICE_FLOOR_BYTES_PER_SECOND = 50 * 1024 * 1024
+WHOLE_DEVICE_BASE_SECONDS = 300
 
 
 class StorageError(Exception):
@@ -113,6 +115,18 @@ def verify_mount(host, disk: dict, filesystem_uuid: str) -> None:
         raise StorageError("mount is not the expected writable EBS filesystem")
 
 
+def whole_device_timeout(size: int) -> int:
+    """Bound a whole-device pass: five minutes plus the device at a 50 MiB/s floor."""
+    return WHOLE_DEVICE_BASE_SECONDS + -(-size // WHOLE_DEVICE_FLOOR_BYTES_PER_SECOND)
+
+
+def device_size(host, disk: dict) -> int:
+    size = int(host.run(["blockdev", "--getsize64", disk["name"]], timeout=10).strip())
+    if size <= 0:
+        raise StorageError("cannot establish disk size")
+    return size
+
+
 def zero_fill(host, disk: dict, volume_id: str) -> None:
     """Overwrite a newly created, unrecognized volume with zeros before initialization.
 
@@ -126,11 +140,16 @@ def zero_fill(host, disk: dict, volume_id: str) -> None:
     signatures = json.loads(host.run(["wipefs", "--no-act", "--json", disk["name"]], timeout=10))
     if signatures.get("signatures"):
         raise StorageError("disk has existing signatures; refusing to zero-fill")
+    size = device_size(host, disk)
     current = discover(host, volume_id)
     if (current["name"] != disk["name"] or current["maj:min"] != disk["maj:min"]
             or current.get("fstype") or current.get("uuid") or any(current.get("mountpoints", []))):
         raise StorageError("disk state changed during checks; refusing to zero-fill")
-    host.run(["blkdiscard", "--zeroout", disk["name"]], timeout=900)
+    try:
+        host.run(["blkdiscard", "--zeroout", disk["name"]], timeout=whole_device_timeout(size))
+    except StorageError as error:
+        raise StorageError(f"{error}; the disk may be partially zeroed. Do not initialize it "
+                           "until zero-fill is rerun to completion") from error
 
 
 def initialize(host, disk: dict, volume_id: str, filesystem_uuid: str) -> None:
@@ -143,12 +162,11 @@ def initialize(host, disk: dict, volume_id: str, filesystem_uuid: str) -> None:
     signatures = json.loads(host.run(["wipefs", "--no-act", "--json", disk["name"]], timeout=10))
     if signatures.get("signatures"):
         raise StorageError("disk has existing signatures; refusing initialization")
-    size = int(host.run(["blockdev", "--getsize64", disk["name"]], timeout=10).strip())
-    if size <= 0:
-        raise StorageError("cannot establish disk size")
+    size = device_size(host, disk)
     # Signatures alone cannot distinguish an empty disk from unrecognized data.
     try:
-        host.run(["cmp", "--silent", "--bytes", str(size), disk["name"], "/dev/zero"], timeout=900)
+        host.run(["cmp", "--silent", "--bytes", str(size), disk["name"], "/dev/zero"],
+                 timeout=whole_device_timeout(size))
     except StorageError as error:
         raise StorageError("disk is not proven entirely zero-filled; refusing initialization") from error
     current = discover(host, volume_id)

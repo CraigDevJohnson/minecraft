@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import math
 import sys
 import subprocess
 import unittest
@@ -16,6 +17,13 @@ import minecraft_storage  # noqa: E402
 
 VOLUME = "vol-0123456789abcdef0"
 UUID = "01234567-89ab-4cde-8fab-0123456789ab"
+GIB = 1024 ** 3
+WHOLE_DEVICE_COMMANDS = ("cmp", "blkdiscard")
+
+
+def expected_whole_device_bound(size: int) -> int:
+    """Five minutes plus the whole device at a 50 MiB/s floor."""
+    return 300 + math.ceil(size / (50 * 1024 * 1024))
 
 
 class FakeHost:
@@ -41,6 +49,8 @@ class FakeHost:
         self.formatted = False
         self.zero_filled = False
         self.mount_works = True
+        self.size = 40 * GIB
+        self.timeouts: list[tuple[str, int]] = []
 
     def require_root(self) -> None:
         pass
@@ -54,8 +64,9 @@ class FakeHost:
             raise minecraft_storage.StorageError("mountpoint is occupied")
 
     def run(self, command: list[str], *, timeout: int, allowed=(0,)) -> str:
-        self.assert_bounded(timeout)
+        self.assert_bounded(command, timeout)
         self.calls.append(command)
+        self.timeouts.append((command[0], timeout))
         tool = command[0]
         if tool == "lsblk":
             return json.dumps({"blockdevices": self.devices})
@@ -66,7 +77,7 @@ class FakeHost:
         if tool == "wipefs":
             return json.dumps({"signatures": self.signatures})
         if tool == "blockdev":
-            return "42949672960\n"
+            return f"{self.size}\n"
         if tool == "cmp":
             if not self.all_zero:
                 raise minecraft_storage.StorageError("disk contains nonzero bytes")
@@ -86,9 +97,11 @@ class FakeHost:
             return ""
         raise AssertionError(f"unexpected command: {command}")
 
-    @staticmethod
-    def assert_bounded(timeout: int) -> None:
-        if not 0 < timeout <= 900:
+    def assert_bounded(self, command: list[str], timeout: int) -> None:
+        if command[0] in WHOLE_DEVICE_COMMANDS:
+            if timeout != expected_whole_device_bound(self.size):
+                raise AssertionError(f"{command[0]} timeout {timeout} is not derived from device size {self.size}")
+        elif not 0 < timeout <= 900:
             raise AssertionError(f"unbounded command timeout: {timeout}")
 
 
@@ -251,6 +264,70 @@ class StorageCommandTests(unittest.TestCase):
                         host.devices = []
                 result, output = self.invoke(host, "zero-fill", ["--confirm-volume-id", VOLUME])
                 self.assertEqual(result, 1, output)
+                self.assertFalse(host.zero_filled)
+                self.assertFalse(host.formatted)
+
+    def test_whole_device_bound_scales_with_device_size(self) -> None:
+        self.assertEqual(minecraft_storage.whole_device_timeout(1), 301)
+        self.assertEqual(minecraft_storage.whole_device_timeout(40 * GIB), 1120)
+        self.assertEqual(minecraft_storage.whole_device_timeout(220 * GIB), 4806)
+        for size in (1, 40 * GIB, 220 * GIB, 220 * GIB + 1):
+            self.assertEqual(minecraft_storage.whole_device_timeout(size), expected_whole_device_bound(size))
+
+    def test_zero_fill_and_initialize_use_the_size_derived_bound(self) -> None:
+        for size in (40 * GIB, 220 * GIB):
+            with self.subTest(size=size):
+                host = FakeHost()
+                host.size = size
+                host.disk.update(fstype=None, uuid=None)
+                host.all_zero = False
+                result, output = self.invoke(host, "zero-fill", ["--confirm-volume-id", VOLUME])
+                self.assertEqual(result, 0, output)
+                result, output = self.invoke(host, "initialize", ["--confirm-volume-id", VOLUME])
+                self.assertEqual(result, 0, output)
+                self.assertTrue(host.formatted)
+                bound = expected_whole_device_bound(size)
+                self.assertGreater(bound, 900)
+                self.assertEqual([t for tool, t in host.timeouts if tool in WHOLE_DEVICE_COMMANDS], [bound, bound])
+                self.assertEqual([tool for tool, _ in host.timeouts if tool in WHOLE_DEVICE_COMMANDS], ["blkdiscard", "cmp"])
+
+    def test_zero_fill_timeout_warns_of_partial_zeroing_and_never_formats(self) -> None:
+        class SlowDiscardHost(FakeHost):
+            def run(self, command, *, timeout, allowed=(0,)):
+                if command[0] != "blkdiscard":
+                    return super().run(command, timeout=timeout, allowed=allowed)
+                self.assert_bounded(command, timeout)
+                self.calls.append(command)
+                return minecraft_storage.LinuxHost().run(command, timeout=timeout, allowed=allowed)
+        host = SlowDiscardHost()
+        host.size = 220 * GIB
+        host.disk.update(fstype=None, uuid=None)
+        host.all_zero = False
+        timeout = subprocess.TimeoutExpired("blkdiscard", expected_whole_device_bound(host.size))
+        with mock.patch.object(minecraft_storage.subprocess, "run", side_effect=timeout) as command:
+            result, output = self.invoke(host, "zero-fill", ["--confirm-volume-id", VOLUME])
+        self.assertEqual(command.call_args.args[0][0], "blkdiscard")
+        self.assertEqual(command.call_args.kwargs["timeout"], expected_whole_device_bound(host.size))
+        self.assertEqual(result, 1, output)
+        self.assertIn("timed out", output)
+        self.assertIn("partially zeroed", output)
+        self.assertIn("rerun", output)
+        self.assertNotIn("disk zero-filled", output)
+        self.assertFalse(any(call[0] == "mkfs.ext4" for call in host.calls))
+        result, output = self.invoke(host, "initialize", ["--confirm-volume-id", VOLUME])
+        self.assertEqual(result, 1, output)
+        self.assertFalse(host.formatted)
+
+    def test_unknown_disk_size_refuses_zero_fill_and_initialize(self) -> None:
+        for action in ("zero-fill", "initialize"):
+            with self.subTest(action=action):
+                host = FakeHost()
+                host.size = 0
+                host.disk.update(fstype=None, uuid=None)
+                result, output = self.invoke(host, action, ["--confirm-volume-id", VOLUME])
+                self.assertEqual(result, 1, output)
+                self.assertIn("disk size", output)
+                self.assertFalse(any(call[0] in ("blkdiscard", "cmp", "mkfs.ext4") for call in host.calls))
                 self.assertFalse(host.zero_filled)
                 self.assertFalse(host.formatted)
 
