@@ -37,6 +37,18 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
             with self.subTest(resource=name):
                 self.assertRegex(body, r"lifecycle\s*\{\s*prevent_destroy\s*=\s*true\s*\}")
 
+    def test_elastic_ip_association_does_not_force_host_replacement(self):
+        # EC2 reports associate_public_ip_address=true once the separately associated
+        # Elastic IP is attached, so without this every later plan replaces the host.
+        hosts = {
+            "infra": resource_blocks(INFRA)["aws_instance.host"],
+            "recovery-rehearsal": resource_blocks(INFRA / "recovery-rehearsal")["aws_instance.recovery"],
+        }
+        for root, body in hosts.items():
+            with self.subTest(root=root):
+                self.assertRegex(body, r"associate_public_ip_address\s*=\s*false")
+                self.assertRegex(body, r"lifecycle\s*\{[^}]*ignore_changes\s*=\s*\[\s*associate_public_ip_address\s*\]")
+
     def test_storage_identity_has_no_dependency_on_replaceable_compute(self):
         for directory in [INFRA, INFRA / "state-bootstrap"]:
             for name, body in resource_blocks(directory).items():

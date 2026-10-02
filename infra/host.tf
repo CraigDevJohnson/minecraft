@@ -54,6 +54,10 @@ resource "aws_instance" "host" {
   }
 
   tags = { Name = "${var.resource_prefix}-host", Purpose = "replaceable-host" }
+  lifecycle {
+    # EC2 reports a public IPv4 association once the separate Elastic IP is attached.
+    ignore_changes = [associate_public_ip_address]
+  }
   depends_on = [
     aws_iam_role_policy.ssm,
     aws_iam_role_policy.backups,
