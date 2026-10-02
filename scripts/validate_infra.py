@@ -15,7 +15,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="minecraft-tofu-") as directory:
         workspace = Path(directory)
         for folder, patterns in {
-            "infra": ("*.tf", "*.tftest.hcl", ".terraform.lock.hcl"),
+            "infra": ("*.tf", "*.tftest.hcl", ".terraform.lock.hcl", "*.placeholder"),
             "scripts": ("*.py", "*.sh", "*.tftpl"),
         }.items():
             for pattern in patterns:

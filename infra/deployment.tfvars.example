@@ -13,3 +13,10 @@ data_filesystem_uuid      = "12345678-1234-4234-8234-123456789abc"
 instance_ids              = ["survival"]
 monthly_budget_usd        = 25
 budget_notification_email = "operator@example.invalid"
+
+# Optional: drain and stop an idle host. Build the package with `task lambda:package`
+# and see docs/operations/idle-stop.md before enabling it.
+# idle_stop = {
+#   package_path = "/absolute/path/to/minecraft/.build/idle-stop.zip"
+#   idle_minutes = 30
+# }

@@ -30,8 +30,9 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 
-# Project-local tools and linked worktrees
+# Project-local tools, build outputs and linked worktrees
 .tools/
+.build/
 .worktrees/
 __pycache__/
 *.py[cod]

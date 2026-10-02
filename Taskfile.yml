@@ -10,7 +10,12 @@ tasks:
     cmds:
       - ./.tools/bin/shfmt -w scripts/*.sh scripts/*.sh.tftpl
       - ./.tools/bin/tofu -chdir=infra fmt -recursive
+      - gofmt -w lambda/idlestop
 
   infra:validate:
     desc: Validate and test both OpenTofu roots without a backend or AWS credentials
     cmd: ./scripts/check.sh infra:validate
+
+  lambda:package:
+    desc: Build the idle-stop function for ARM64 into a reproducible .build/idle-stop.zip
+    cmd: python3 scripts/package_idle_stop.py

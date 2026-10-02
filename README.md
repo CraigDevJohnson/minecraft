@@ -16,10 +16,11 @@ Report suspected vulnerabilities using the [security policy](SECURITY.md).
 - [Instance commands and backup-hook contract](docs/operations/runtime-operations.md)
 - [Backup commands, retention, and isolated recovery](docs/operations/backup-recovery.md)
 - [Live persistence and recovery rehearsal](docs/operations/live-recovery-rehearsal.md)
+- [Optional idle stop](docs/operations/idle-stop.md)
 - [Pinned content and explicit local runtime validation](docs/operations/runtime-content.md)
 - [Foundation issue #3](https://github.com/CraigDevJohnson/minecraft/issues/3) and [current issues](https://github.com/CraigDevJohnson/minecraft/issues)
 
-Python 3.11 or newer is the only host-language prerequisite. Install the pinned tools and run the shared gate from the repository root:
+Python 3.11 or newer and Go (the version in `lambda/idlestop/go.mod`) are the host-language prerequisites. Install the pinned tools and run the shared gate from the repository root:
 
 ```sh
 python3 scripts/bootstrap_tools.py

@@ -118,3 +118,21 @@ variable "budget_notification_email" {
     error_message = "budget_notification_email must be an email address."
   }
 }
+
+variable "idle_stop" {
+  description = "Optional scheduled function that drains and stops an idle host. package_path is the zip built by `task lambda:package`; null deploys none of its resources."
+  type = object({
+    package_path             = string
+    idle_minutes             = optional(number, 30)
+    permissions_boundary_arn = optional(string)
+  })
+  default = null
+  validation {
+    condition     = var.idle_stop == null || try(var.idle_stop.idle_minutes >= 10 && var.idle_stop.idle_minutes <= 240 && floor(var.idle_stop.idle_minutes) == var.idle_stop.idle_minutes, false)
+    error_message = "idle_stop.idle_minutes must be a whole number from 10 to 240."
+  }
+  validation {
+    condition     = var.idle_stop == null || try(var.idle_stop.permissions_boundary_arn == null || (can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", var.idle_stop.permissions_boundary_arn)) && split(":", var.idle_stop.permissions_boundary_arn)[4] == var.account_id), false)
+    error_message = "idle_stop.permissions_boundary_arn must name a managed policy in the target account."
+  }
+}

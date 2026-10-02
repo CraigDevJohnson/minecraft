@@ -16,6 +16,20 @@ validate_infra() {
 	python3 "$root_dir/scripts/validate_infra.py"
 }
 
+check_go() {
+	if ! command -v go >/dev/null 2>&1; then
+		printf 'missing Go toolchain for lambda/idlestop (see docs/development.md)\n' >&2
+		exit 1
+	fi
+	local unformatted
+	unformatted="$(cd "$root_dir/lambda/idlestop" && gofmt -l .)"
+	if [[ -n "$unformatted" ]]; then
+		printf 'gofmt needed:\n%s\n' "$unformatted" >&2
+		exit 1
+	fi
+	(cd "$root_dir/lambda/idlestop" && go vet ./... && go test -race -count=1 ./...)
+}
+
 require_tool tofu
 python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11 or newer is required"'
 
@@ -32,6 +46,7 @@ check)
 	"$tools_dir/tofu" -chdir="$root_dir/infra" fmt -check -diff -recursive
 	python3 -m compileall -q "$root_dir/scripts" "$root_dir/tests"
 	python3 -m unittest discover -s "$root_dir/tests" -p 'test_*.py'
+	check_go
 	validate_infra
 	;;
 infra:validate)
