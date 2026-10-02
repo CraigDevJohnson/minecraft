@@ -42,9 +42,21 @@ Craig reviews the saved account-specific plan before authorizing its apply. Afte
 
 Cloud-init installs `/usr/local/sbin/minecraft-storage`, private `/etc/minecraft/storage.conf`, and `minecraft-storage.service`. Every boot verifies the attached NVMe device's EBS serial, whole-disk identity, ext4 UUID, and actual writable mount at `/srv/minecraft`. It refuses missing/ambiguous devices, partitions, mismatched filesystems, incorrect mounts, or root-disk data occupying the mountpoint. Commands have timeouts and storage operations serialize through a bounded lock.
 
-A fresh blank disk intentionally leaves storage/Docker unavailable. After attachment and SSM access are verified in #7, the operator reviews the exact volume ID and UUID against private outputs and uses this explicit initialization command only with Craig's approval:
+A fresh blank disk intentionally leaves storage/Docker unavailable. After attachment and SSM access are verified in #7, the operator reviews the exact volume ID and UUID against private outputs.
+
+A newly created encrypted EBS volume does not read back as zeros. During the 2026-10-01 deployment, the new 40 GiB data volume and a separate 1 GiB probe volume both returned a zero first 4 KiB block followed by high-entropy bytes throughout, with no snapshot and no prior writer. `initialize` therefore refuses a fresh volume until it is explicitly zero-filled. Before zero-filling, prove the volume's provenance from the operator workstation: no source snapshot, a creation time from the approved apply, and attachment only to the new host.
 
 ```sh
+aws ec2 describe-volumes --volume-ids "$data_volume_id" \
+  --query 'Volumes[0].{Snapshot:SnapshotId,Created:CreateTime,Attachments:Attachments[].InstanceId}'
+```
+
+Stop if the volume has a snapshot, an unexpected creation time, or any other attachment. Then, only with Craig's approval, zero-fill and initialize that exact disk:
+
+```sh
+sudo /usr/local/sbin/minecraft-storage zero-fill \
+  --volume-id "$data_volume_id" --confirm-volume-id "$data_volume_id" \
+  --filesystem-uuid "$data_filesystem_uuid"
 sudo /usr/local/sbin/minecraft-storage initialize \
   --volume-id "$data_volume_id" --confirm-volume-id "$data_volume_id" \
   --filesystem-uuid "$data_filesystem_uuid"
@@ -52,7 +64,7 @@ sudo systemctl restart minecraft-storage.service
 sudo systemctl start docker.service
 ```
 
-Initialization requires an unmounted, unpartitioned, signature-free, completely zero-filled disk before creating ext4. An existing matching filesystem is left intact. The whole-device check is bounded at 15 minutes and formatting at two minutes; timeout is a failure, never a reason to force-format. `mount` mounts and verifies; `verify` checks an already mounted filesystem without formatting or repairing it. Never use `mkfs -F`, erase signatures, or change the UUID to bypass a mismatch. Investigate or follow the separate recovery workflow.
+`zero-fill` refuses any disk with a filesystem, signature, partition, holder, or mount, and is bounded at 15 minutes; the 40 GiB gp3 volume took about 5.5 minutes. It cannot recognize every kind of unlabelled data, so the AWS provenance check is the authority for "new". Never use it on a retained, restored, or snapshot-derived volume. Initialization requires an unmounted, unpartitioned, signature-free, completely zero-filled disk before creating ext4. An existing matching filesystem is left intact. The whole-device check is bounded at 15 minutes and formatting at two minutes; timeout is a failure, never a reason to force-format. `mount` mounts and verifies; `verify` checks an already mounted filesystem without formatting or repairing it. Never use `mkfs -F`, erase signatures, or change the UUID to bypass a mismatch. Investigate or follow the separate recovery workflow.
 
 Every bootstrap run directly checks/mounts storage even if systemd units are already active, then verifies again before reporting success. Docker startup itself requires storage and a fresh verification, preventing container restart policies from starting against an absent mount after reboot. #5 must also require/order its runtime units after `minecraft-storage.service` and run a fresh `minecraft-storage verify --volume-id … --filesystem-uuid …` immediately before any start. Service-active status alone is insufficient. A failed bootstrap, mount, verification, or Docker dependency must keep the runtime stopped. Unexpected mount loss while already running is a live operational failure; these startup checks do not replace recovery procedures.
 

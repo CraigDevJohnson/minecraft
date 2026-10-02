@@ -39,6 +39,7 @@ class FakeHost:
         self.mountpoint_empty = True
         self.calls: list[list[str]] = []
         self.formatted = False
+        self.zero_filled = False
         self.mount_works = True
 
     def require_root(self) -> None:
@@ -69,6 +70,10 @@ class FakeHost:
         if tool == "cmp":
             if not self.all_zero:
                 raise minecraft_storage.StorageError("disk contains nonzero bytes")
+            return ""
+        if tool == "blkdiscard":
+            self.zero_filled = True
+            self.all_zero = True
             return ""
         if tool == "mkfs.ext4":
             self.formatted = True
@@ -201,7 +206,53 @@ class StorageCommandTests(unittest.TestCase):
         result, output = self.invoke(host)
         self.assertEqual(result, 1, output)
         self.assertFalse(host.formatted)
-        self.assertFalse(any(call[0] == "cmp" for call in host.calls))
+        self.assertFalse(any(call[0] in ("cmp", "blkdiscard") for call in host.calls))
+
+    def test_fresh_nonzero_volume_needs_explicit_zero_fill_before_initialize(self) -> None:
+        host = FakeHost()
+        host.disk.update(fstype=None, uuid=None)
+        host.all_zero = False
+        self.assertEqual(self.invoke(host, "initialize", ["--confirm-volume-id", VOLUME])[0], 1)
+        self.assertFalse(host.formatted)
+        result, output = self.invoke(host, "zero-fill", ["--confirm-volume-id", VOLUME])
+        self.assertEqual(result, 0, output)
+        self.assertIn(["blkdiscard", "--zeroout", "/dev/nvme1n1"], host.calls)
+        self.assertFalse(host.formatted)
+        result, output = self.invoke(host, "initialize", ["--confirm-volume-id", VOLUME])
+        self.assertEqual(result, 0, output)
+        self.assertTrue(host.formatted)
+
+    def test_zero_fill_requires_the_explicit_matching_confirmation(self) -> None:
+        for extra in ([], ["--confirm-volume-id", "vol-fffffffffffffffff"]):
+            host = FakeHost()
+            host.disk.update(fstype=None, uuid=None)
+            result, output = self.invoke(host, "zero-fill", extra)
+            self.assertEqual(result, 1, output)
+            self.assertFalse(host.zero_filled)
+
+    def test_zero_fill_never_erases_recognized_or_attached_data(self) -> None:
+        scenarios = ("expected-filesystem", "wrong-filesystem", "signature", "partition", "mounted-elsewhere", "target-mounted", "missing")
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario):
+                host = FakeHost()
+                if scenario == "wrong-filesystem":
+                    host.disk["fstype"] = "xfs"
+                elif scenario != "expected-filesystem":
+                    host.disk.update(fstype=None, uuid=None)
+                    if scenario == "signature":
+                        host.signatures = [{"type": "crypto_LUKS"}]
+                    elif scenario == "partition":
+                        host.disk["children"] = [{"name": "/dev/nvme1n1p1"}]
+                    elif scenario == "mounted-elsewhere":
+                        host.disk["mountpoints"] = ["/other"]
+                    elif scenario == "target-mounted":
+                        host.mounts = [{"target": "/srv/minecraft", "source": "/dev/nvme2n1"}]
+                    elif scenario == "missing":
+                        host.devices = []
+                result, output = self.invoke(host, "zero-fill", ["--confirm-volume-id", VOLUME])
+                self.assertEqual(result, 1, output)
+                self.assertFalse(host.zero_filled)
+                self.assertFalse(host.formatted)
 
     def test_command_timeout_is_a_clear_bounded_failure(self) -> None:
         class TimedOutHost(FakeHost):

@@ -113,6 +113,26 @@ def verify_mount(host, disk: dict, filesystem_uuid: str) -> None:
         raise StorageError("mount is not the expected writable EBS filesystem")
 
 
+def zero_fill(host, disk: dict, volume_id: str) -> None:
+    """Overwrite a newly created, unrecognized volume with zeros before initialization.
+
+    New encrypted EBS volumes can read back nonzero bytes. The operator proves the
+    volume's AWS provenance first; this command only refuses recognizable data.
+    """
+    if disk.get("fstype") or disk.get("uuid"):
+        raise StorageError("disk already has a filesystem; refusing to zero-fill")
+    if any(disk.get("mountpoints", [])) or mounted(host):
+        raise StorageError("disk or target is mounted; refusing to zero-fill")
+    signatures = json.loads(host.run(["wipefs", "--no-act", "--json", disk["name"]], timeout=10))
+    if signatures.get("signatures"):
+        raise StorageError("disk has existing signatures; refusing to zero-fill")
+    current = discover(host, volume_id)
+    if (current["name"] != disk["name"] or current["maj:min"] != disk["maj:min"]
+            or current.get("fstype") or current.get("uuid") or any(current.get("mountpoints", []))):
+        raise StorageError("disk state changed during checks; refusing to zero-fill")
+    host.run(["blkdiscard", "--zeroout", disk["name"]], timeout=900)
+
+
 def initialize(host, disk: dict, volume_id: str, filesystem_uuid: str) -> None:
     if disk.get("fstype") or disk.get("uuid"):
         verify_filesystem(host, disk, filesystem_uuid)
@@ -142,9 +162,9 @@ def initialize(host, disk: dict, volume_id: str, filesystem_uuid: str) -> None:
 
 def main(argv=None, *, host=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("mount", "verify", "initialize"))
+    parser.add_argument("action", choices=("mount", "verify", "zero-fill", "initialize"))
     parser.add_argument("--volume-id", required=True)
-    parser.add_argument("--confirm-volume-id", help="required for the explicit blank-disk initialization operation")
+    parser.add_argument("--confirm-volume-id", help="required for the explicit zero-fill and blank-disk initialization operations")
     parser.add_argument("--filesystem-uuid", required=True)
     args = parser.parse_args(argv)
     if not re.fullmatch(r"vol-[0-9a-f]{17}", args.volume_id):
@@ -156,9 +176,13 @@ def main(argv=None, *, host=None) -> int:
         host.require_root()
         with host.lock():
             disk = discover(host, args.volume_id)
+            if args.action in ("zero-fill", "initialize") and args.confirm_volume_id != args.volume_id:
+                raise StorageError(f"{args.action} requires --confirm-volume-id matching the intended volume")
+            if args.action == "zero-fill":
+                zero_fill(host, disk, args.volume_id)
+                print("disk zero-filled; run initialize separately")
+                return 0
             if args.action == "initialize":
-                if args.confirm_volume_id != args.volume_id:
-                    raise StorageError("initialize requires --confirm-volume-id matching the intended volume")
                 initialize(host, disk, args.volume_id, args.filesystem_uuid)
                 print("filesystem initialized or already matches; run mount separately")
                 return 0
