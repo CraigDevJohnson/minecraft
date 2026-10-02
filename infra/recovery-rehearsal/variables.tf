@@ -23,6 +23,10 @@ variable "host_permissions_boundary_arn" {
     condition     = can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", var.host_permissions_boundary_arn)) && try(split(":", var.host_permissions_boundary_arn)[4], "") == var.account_id
     error_message = "host_permissions_boundary_arn must name a managed policy in the target account."
   }
+  validation {
+    condition     = !startswith(lower(reverse(split("/", var.host_permissions_boundary_arn))[0]), "${var.resource_prefix}-")
+    error_message = "host_permissions_boundary_arn must name a policy outside the resource prefix, so prefix-scoped operator permissions never cover it."
+  }
 }
 
 variable "environment" {

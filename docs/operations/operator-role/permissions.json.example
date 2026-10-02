@@ -3,6 +3,9 @@
   "Statement": [
     {"Sid": "Ec2InDeploymentRegion", "Effect": "Allow", "Action": "ec2:*", "Resource": "*",
      "Condition": {"StringEquals": {"aws:RequestedRegion": "us-west-2"}}},
+    {"Sid": "NeverWeakenEc2SecuritySettingsOrShare", "Effect": "Deny",
+     "Action": ["ec2:DisableEbsEncryptionByDefault","ec2:ModifyEbsDefaultKmsKeyId","ec2:ResetEbsDefaultKmsKeyId","ec2:DisableSnapshotBlockPublicAccess","ec2:DisableImageBlockPublicAccess","ec2:EnableSerialConsoleAccess","ec2:ModifySnapshotAttribute","ec2:ModifyImageAttribute"],
+     "Resource": "*"},
     {"Sid": "HostRolePermissionsOnlyWithinBoundary", "Effect": "Allow",
      "Action": ["iam:CreateRole","iam:PutRolePolicy","iam:DeleteRolePolicy","iam:AttachRolePolicy","iam:DetachRolePolicy","iam:PutRolePermissionsBoundary"],
      "Resource": "arn:aws:iam::123456789012:role/example-prefix-*",
@@ -29,13 +32,17 @@
      "Resource": "arn:aws:ssm:us-west-2::document/AWS-RunShellScript"},
     {"Sid": "DefaultShellSessionDocumentOnly", "Effect": "Allow", "Action": "ssm:StartSession",
      "Resource": "arn:aws:ssm:us-west-2:123456789012:document/SSM-SessionManagerRunShell"},
-    {"Sid": "OwnSessionsOnly", "Effect": "Allow", "Action": ["ssm:TerminateSession","ssm:ResumeSession","ssmmessages:OpenDataChannel"],
-     "Resource": "arn:aws:ssm:us-west-2:123456789012:session/${aws:userid}-*"},
+    {"Sid": "OwnSessionsOnly", "Effect": "Allow", "Action": ["ssm:TerminateSession","ssm:ResumeSession"],
+     "Resource": "arn:aws:ssm:us-west-2:123456789012:session/*",
+     "Condition": {"StringLike": {"ssm:resourceTag/aws:ssmmessages:session-id": ["${aws:userid}*"]}}},
+    {"Sid": "SessionDataChannels", "Effect": "Allow", "Action": "ssmmessages:OpenDataChannel", "Resource": "*",
+     "Condition": {"StringEquals": {"aws:RequestedRegion": "us-west-2"}}},
     {"Sid": "TrackCommandsAndSessions", "Effect": "Allow",
      "Action": ["ssm:CancelCommand","ssm:GetCommandInvocation","ssm:ListCommands","ssm:ListCommandInvocations","ssm:DescribeInstanceInformation","ssm:DescribeSessions","ssm:GetConnectionStatus"],
      "Resource": "*", "Condition": {"StringEquals": {"aws:RequestedRegion": "us-west-2"}}},
     {"Sid": "ReadPublicAmiParameters", "Effect": "Allow", "Action": ["ssm:GetParameter","ssm:GetParameters"],
      "Resource": "arn:aws:ssm:us-west-2::parameter/aws/service/*"},
-    {"Sid": "ReadVolumeAttachmentHistory", "Effect": "Allow", "Action": "cloudtrail:LookupEvents", "Resource": "*"}
+    {"Sid": "ReadVolumeAttachmentHistory", "Effect": "Allow", "Action": "cloudtrail:LookupEvents", "Resource": "*",
+     "Condition": {"StringEquals": {"aws:RequestedRegion": "us-west-2"}}}
   ]
 }
