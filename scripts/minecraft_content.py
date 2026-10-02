@@ -49,6 +49,8 @@ RECORDED_CONTENT_POLICIES = (
     CONTENT_POLICY,
     (frozenset({"paper", "geyser", "floodgate"}), _approved_geyser(7)),  # survival-2026-09-08-managed-config
 )
+# An earlier policy admits only the exact manifests that were reviewed under it.
+EARLIER_REVIEWED_MANIFESTS = frozenset({"ebe2fd621e9328dd708aa77918dbd96f8039670cddc3364c4f45e582b931c29e"})
 
 
 def load_definition(path: Path) -> dict:
@@ -110,6 +112,8 @@ def _validate_manifest(manifest: dict, *, recorded: bool = False) -> None:
     approved = [geyser for names, geyser in policies if names == found]
     if not approved:
         raise ContentError("manifest must contain exactly Paper, Geyser, Floodgate and ViaVersion")
+    if found != CONTENT_POLICY[0] and manifest_digest(manifest) not in EARLIER_REVIEWED_MANIFESTS:
+        raise ContentError("recorded manifest is not an exact earlier reviewed release")
     if artifacts[0]["name"] != "paper" or artifacts[0]["version"] != manifest["minecraft_version"]:
         raise ContentError("Paper and Minecraft versions must match")
     managed_files = manifest.get("managed_files")

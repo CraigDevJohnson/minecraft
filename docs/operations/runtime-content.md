@@ -22,7 +22,7 @@ The manifest records the full checksums. Paper, Geyser and Floodgate come from C
 - **Java Edition:** 26.2 (protocol 776) connects natively. Java 26.3 (protocol 777) connects through ViaVersion 5.12.0, which added 26.3 client support. Geyser's [supported-versions documentation](https://geysermc.org/wiki/geyser/supported-versions/) names ViaVersion as the plugin that lets newer Java clients join a server running an older version. Geyser itself still connects to the server as a 26.2 client.
 - **Bedrock Edition:** Geyser 2.11.3 accepts 26.30–26.52 using protocols 1001, 2168, 2169 and 2193. Current 26.50–26.52 clients use protocol 2193. Geyser's version list stops at the label 26.51, and its discovery answer advertises protocol `2193`, version `26.51`. The previous pin, Geyser 2.11.2-1234, stopped at Bedrock 26.45 (protocol 2169), so it rejected every current Bedrock client.
 
-Bedrock clients can update automatically; confirm compatibility again before a launch or controlled content update. Family-device acceptance remains issue #9.
+Bedrock clients can update automatically; confirm compatibility again before a launch or controlled content update. Geyser 2.11.3 marks the RakNet transport this configuration relies on as deprecated and slated for removal in Bedrock 26.60. Before 26.60 reaches family devices, a reviewed change must set `bedrock.transport`, approve the signaling mode, and add the matching TCP/UDP ingress; otherwise Bedrock players are locked out again. Family-device acceptance remains issue #9.
 
 ### Why the server stays on Minecraft 26.2
 
@@ -72,7 +72,7 @@ The test checks real Minecraft readiness and requires Geyser, Floodgate and ViaV
 
 ## Recorded runtime result
 
-**Pending re-validation for revision `survival-2026-10-02-bedrock-2650-viaversion`.** The explicit runtime, lifecycle and recovery commands have not yet run against this manifest (Paper 26.2-129, Geyser 2.11.3-b1247, Floodgate b141, ViaVersion 5.12.0, Geyser config SHA-256 `a98d3442…c442f`). Record the new manifest SHA-256, the reported versions, the Bedrock discovery answer, both Java status answers, and the retained Geyser configuration checksum here after they pass. Until then, the results below describe only the previous revision.
+The explicit command passed on 2026-10-02 for revision `survival-2026-10-02-bedrock-2650-viaversion` (manifest SHA-256 `72f0640583a5fec446ccd299cbbf35c5aff6815a358eb251cece7975bd148c82`) using Docker Desktop Engine 29.8.1 on Linux ARM64, the full 5 GiB heap, and a two-CPU container limit. Paper reported `26.2-129` (`9240f58`), Geyser `2.11.3-b1247` (`63a4e2b`), Floodgate `2.2.5` build `141` (`81b65cc`), and ViaVersion `5.12.0`, all loaded without errors. Bedrock UDP discovery advertised `MCPE` protocol `2193`, version `26.51`, six slots. Java status handshakes with protocol `776` and `777` were answered with `776` and `777` respectively, both as `Paper 26.2`. Geyser left the managed `config.yml` unchanged (SHA-256 `a98d3442120aa0cfe4eb63e28eebb935b01e7c52b0aa1d8e55bb6d618d1c442f`). The run completed two healthy starts (Paper ready in 129.6 s with world creation, then 101.7 s) and two clean shutdowns, recreated the container, and preserved every dimension fixture and player/plugin/Floodgate state file. The lifecycle and recovery harnesses have not been rerun for this revision.
 
 ### Previous revision `survival-2026-09-08-managed-config`
 

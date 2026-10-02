@@ -166,6 +166,8 @@ class ContentTests(unittest.TestCase):
             with_geyser(previous, tampered),
             dict(previous, artifacts=previous["artifacts"] + [current["artifacts"][3], current["artifacts"][3]]),
             dict(previous, artifacts=previous["artifacts"][:2]),
+            # Earlier policy structure but not the exact reviewed release (newer Geyser swapped in).
+            dict(previous, artifacts=[previous["artifacts"][0], current["artifacts"][1], previous["artifacts"][2]]),
         ):
             with self.subTest(invalid=invalid["artifacts"]), self.assertRaises(content.ContentError):
                 content._validate_manifest(invalid, recorded=True)
