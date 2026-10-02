@@ -44,14 +44,24 @@ Cloud-init installs `/usr/local/sbin/minecraft-storage`, private `/etc/minecraft
 
 A fresh blank disk intentionally leaves storage/Docker unavailable. After attachment and SSM access are verified in #7, the operator reviews the exact volume ID and UUID against private outputs.
 
-A newly created encrypted EBS volume does not read back as zeros. During the 2026-10-01 deployment, the new 40 GiB data volume and a separate 1 GiB probe volume both returned a zero first 4 KiB block followed by high-entropy bytes throughout, with no snapshot and no prior writer. `initialize` therefore refuses a fresh volume until it is explicitly zero-filled. Before zero-filling, prove the volume's provenance from the operator workstation: no source snapshot, a creation time from the approved apply, and attachment only to the new host.
+A newly created encrypted EBS volume does not read back as zeros. During the 2026-10-01 deployment, the new 40 GiB data volume and a separate 1 GiB probe volume both returned a zero first 4 KiB block followed by high-entropy bytes throughout, with no snapshot and no prior writer. `initialize` therefore refuses a fresh volume until it is explicitly zero-filled. Zero-fill erases anything it cannot recognize, so first prove from the operator workstation that the volume is new and the new host is its only writer. Current attachments are not history: a volume can be attached elsewhere, written, detached, and reattached. With the operator role, which needs `cloudtrail:LookupEvents`, query the deployment Region at least 15 minutes after the current `AttachTime`:
 
 ```sh
 aws ec2 describe-volumes --volume-ids "$data_volume_id" \
-  --query 'Volumes[0].{Snapshot:SnapshotId,Created:CreateTime,Attachments:Attachments[].InstanceId}'
+  --query 'Volumes[0].{Snapshot:SnapshotId,Created:CreateTime,Attachments:Attachments[].[InstanceId,AttachTime]}'
+aws cloudtrail lookup-events \
+  --lookup-attributes AttributeKey=ResourceName,AttributeValue="$data_volume_id" \
+  --query 'Events[].[EventTime,EventName,Username,Resources[].ResourceName]' --output text
 ```
 
-Stop if the volume has a snapshot, an unexpected creation time, or any other attachment. Then, only with Craig's approval, zero-fill and initialize that exact disk:
+Each event prints its time, name, and user, then the resource IDs it references. Require all of:
+
+- an empty `Snapshot`, a `Created` time from the approved apply, and exactly one current attachment, to the new host ID in the private outputs;
+- exactly one `CreateVolume`, by the operator session that ran the approved apply, at the apply time;
+- `AttachVolume` events only for that host ID; if one lists no instance, read `requestParameters.instanceId` from its `CloudTrailEvent`;
+- no `DetachVolume`, `CreateSnapshot`, `ModifyVolume`, or other event that is not read-only.
+
+Event history keeps only the last 90 days of management events, per Region. CloudTrail typically delivers an event within about 5 minutes but does not guarantee it; if `CreateVolume` or `AttachVolume` is missing, wait and re-query. Stop without zero-filling if a lookup fails or is denied, or the history is incomplete, ambiguous, or older than the 90-day window. Event history cannot show what an attached host wrote, so any other attachment is a stop condition. Then, only with Craig's approval, zero-fill and initialize that exact disk:
 
 ```sh
 sudo /usr/local/sbin/minecraft-storage zero-fill \
@@ -64,7 +74,7 @@ sudo systemctl restart minecraft-storage.service
 sudo systemctl start docker.service
 ```
 
-`zero-fill` refuses any disk with a filesystem, signature, partition, holder, or mount, and is bounded at 15 minutes; the 40 GiB gp3 volume took about 5.5 minutes. It cannot recognize every kind of unlabelled data, so the AWS provenance check is the authority for "new". Never use it on a retained, restored, or snapshot-derived volume. Initialization requires an unmounted, unpartitioned, signature-free, completely zero-filled disk before creating ext4. An existing matching filesystem is left intact. The whole-device check is bounded at 15 minutes and formatting at two minutes; timeout is a failure, never a reason to force-format. `mount` mounts and verifies; `verify` checks an already mounted filesystem without formatting or repairing it. Never use `mkfs -F`, erase signatures, or change the UUID to bypass a mismatch. Investigate or follow the separate recovery workflow.
+`zero-fill` refuses any disk with a filesystem, signature, partition, holder, or mount. It cannot recognize every kind of unlabelled data, so the AWS provenance check is the authority for "new". Never use it on a retained, restored, or snapshot-derived volume. Initialization requires an unmounted, unpartitioned, signature-free, completely zero-filled disk before creating ext4. An existing matching filesystem is left intact. Zero-fill and the whole-device zero check are each bounded at 300 seconds plus one second per 50 MiB of device size, rounded up: a 50 MiB/s floor plus five minutes, about 19 minutes for 40 GiB and 80 minutes for 220 GiB. The 40 GiB gp3 volume zero-filled in about 5.5 minutes. Formatting is bounded at two minutes. Timeout is a failure, never a reason to force-format. Through SSM Run Command, set `executionTimeout` above the combined bounds of the commands in that invocation; `AWS-RunShellScript` defaults to 3600 seconds and allows at most 172800. `mount` mounts and verifies; `verify` checks an already mounted filesystem without formatting or repairing it. Never use `mkfs -F`, erase signatures, or change the UUID to bypass a mismatch. Investigate or follow the separate recovery workflow.
 
 Every bootstrap run directly checks/mounts storage even if systemd units are already active, then verifies again before reporting success. Docker startup itself requires storage and a fresh verification, preventing container restart policies from starting against an absent mount after reboot. #5 must also require/order its runtime units after `minecraft-storage.service` and run a fresh `minecraft-storage verify --volume-id … --filesystem-uuid …` immediately before any start. Service-active status alone is insufficient. A failed bootstrap, mount, verification, or Docker dependency must keep the runtime stopped. Unexpected mount loss while already running is a live operational failure; these startup checks do not replace recovery procedures.
 

@@ -1,16 +1,17 @@
 mock_provider "aws" {}
 
 variables {
-  account_id                = "111122223333"
-  operator_role_arn         = "arn:aws:iam::111122223333:role/minecraft-operator"
-  environment               = "test"
-  resource_prefix           = "minecraft-test"
-  availability_zone         = "us-west-2a"
-  ami_id                    = "ami-0123456789abcdef0"
-  ami_owner_account_id      = "099720109477"
-  data_filesystem_uuid      = "12345678-1234-4234-8234-123456789abc"
-  backup_bucket_name        = "minecraft-test-example-backups"
-  budget_notification_email = "operator@example.invalid"
+  account_id                    = "111122223333"
+  operator_role_arn             = "arn:aws:iam::111122223333:role/minecraft-operator"
+  environment                   = "test"
+  resource_prefix               = "minecraft-test"
+  availability_zone             = "us-west-2a"
+  ami_id                        = "ami-0123456789abcdef0"
+  ami_owner_account_id          = "099720109477"
+  data_filesystem_uuid          = "12345678-1234-4234-8234-123456789abc"
+  backup_bucket_name            = "minecraft-test-example-backups"
+  budget_notification_email     = "operator@example.invalid"
+  host_permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-host-boundary"
 }
 
 run "retained_encrypted_data_and_replaceable_root" {
@@ -62,6 +63,11 @@ run "host_credentials_only_manage_named_backups_and_ssm_channels" {
   assert {
     condition     = jsondecode(aws_iam_role.host.assume_role_policy).Statement == [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" } }]
     error_message = "Only EC2 may assume the host role for temporary instance-profile credentials."
+  }
+
+  assert {
+    condition     = aws_iam_role.host.permissions_boundary == var.host_permissions_boundary_arn
+    error_message = "The host role must carry the administrator-owned permissions boundary that caps any operator-written policy."
   }
 
   assert {
@@ -143,6 +149,22 @@ run "reject_an_operator_role_in_another_account" {
     operator_role_arn = "arn:aws:iam::999900001111:role/minecraft-operator"
   }
   expect_failures = [var.operator_role_arn]
+}
+
+run "reject_a_host_permissions_boundary_in_another_account" {
+  command = plan
+  variables {
+    host_permissions_boundary_arn = "arn:aws:iam::999900001111:policy/minecraft-host-boundary"
+  }
+  expect_failures = [var.host_permissions_boundary_arn]
+}
+
+run "reject_a_host_permissions_boundary_that_is_not_a_managed_policy" {
+  command = plan
+  variables {
+    host_permissions_boundary_arn = "arn:aws:iam::111122223333:role/minecraft-host-boundary"
+  }
+  expect_failures = [var.host_permissions_boundary_arn]
 }
 
 run "reject_data_disk_az_outside_region" {

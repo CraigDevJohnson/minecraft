@@ -16,6 +16,15 @@ variable "operator_role_arn" {
   }
 }
 
+variable "host_permissions_boundary_arn" {
+  description = "Administrator-owned managed policy, named outside the operator's IAM prefix, that caps the recovery host role like every other host role the operator can create or pass."
+  type        = string
+  validation {
+    condition     = can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", var.host_permissions_boundary_arn)) && try(split(":", var.host_permissions_boundary_arn)[4], "") == var.account_id
+    error_message = "host_permissions_boundary_arn must name a managed policy in the target account."
+  }
+}
+
 variable "environment" {
   description = "Temporary recovery environment name."
   type        = string

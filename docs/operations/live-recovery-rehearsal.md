@@ -214,7 +214,20 @@ chmod 0600 "$evidence_dir/recovery-deployment.json" \
   "$evidence_dir/recovery-cleanup-inventory.json"
 ```
 
-Cloud-init waits up to 300 seconds for the separately associated EIP to appear through IMDSv2 before package installation. If that wait fails, inspect the EIP association and subnet rather than bypassing bootstrap. The first cloud-init run then stops at the blank-disk storage gate. Through SSM, read `DATA_VOLUME_ID` and `DATA_FILESYSTEM_UUID` from root-only `/etc/minecraft/storage.conf` and compare both with the approved recovery deployment output. Stop if either value differs. A new encrypted EBS volume does not read back as zeros, so prove the recovery volume's provenance and zero-fill it as described in [infrastructure operations](infrastructure.md#disk-setup-and-readiness-handoff-to-5-and-7) before initializing that exact disk once.
+Cloud-init waits up to 300 seconds for the separately associated EIP to appear through IMDSv2 before package installation. If that wait fails, inspect the EIP association and subnet rather than bypassing bootstrap. The first cloud-init run then stops at the blank-disk storage gate. Through SSM, read `DATA_VOLUME_ID` and `DATA_FILESYSTEM_UUID` from root-only `/etc/minecraft/storage.conf` and compare both with the approved recovery deployment output. Stop if either value differs. A new encrypted EBS volume does not read back as zeros. Before zero-filling, apply the [provenance check in infrastructure operations](infrastructure.md#disk-setup-and-readiness-handoff-to-5-and-7) from the operator computer, using `data_volume_id` and `host_id` from `recovery-deployment.json`, the recovery apply time, and the operator session that ran it:
+
+```sh
+recovery_volume_id="$(jq -er .data_volume_id "$evidence_dir/recovery-deployment.json")"
+aws ec2 describe-volumes --volume-ids "$recovery_volume_id" \
+  --query 'Volumes[0].{Snapshot:SnapshotId,Created:CreateTime,Attachments:Attachments[].[InstanceId,AttachTime]}' \
+  >"$evidence_dir/recovery-volume-provenance.json"
+aws cloudtrail lookup-events \
+  --lookup-attributes AttributeKey=ResourceName,AttributeValue="$recovery_volume_id" \
+  --query 'Events[].[EventTime,EventName,Username,Resources[].ResourceName]' --output text \
+  >"$evidence_dir/recovery-volume-history.txt"
+```
+
+Require every condition there; stop on a snapshot, any other attachment, or incomplete history. The recovery disk can exceed 40 GiB, so compute its zero-fill and zero-check bounds from its size and set the Run Command `executionTimeout` above their sum plus formatting. Then, through SSM, zero-fill and initialize that exact disk once.
 
 ```sh
 sudo bash -c 'set -euo pipefail; source /etc/minecraft/storage.conf; printf "volume_id=%s filesystem_uuid=%s\n" "$DATA_VOLUME_ID" "$DATA_FILESYSTEM_UUID"'
@@ -590,6 +603,7 @@ Record these fields:
 - clean stop, backup, clean start, replacement start, restore, and total recovery times;
 - compressed backup bytes, restored bytes, and source and target disk use;
 - old and new host distinction plus unchanged EBS, filesystem, EIP, manifest, and checkpoint results;
+- recovery-disk provenance result;
 - failed-backup result and blocked restart/drain results;
 - source backup integrity before and after the rehearsal;
 - stopped-state billable resource classes;
