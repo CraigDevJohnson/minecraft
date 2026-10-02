@@ -41,7 +41,7 @@ Failed operations exit nonzero. If EC2 stop fails after a successful drain, outp
 
 The initial single `survival` instance fits this remote execution envelope with the documented per-instance shutdown and backup bounds. Before deploying additional instances, reassess the total sequential drain duration against the one-hour SSM limit; a larger fleet must not rely on a timeout to finish its backups.
 
-The operator needs existing access to `ec2:DescribeInstances`, `ec2:StartInstances`, `ec2:StopInstances`, `ssm:DescribeInstanceInformation`, `ssm:SendCommand` for `AWS-RunShellScript` on the intended host, and `ssm:GetCommandInvocation`. These commands do not create or modify IAM policies. Actual AWS authorization and live start/stop validation remain the deployment work in issue #7.
+The operator needs existing access to `ec2:DescribeInstances`, `ec2:StartInstances`, `ec2:StopInstances`, `ssm:DescribeInstanceInformation`, `ssm:SendCommand`, and `ssm:GetCommandInvocation`. The [example operator role](operator-role/permissions.json.example) allows `ssm:SendCommand` only on instances tagged `Project=minecraft`, which the OpenTofu provider's default tags apply to the host, and only with the `AWS-RunShellScript` document. Operators also need `cloudtrail:LookupEvents`, but only for the disk provenance check before a first-setup zero-fill in [infrastructure operations](infrastructure.md#disk-setup-and-readiness-handoff-to-5-and-7); these commands do not use it. These commands do not create or modify IAM policies. Actual AWS authorization and live start/stop validation remain the deployment work in issue #7.
 
 ## Validation boundary
 
