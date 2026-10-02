@@ -240,12 +240,14 @@ export TZ=UTC
     aws cloudtrail lookup-events --output text \
       --lookup-attributes AttributeKey=ResourceName,AttributeValue="$recovery_host_id" \
       --query "Events[?ReadOnly=='false'].[EventTime,EventName,Username,EventId,Resources[].ResourceName]" &&
-    printf 'completed recovery point source volumes:\n' &&
-    aws s3api list-objects-v2 --bucket "$recovery_bucket" --prefix instances/ \
-      --query 'Contents[].Key' --output json |
-    jq -r '.[]? | select(test("/completed/[0-9a-f]{64}[.]json$"))' |
-    while IFS= read -r key; do
-      aws s3 cp "s3://$recovery_bucket/$key" - </dev/null | jq -er .source.volume_id || exit 1
+    printf 'completed recovery point source volumes, all marker versions:\n' &&
+    aws s3api list-object-versions --bucket "$recovery_bucket" --prefix instances/ \
+      --query 'Versions[].[Key,VersionId]' --output json |
+    jq -r '.[]? | select(.[0] | test("/completed/[0-9a-f]{64}[.]json$")) | @tsv' |
+    while IFS=$'\t' read -r key version; do
+      aws s3api get-object --bucket "$recovery_bucket" --key "$key" --version-id "$version" \
+        "$evidence_dir/recovery-marker.json" </dev/null >/dev/null &&
+        jq -er .source.volume_id "$evidence_dir/recovery-marker.json" || exit 1
     done
 } >>"$provenance" || exit 1
 cat "$provenance"

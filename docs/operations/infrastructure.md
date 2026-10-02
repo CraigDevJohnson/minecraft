@@ -97,30 +97,34 @@ aws cloudtrail lookup-events \
 
 A 2026-10-02 lookup of the first deployment's data volume showed a clean apply: exactly `CreateVolume` then `AttachVolume`, which listed both the volume and the instance. No `CreateTags` or KMS events were indexed under the volume. Both events and the host's `RunInstances` had the same `Username`, OpenTofu's generated `aws-go-sdk-<digits>` role session name, and all were visible within minutes. An attach and detach of a different volume to the host was indexed under the instance ID only. Attach and detach events are therefore not reliably indexed under a volume ID: the identical-`AttachTime` rule, not an absence of events, proves the volume was never reattached. In that lookup the data volume's `AttachTime` and its `AttachVolume` `EventTime` were both `03:11:30Z`. The operator's many `ssm:SendCommand` calls to the host were not indexed under the instance; its write events were only `RunInstances`, `AssociateAddress`, the attachments, and a later `StopInstances`.
 
-No completed recovery point may name this volume as its source. This records each completed point's source volume privately and stops if any equals the data volume or a lookup fails:
+No completed recovery point, current or retained, may name this volume as its source. Retention pruning deletes completed markers, but the versioned bucket keeps each old marker version for 14 days, so check every version. Lifecycle expiration then removes that history: stop if the volume was created 13 or more days ago. This records each marker version's source volume privately and stops if any equals the data volume or a lookup fails:
 
 ```sh
-aws s3api list-objects-v2 --bucket "$backup_bucket" --prefix instances/ \
-  --query 'Contents[].Key' --output json >"$private_dir/backup-keys.json" || exit 1
-jq -r '.[]? | select(test("/completed/[0-9a-f]{64}[.]json$"))' \
-  "$private_dir/backup-keys.json" >"$private_dir/backup-markers.txt" || exit 1
-while IFS= read -r key; do
-  aws s3 cp "s3://$backup_bucket/$key" - </dev/null | jq -er .source.volume_id || exit 1
-done <"$private_dir/backup-markers.txt" >"$private_dir/backup-sources.txt" || exit 1
+set -o pipefail || exit 1
+aws s3api list-object-versions --bucket "$backup_bucket" --prefix instances/ \
+  --query 'Versions[].[Key,VersionId]' --output json >"$private_dir/backup-versions.json" || exit 1
+jq -r '.[]? | select(.[0] | test("/completed/[0-9a-f]{64}[.]json$")) | @tsv' \
+  "$private_dir/backup-versions.json" >"$private_dir/backup-markers.tsv" || exit 1
+while IFS=$'\t' read -r key version; do
+  aws s3api get-object --bucket "$backup_bucket" --key "$key" --version-id "$version" \
+    "$private_dir/backup-marker.json" </dev/null >/dev/null &&
+    jq -er .source.volume_id "$private_dir/backup-marker.json" || exit 1
+done <"$private_dir/backup-markers.tsv" >"$private_dir/backup-sources.txt" || exit 1
 if grep -Fxq "$data_volume_id" "$private_dir/backup-sources.txt"; then
   echo 'a recovery point records this volume as its source: stop' >&2; exit 1
 fi
 ```
 
-Through SSM, check that the host has not already used storage or the runtime. The data disk is not mounted, so instance data is checked through the backup bucket above. The first boot listed must begin within minutes of the host's `RunInstances` time; otherwise the logs do not cover first setup. Any printed evidence of use, missing log, or nonzero exit is a stop: follow the recovery workflow, never zero-fill.
+Through SSM, check that the host has not already used storage or the runtime. The data disk is not mounted, so instance data is checked through the backup bucket above. The first boot listed must begin within minutes of the host's `RunInstances` time; otherwise the logs do not cover first setup. Any printed evidence of use, missing or unreadable log or journal, or nonzero exit is a stop: follow the recovery workflow, never zero-fill.
 
 ```sh
-sudo bash -c 'found=0; used="storage (mount|verify) succeeded|filesystem initialized"
-journalctl --list-boots --no-pager
+sudo bash -c 'set -o pipefail; found=0; used="storage (mount|verify) succeeded|filesystem initialized"
+journalctl --list-boots --no-pager || { echo "boot list unreadable"; found=1; }
 test -r /var/log/cloud-init-output.log || found=1
 grep -E "$used" /var/log/cloud-init-output.log && found=1
-journalctl -o cat --no-pager -u minecraft-storage.service -u "minecraft-storage-*" \
-  -u docker.service -u cloud-final.service | grep -E "$used" && found=1
+logs="$(journalctl -o cat --no-pager -u minecraft-storage.service -u "minecraft-storage-*" \
+  -u docker.service -u cloud-final.service)" || { echo "journal unreadable"; found=1; }
+grep -E "$used" <<<"$logs" && found=1
 for path in /opt/minecraft /etc/minecraft/deployment.json /etc/minecraft/operator.json; do
   if test -e "$path"; then printf "present: %s\n" "$path"; found=1; fi
 done

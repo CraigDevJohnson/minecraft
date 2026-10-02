@@ -34,7 +34,15 @@ The first deployment's operator and host roles predate the boundary. Adopt it in
 2. Create the host boundary policy and add its ARN as `host_permissions_boundary_arn` to the private infrastructure tfvars.
 3. Save the operator's current policy document for rollback, then replace it with the reviewed one.
 4. Immediately smoke-test as the operator, with the host running: `python3 scripts/minecraft_host.py --deployment <private deployment.json> status`. If Session Manager is used, also start a session with `aws ssm start-session --target <host ID>` and, from a second shell, end it with `aws ssm terminate-session --session-id <ID>` (from `aws ssm describe-sessions --state Active`). If either fails, restore the saved document.
-5. Plan, confirm the plan only adds the existing host role's boundary, and apply it after Craig approves that plan.
+5. Apply the boundary on its own. A full plan from this revision also replaces the host, because `scripts/minecraft_storage.py` is embedded in its user data; do that separately through the [host replacement workflow](infrastructure.md#normal-replacement-and-explicit-destructive-workflow). Target only the role, confirm the saved plan updates `aws_iam_role.host` in place to add `permissions_boundary` and changes nothing else, and apply it after Craig approves that plan:
+
+   ```sh
+   "$repo_dir/.tools/bin/tofu" -chdir="$private_dir/infrastructure/infra" plan -target=aws_iam_role.host \
+     -var-file="$private_dir/infrastructure.tfvars" -out="$private_dir/boundary.tfplan" || exit 1
+   "$repo_dir/.tools/bin/tofu" -chdir="$private_dir/infrastructure/infra" show -no-color "$private_dir/boundary.tfplan"
+   ```
+
+   OpenTofu warns that targeting is for exceptional cases; this staged adoption is one.
 6. Repeat the step 1 check; every prefixed role must now carry the host boundary.
 
 Copy `infra/state-bootstrap/deployment.tfvars.example` and `infra/backend.hcl.example` into a private directory outside Git. Supply the real account, operator role, environment, region, unique state bucket, and three distinct keys. The keys hold bootstrap, primary infrastructure, and temporary recovery-rehearsal state. Use the default OpenTofu workspace; environment isolation comes from explicit private backend coordinates. The state bucket must differ from the backup bucket. Keep inputs, initialized working copies, plan text/binaries, outputs, and state private, with directory mode 700 and file mode 600.
