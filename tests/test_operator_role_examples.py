@@ -40,6 +40,11 @@ EC2_SECURITY_SETTINGS = [
     "ec2:DisableAllowedImagesSettings",
     "ec2:DeleteFlowLogs",
     "ec2:CreateNetworkInterfacePermission",
+    "ec2:EnableAllowedImagesSettings",
+    "ec2:ReplaceImageCriteriaInAllowedImagesSettings",
+    "ec2:CreateVpcBlockPublicAccessExclusion",
+    "ec2:ModifyVpcBlockPublicAccessExclusion",
+    "ec2:DeleteVpcBlockPublicAccessExclusion",
 ]
 HOST_POLICY_SOURCES = [ROOT / "infra/iam.tf", ROOT / "infra/recovery-rehearsal/iam.tf"]
 

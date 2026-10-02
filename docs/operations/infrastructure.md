@@ -61,6 +61,7 @@ A newly created encrypted EBS volume does not read back as zeros. During the 202
 Set `data_volume_id`, `host_id`, and `backup_bucket` from the private `deployment` output (`data_volume_id`, `host_id`, `backup_bucket_name`). From the operator workstation, with the operator role, which needs `cloudtrail:LookupEvents`, query the deployment Region:
 
 ```sh
+export TZ=UTC
 aws ec2 describe-volumes --volume-ids "$data_volume_id" \
   --query 'Volumes[0].{Snapshot:SnapshotId,Source:SourceVolumeId,Created:CreateTime,Attachments:Attachments[].[InstanceId,AttachTime]}'
 aws cloudtrail lookup-events \
@@ -68,10 +69,10 @@ aws cloudtrail lookup-events \
   --query 'Events[].[EventTime,EventName,ReadOnly,Username,EventId,Resources[].ResourceName]' --output text
 aws cloudtrail lookup-events \
   --lookup-attributes AttributeKey=ResourceName,AttributeValue="$host_id" \
-  --query 'Events[?ReadOnly==`false`].[EventTime,EventName,Username,EventId]' --output text
+  --query "Events[?ReadOnly=='false'].[EventTime,EventName,Username,EventId,Resources[].ResourceName]" --output text
 ```
 
-Each event prints its time, name, read-only flag, user, and event ID, then the resource IDs it references. Current attachments are not history: a volume can be attached elsewhere, written, detached, and reattached.
+`TZ=UTC` makes the CLI print CloudTrail times, which it otherwise renders in local time, in UTC like EC2 times and the recorded window. `ReadOnly` is the string `true` or `false`, hence the quoted filter. Each event prints its time, name, read-only flag, user, and event ID, then the resource IDs it references. Current attachments are not history: a volume can be attached elsewhere, written, detached, and reattached.
 
 - Wait at least 15 minutes after the current `AttachTime` before trusting an empty or partial history. CloudTrail typically delivers an event within about 5 minutes but does not guarantee it.
 - Stop if any lookup fails, is denied, or returns unreadable output.
@@ -82,8 +83,8 @@ Require all of:
 
 - an empty `Snapshot` and `Source` (a volume copy carries data without a snapshot), a `Created` time inside the recorded apply window, and exactly one current attachment, to the new host ID in the private outputs;
 - exactly one `CreateVolume`, inside the recorded apply window, whose `Username` equals that of the host's single `RunInstances` event;
-- among the host's write events, only that apply's `RunInstances`, `AssociateAddress`, and `AttachVolume`; any other, such as `CreateReplaceRootVolumeTask`, `StopInstances`, or `ModifyInstanceAttribute`, means the host's logs or root disk may not cover first setup;
-- at least one `AttachVolume`, each to that host ID, and the current `AttachTime` inside the recorded apply window and equal, to the second, to the `EventTime` of the apply's own `AttachVolume` (same `Username`). A gp3 volume attaches to one instance at a time, so any detach and use elsewhere changes `AttachTime`, whatever CloudTrail indexed;
+- no host write event that can replace its root disk or change its boot or user data, such as `CreateReplaceRootVolumeTask` or `ModifyInstanceAttribute`, and no `AttachVolume` or `DetachVolume` naming this volume other than the apply's own attachment; otherwise the host's logs or root disk may not cover first setup. Stops, starts, and other volumes' attachments do not by themselves disqualify the volume; the host-side check covers every boot;
+- at least one `AttachVolume`, each to that host ID, and the current `AttachTime` inside the recorded apply window and equal, to the second, to the `EventTime` of the apply's own `AttachVolume` (same `Username`), found in the volume or the host listing. A gp3 volume attaches to one instance at a time, so any detach and use elsewhere changes `AttachTime`, whatever CloudTrail indexed;
 - no other event whose `ReadOnly` is `false`, such as `DetachVolume`, `CreateSnapshot`, `CopyVolumes`, `ModifyVolume`, or `CreateTags`.
 
 The window is the newest `apply-start` and `apply-end` pair, recorded around that one apply; the host's `RunInstances` must fall inside the same pair; a failed or split apply has none. An apply without a recorded window needs a private bound that Craig accepts, such as the `LastModified` times of the state object versions written just before and by that apply. If an `AttachVolume` lists no instance, read only its target from that event. Keep the raw event private; it contains source IP addresses and ARNs:
@@ -94,7 +95,7 @@ aws cloudtrail lookup-events \
   --query 'Events[0].CloudTrailEvent' --output text | jq -er .requestParameters.instanceId || exit 1
 ```
 
-A 2026-10-02 lookup of the first deployment's data volume showed a clean apply: exactly `CreateVolume` then `AttachVolume`, which listed both the volume and the instance. No `CreateTags` or KMS events were indexed under the volume. Both events and the host's `RunInstances` had the same `Username`, OpenTofu's generated `aws-go-sdk-<digits>` role session name, and all were visible within minutes. An attach and detach of a different volume to the host was indexed under the instance ID only. Attach and detach events are therefore not reliably indexed under a volume ID: the identical-`AttachTime` rule, not an absence of events, proves the volume was never reattached.
+A 2026-10-02 lookup of the first deployment's data volume showed a clean apply: exactly `CreateVolume` then `AttachVolume`, which listed both the volume and the instance. No `CreateTags` or KMS events were indexed under the volume. Both events and the host's `RunInstances` had the same `Username`, OpenTofu's generated `aws-go-sdk-<digits>` role session name, and all were visible within minutes. An attach and detach of a different volume to the host was indexed under the instance ID only. Attach and detach events are therefore not reliably indexed under a volume ID: the identical-`AttachTime` rule, not an absence of events, proves the volume was never reattached. In that lookup the data volume's `AttachTime` and its `AttachVolume` `EventTime` were both `03:11:30Z`. The operator's many `ssm:SendCommand` calls to the host were not indexed under the instance; its write events were only `RunInstances`, `AssociateAddress`, the attachments, and a later `StopInstances`.
 
 No completed recovery point may name this volume as its source. This records each completed point's source volume privately and stops if any equals the data volume or a lookup fails:
 

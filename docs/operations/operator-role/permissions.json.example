@@ -4,7 +4,7 @@
     {"Sid": "Ec2InDeploymentRegion", "Effect": "Allow", "Action": "ec2:*", "Resource": "*",
      "Condition": {"StringEquals": {"aws:RequestedRegion": "us-west-2"}}},
     {"Sid": "NeverWeakenEc2SecuritySettingsOrShare", "Effect": "Deny",
-     "Action": ["ec2:DisableEbsEncryptionByDefault","ec2:ModifyEbsDefaultKmsKeyId","ec2:ResetEbsDefaultKmsKeyId","ec2:DisableSnapshotBlockPublicAccess","ec2:DisableImageBlockPublicAccess","ec2:EnableSerialConsoleAccess","ec2:ModifySnapshotAttribute","ec2:ModifyImageAttribute","ec2:ModifyInstanceMetadataDefaults","ec2:ModifyVpcBlockPublicAccessOptions","ec2:DisableAllowedImagesSettings","ec2:DeleteFlowLogs","ec2:CreateNetworkInterfacePermission"],
+     "Action": ["ec2:DisableEbsEncryptionByDefault","ec2:ModifyEbsDefaultKmsKeyId","ec2:ResetEbsDefaultKmsKeyId","ec2:DisableSnapshotBlockPublicAccess","ec2:DisableImageBlockPublicAccess","ec2:EnableSerialConsoleAccess","ec2:ModifySnapshotAttribute","ec2:ModifyImageAttribute","ec2:ModifyInstanceMetadataDefaults","ec2:ModifyVpcBlockPublicAccessOptions","ec2:DisableAllowedImagesSettings","ec2:DeleteFlowLogs","ec2:CreateNetworkInterfacePermission","ec2:EnableAllowedImagesSettings","ec2:ReplaceImageCriteriaInAllowedImagesSettings","ec2:CreateVpcBlockPublicAccessExclusion","ec2:ModifyVpcBlockPublicAccessExclusion","ec2:DeleteVpcBlockPublicAccessExclusion"],
      "Resource": "*"},
     {"Sid": "HostRolePermissionsOnlyWithinBoundary", "Effect": "Allow",
      "Action": ["iam:CreateRole","iam:PutRolePolicy","iam:DeleteRolePolicy","iam:AttachRolePolicy","iam:DetachRolePolicy","iam:PutRolePermissionsBoundary"],

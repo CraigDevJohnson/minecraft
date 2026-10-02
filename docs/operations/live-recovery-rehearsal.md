@@ -229,6 +229,7 @@ recovery_volume_id="$(jq -er .data_volume_id "$evidence_dir/recovery-deployment.
 recovery_host_id="$(jq -er .host_id "$evidence_dir/recovery-deployment.json")" || exit 1
 recovery_bucket="$(jq -er .backup_bucket_name "$evidence_dir/recovery-deployment.json")" || exit 1
 provenance="$evidence_dir/recovery-disk-provenance.txt"
+export TZ=UTC
 {
   printf '== %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" &&
     aws ec2 describe-volumes --volume-ids "$recovery_volume_id" --output json \
@@ -238,7 +239,7 @@ provenance="$evidence_dir/recovery-disk-provenance.txt"
       --query 'Events[].[EventTime,EventName,ReadOnly,Username,EventId,Resources[].ResourceName]' &&
     aws cloudtrail lookup-events --output text \
       --lookup-attributes AttributeKey=ResourceName,AttributeValue="$recovery_host_id" \
-      --query 'Events[?EventName==`RunInstances`].[EventTime,EventName,ReadOnly,Username,EventId]' &&
+      --query "Events[?ReadOnly=='false'].[EventTime,EventName,Username,EventId,Resources[].ResourceName]" &&
     printf 'completed recovery point source volumes:\n' &&
     aws s3api list-objects-v2 --bucket "$recovery_bucket" --prefix instances/ \
       --query 'Contents[].Key' --output json |
@@ -250,7 +251,7 @@ provenance="$evidence_dir/recovery-disk-provenance.txt"
 cat "$provenance"
 ```
 
-Stop if any command fails or is denied. In the newest section, require an empty `Snapshot` and `Source`, a `Created` time inside the newest `apply-start`/`apply-end` pair in `recovery-apply-window.txt`, with the recovery host's `RunInstances` in the same pair, and one attachment, to the recovery host, whose `AttachTime` equals to the second the `EventTime` of that apply's `AttachVolume`; exactly one `CreateVolume` inside that window, with the `Username` of the recovery host's single `RunInstances` event; at least one `AttachVolume`, each to the recovery host; no other event whose `ReadOnly` is `false`; and no listed source volume equal to the recovery volume. If an expected event is missing, wait and rerun the block, which appends a new section; if it stays missing, stop. For an `AttachVolume` without an instance resource, use the event-ID lookup in infrastructure operations and keep the raw event private.
+Stop if any command fails or is denied. In the newest section, require an empty `Snapshot` and `Source`, a `Created` time inside the newest `apply-start`/`apply-end` pair in `recovery-apply-window.txt`, with the recovery host's `RunInstances` in the same pair, and one attachment, to the recovery host, whose `AttachTime` equals to the second the `EventTime` of that apply's `AttachVolume`; exactly one `CreateVolume` inside that window, with the `Username` of the recovery host's single `RunInstances` event; at least one `AttachVolume`, each to the recovery host, with the apply's own `AttachVolume` found in the volume or host listing; among the host's write events, no root-disk replacement, `ModifyInstanceAttribute`, or other attachment of the recovery volume; no other volume event whose `ReadOnly` is `false`; and no listed source volume equal to the recovery volume. If an expected event is missing, wait and rerun the block, which appends a new section; if it stays missing, stop. For an `AttachVolume` without an instance resource, use the event-ID lookup in infrastructure operations and keep the raw event private.
 
 Through SSM, run the host-side check from infrastructure operations on the recovery host and retain its command ID and private output. Any evidence of prior storage or runtime use is a stop. Transfer the deployment handoffs and install the runtime only after initialization below. Immediately before zero-fill, rerun the provenance block and the host-side check together and require the same single attachment with an identical `AttachTime`; if more than 10 minutes pass before zero-fill starts, rerun both again.
 
@@ -280,7 +281,7 @@ sudo journalctl -u minecraft-storage-zero-fill.service -u minecraft-storage-init
   -o short-iso --no-pager
 ```
 
-Require `disk zero-filled; run initialize separately` before initialize, and `filesystem initialized or already matches; run mount separately` before mounting; then continue from the next command in the block. A timeout is a failure, never a reason to force-format. A timed-out zero-fill can return late and leave the disk partly zeroed: wait for its unit to exit and rerun zero-fill to completion. Initialize's whole-device check remains the gate.
+Require `disk zero-filled; run initialize separately` before initialize, and `filesystem initialized or already matches; run mount separately` before mounting. If the session was lost, set `expected_volume_id` and `expected_filesystem_uuid` again from the reviewed output, then rerun the loop only for the units that have not succeeded (`for unit in initialize` after a successful zero-fill; rerunning zero-fill after it succeeded is safe but slow, and after initialize it refuses), and continue with the storage and Docker commands. A timeout is a failure, never a reason to force-format. A timed-out zero-fill can return late and leave the disk partly zeroed: wait for its unit to exit and rerun zero-fill to completion. Initialize's whole-device check remains the gate.
 
 Before installing the runtime, transfer `$evidence_dir/recovery-deployment.json` to `/etc/minecraft/deployment.json` on the recovery host, the refreshed `$source_deployment` to `/etc/minecraft/source-deployment.json`, and `$evidence_dir/selected-recovery-point.txt` to `/etc/minecraft/recovery-point`. All three must be root-owned regular files with mode 0600 inside root-owned mode-0700 `/etc/minecraft`; compare each on-host SHA-256 with its private operator copy. Install a reviewed AWS CLI v2 with conditional object/multipart upload and SHA-256 support first, and confirm `aws --version` reports `aws-cli/2`. Then follow [runtime installation](runtime-installation.md): `scripts/install_runtime.sh` checks CLI capabilities and reads the target deployment file during preflight. Supply a fresh RCON secret and recorded EULA acceptance in target-private configuration. Configure the target operator file from the recovery deployment output and stage the selected point's original definition and manifest as described in [step 3 of the isolated restore procedure](backup-recovery.md#restore-onto-an-isolated-host). Its backup destination is the temporary recovery bucket. The restore command reads the source bucket only through `--source-deployment`.
 
