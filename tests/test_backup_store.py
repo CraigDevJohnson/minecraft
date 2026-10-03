@@ -346,6 +346,15 @@ class BackupStoreTests(unittest.TestCase):
             with self.subTest(timeout=timeout), self.assertRaises(backup_store.BackupError):
                 backup_store.S3Store("family-backups", timeout=timeout)
 
+    def test_new_operation_has_its_own_bounded_deadline_and_preserves_reviewed_profile(self):
+        with mock.patch.object(backup_store.time, 'monotonic', side_effect=[10, 1000]):
+            initial = backup_store.S3Store('family-backups', region='us-west-2', profile='workloads-admin', timeout=900)
+            later = initial.for_operation(timeout=3000)
+        self.assertEqual(initial.deadline, 910)
+        self.assertEqual(later.deadline, 4000)
+        self.assertEqual(later.profile, 'workloads-admin')
+        self.assertEqual(later.bucket, initial.bucket)
+
     def test_a_part_checksum_mismatch_aborts_before_publication(self):
         self.source.write_bytes(b"abcabc")
         self.steps(

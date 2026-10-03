@@ -48,6 +48,9 @@ class S3Store:
         self.profile = profile
         self.deadline = time.monotonic() + timeout
 
+    def for_operation(self, *, timeout: int):
+        return S3Store(self.bucket, self.region, timeout=timeout, profile=self.profile)
+
     def _call(self, operation: str, *arguments: str, download_limit: tuple[Path, int] | None = None) -> dict:
         started = time.monotonic()
         if started >= self.deadline:

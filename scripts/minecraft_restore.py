@@ -66,7 +66,7 @@ def apply_restore_ownership(data):
             os.chown(Path(directory) / filename, 1000, 1000)
 
 
-def verify_restored_receipt(target, metadata, receipt, deployment):
+def verify_restored_receipt(target, metadata, receipt, deployment, *, metadata_reader=os.lstat):
     """Recognize only a complete, untouched install of this receipt on this target."""
     expected_storage = {'volume_id': deployment['data_volume_id'], 'filesystem_uuid': deployment['data_filesystem_uuid']}
     try:
@@ -93,6 +93,11 @@ def verify_restored_receipt(target, metadata, receipt, deployment):
         for entry in metadata['files']:
             path = target / entry['path']
             information = path.lstat()
+            permissions = metadata_reader(path)
+            expected_mode = 0o700 if entry['type'] == 'directory' else 0o600
+            if (permissions.st_uid != 1000 or permissions.st_gid != 1000
+                    or stat.S_IMODE(permissions.st_mode) != expected_mode):
+                raise BackupError('restored target ownership or permissions differ from its receipt; preserve it for repair')
             if entry['type'] == 'directory':
                 if not stat.S_ISDIR(information.st_mode):
                     raise BackupError('restored target directory differs from its receipt')
@@ -135,7 +140,8 @@ def restore(machine, source_deployment, instance, recovery_point, store, *, rece
                     or manifest_digest(machine.definitions[instance]) != metadata["definition_sha256"]):
                 raise BackupError("target content manifest or definition is incompatible with the recovery point")
             if occupied:
-                verify_restored_receipt(target, metadata, receipt, machine.deployment)
+                verify_restored_receipt(target, metadata, receipt, machine.deployment,
+                                        metadata_reader=getattr(machine, 'restore_metadata', os.lstat))
                 machine.verify_storage()
                 if machine.inspect(instance)['exists']:
                     raise BackupError('restore target acquired a container; preserve it for repair')

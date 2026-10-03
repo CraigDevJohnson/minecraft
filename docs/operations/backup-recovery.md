@@ -70,6 +70,8 @@ The approved [#24 design](https://github.com/CraigDevJohnson/minecraft/issues/24
 
 The operator controller calls `minecraft_backup.verify_stop_receipt` with that evidence, the source deployment, the reviewed bootstrap bundle digest and an existing operator-owned mode-0700 journal directory. It independently reads the exact completed marker and archive versions and verifies every archived file. Receipts record those version IDs and hashes, source account/host/disk/filesystem and deployment digest, content and definition digests, bootstrap digest and capacity requirements. Mode-0600 local receipts survive disk deletion. S3 stores immutable receipts under `instances/<id>/receipts/<receipt-id>.json` and advances `receipts/current.json` with a conditional write against the observed ETag. A sequence and predecessor bind successive selections. Missing or corrupt selection, a stale local selection, incomplete final-session backup, or an unavailable exact version blocks removal; catalog `latest` is never a fallback.
 
+Receipt verification accepts an explicit `timeout` of 1 to 3000 seconds, defaulting to 3000 for each configured instance. Each instance receives a fresh store operation, including when the caller injects a configured store, so earlier instances do not consume its verification budget. This bounded interval covers that instance's full marker/archive verification and receipt publication; timeout failure preserves the host and disk.
+
 After the lifecycle controller creates and verifies a distinct target disk and filesystem, it transfers the selected private receipt with the existing private runtime configuration and invokes:
 
 ```sh
