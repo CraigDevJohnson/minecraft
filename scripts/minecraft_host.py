@@ -1,19 +1,36 @@
 #!/usr/bin/env python3
-"""Operator-side bounded EC2/SSM lifecycle for configured Minecraft instances."""
+"""Operator-side bounded EC2/SSM lifecycle for configured Minecraft instances and the host's DNS record."""
 from __future__ import annotations
 
 import argparse
+import http.client
+import ipaddress
 import json
+import os
 import re
+import ssl
 import subprocess
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 
 INSTANCE_ID = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+HOSTNAME = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?")
+CLOUDFLARE_ID = re.compile(r"[0-9a-f]{32}")
 REMOTE_COMMAND = "/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json"
 HOST_TIMEOUT = 300
 REMOTE_TIMEOUT = 3600
+# Fixed in code: a deployment file must never choose where the token is sent.
+CLOUDFLARE_API = "https://api.cloudflare.com/client/v4"
+CLOUDFLARE_TOKEN = "CLOUDFLARE_API_TOKEN"
+CLOUDFLARE_RESPONSE_LIMIT = 1 << 20
+# RFC 5737 documentation address, never routed: a stopped host's released address may
+# be assigned to another AWS customer, so the hostname must not keep pointing at it.
+PARKED_ADDRESS = "192.0.2.1"
+DNS_TTL = 60
 
 
 class HostError(Exception):
@@ -33,8 +50,9 @@ class AWSCLI:
 
     def run(self, service: str, operation: str, *arguments: str, timeout: float) -> dict:
         command = ["aws", "--region", self.region, "--output", "json", "--no-cli-pager", "--no-cli-auto-prompt", service, operation, *arguments]
+        environment = {key: value for key, value in os.environ.items() if key != CLOUDFLARE_TOKEN}
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False, env=environment)
         except FileNotFoundError as exc:
             raise HostError("AWS CLI is required on the operator computer") from exc
         except OSError as exc:
@@ -54,6 +72,54 @@ class AWSCLI:
         return response
 
 
+class RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Following a redirect would send the token to a host this code did not name."""
+
+    def redirect_request(self, *arguments, **keywords):
+        return None
+
+
+class CloudflareAPI:
+    """Cloudflare v4 API boundary; the token is sent only in the Authorization header."""
+
+    def request(self, method: str, path: str, *, query=None, body=None, timeout: float) -> dict:
+        token = os.environ.get(CLOUDFLARE_TOKEN, "")
+        if not re.fullmatch(r"[\x21-\x7e]+", token):
+            raise HostError(f"{CLOUDFLARE_TOKEN} is not set to an API token for this command")
+        request = urllib.request.Request(
+            CLOUDFLARE_API + path + ("?" + urllib.parse.urlencode(query) if query else ""), method=method,
+            data=None if body is None else json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        request.add_unredirected_header("Authorization", "Bearer " + token)
+        try:
+            with urllib.request.build_opener(RefuseRedirects).open(request, timeout=timeout) as reply:
+                content = reply.read(CLOUDFLARE_RESPONSE_LIMIT)  # a longer reply is cut short and fails to parse
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            raise HostError(f"Cloudflare API returned HTTP {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, ssl.SSLCertVerificationError):
+                raise HostError("cannot verify the Cloudflare API certificate; this Python needs a CA bundle") from exc
+            raise HostError("cannot reach the Cloudflare API") from exc
+        except (OSError, http.client.HTTPException) as exc:
+            raise HostError("Cloudflare API request failed or timed out; outcome may be incomplete") from exc
+        try:
+            response = json.loads(content)
+        except ValueError as exc:
+            raise HostError("Cloudflare API returned invalid JSON") from exc
+        if not isinstance(response, dict) or response.get("success") is not True:
+            raise HostError("Cloudflare API returned a failure or an invalid response")
+        return response
+
+
+def global_ipv4(value) -> str | None:
+    """A public address safe to publish; anything else counts as not reported yet."""
+    try:
+        address = ipaddress.IPv4Address(value if isinstance(value, str) else "")
+    except ValueError:
+        return None
+    return str(address) if address.is_global and not address.is_multicast else None
+
+
 def load_deployment(path: Path) -> dict:
     try:
         deployment = json.loads(path.read_text())
@@ -70,6 +136,12 @@ def load_deployment(path: Path) -> dict:
         raise HostError("deployment region is invalid")
     if not isinstance(instances, dict) or not instances or any(not INSTANCE_ID.fullmatch(key) or not isinstance(value, dict) for key, value in instances.items()):
         raise HostError("deployment instances must contain valid configured instance IDs")
+    hostname, zone_id = deployment.get("public_hostname"), deployment.get("cloudflare_zone_id")
+    if hostname is not None or zone_id is not None:
+        if not isinstance(hostname, str) or len(hostname) > 253 or not HOSTNAME.fullmatch(hostname):
+            raise HostError("deployment public_hostname must be a lowercase DNS hostname")
+        if not isinstance(zone_id, str) or not CLOUDFLARE_ID.fullmatch(zone_id):
+            raise HostError("deployment cloudflare_zone_id must be a 32-character lowercase hexadecimal ID")
     return deployment
 
 
@@ -85,11 +157,15 @@ def public_instance(value: dict, instance: str) -> dict:
 
 
 class HostSession:
-    def __init__(self, deployment: dict, aws):
+    def __init__(self, deployment: dict, aws, cloudflare=None):
         self.deployment = deployment
         self.aws = aws
+        self.cloudflare = cloudflare
         self.state = "unknown"
+        self.address = None
         self.observed = {"application": "unknown", "backup": "unverified"}
+        self.dns = {}
+        self.dns_error = None
 
     def call(self, service: str, operation: str, *arguments: str, deadline=None) -> dict:
         timeout = 30 if deadline is None else min(30, deadline - self.aws.monotonic())
@@ -114,7 +190,57 @@ class HostSession:
         except (KeyError, TypeError, ValueError) as exc:
             raise HostError("AWS returned an unknown host state") from exc
         self.state = state
+        self.address = global_ipv4(instances[0].get("PublicIpAddress"))
         return state
+
+    def public_address(self) -> str:
+        """EC2 can report running before it publishes the address; poll only then."""
+        deadline = self.aws.monotonic() + HOST_TIMEOUT
+        while self.address is None:
+            self.aws.sleep(min(3, max(0, deadline - self.aws.monotonic())))
+            if self.aws.monotonic() >= deadline:
+                raise HostError("the running host reported no public IPv4 address")
+            if self.host_state(deadline) != "running":
+                raise HostError("the host left running before reporting a public IPv4 address")
+        return self.address
+
+    def set_record(self, content: str) -> bool:
+        """Point the one existing A record at content; never create or delete a record."""
+        zone_id, hostname = self.deployment["cloudflare_zone_id"], self.deployment["public_hostname"]
+        records = self.cloudflare.request("GET", f"/zones/{zone_id}/dns_records", query={"name.exact": hostname}, timeout=30).get("result")
+        # Any second record, such as a stray AAAA or CNAME, would send some clients elsewhere.
+        if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
+            raise HostError("the hostname must have exactly one DNS record")
+        record = records[0]
+        if record.get("type") != "A" or record.get("name") != hostname or not isinstance(record.get("id"), str) or not CLOUDFLARE_ID.fullmatch(record["id"]):
+            raise HostError("the hostname's only DNS record must be an A record")
+
+        def matches(value) -> bool:
+            return isinstance(value, dict) and value.get("content") == content and value.get("ttl") == DNS_TTL and value.get("proxied") is False
+
+        if matches(record):
+            return False
+        # DNS only (never proxied: the proxy carries only HTTP) and a TTL that follows a restart.
+        body = {"type": "A", "name": hostname, "content": content, "ttl": DNS_TTL, "proxied": False}
+        updated = self.cloudflare.request("PATCH", f"/zones/{zone_id}/dns_records/{record['id']}", body=body, timeout=30)
+        if not matches(updated.get("result")):
+            raise HostError("Cloudflare did not confirm the DNS record update")
+        return True
+
+    def sync_dns(self) -> None:
+        """Follow a running host or park a stopped one. A failure is recorded, never
+        raised: DNS must not block or undo the game start, the drain, or the EC2 stop."""
+        if self.deployment.get("public_hostname") is None:
+            return
+        running = self.state == "running"
+        try:
+            changed = self.set_record(self.public_address() if running else PARKED_ADDRESS)
+            self.dns = {"dns": "current" if not changed else "updated" if running else "parked"}
+        except HostError as exc:
+            # The address is the one exception to printing no deployment identifiers:
+            # the operator can hand it to players until the record is repaired.
+            self.dns = {"dns": "failed", **({"public_ip": self.address} if self.state == "running" and self.address else {})}
+            self.dns_error = f"DNS record not updated: {exc}; fix the cause and rerun the dns command"
 
     def wait_host(self, expected: str, transitional: str, *, previous=None) -> None:
         deadline = self.aws.monotonic() + HOST_TIMEOUT
@@ -175,6 +301,7 @@ class HostSession:
             self.wait_host("running", "pending")
         elif state != "running":
             raise HostError(f"host start cannot proceed from {state}; retry after the current transition")
+        self.sync_dns()  # before the game boots, so the record propagates meanwhile
         self.wait_ssm()
         result = public_instance(self.remote("start", instance), instance)
         self.observed = result
@@ -191,6 +318,7 @@ class HostSession:
     def stop(self) -> dict:
         state = self.host_state()
         if state == "stopped":
+            self.sync_dns()
             return {"host": state, "application": "unavailable", "backup": "unverified"}
         if state != "running":
             raise HostError(f"host stop cannot proceed from {state}; retry after the current transition")
@@ -202,7 +330,16 @@ class HostSession:
             raise HostError("host drain lacks complete shutdown and backup evidence; EC2 stop forbidden")
         self.call("ec2", "stop-instances", "--instance-ids", self.deployment["host_id"])
         self.wait_host("stopped", "stopping", previous="running")
+        self.sync_dns()  # only now has EC2 released the address
         return {"host": self.state, "draining": True, "instances": instances}
+
+    def repair_dns(self) -> dict:
+        """Catch the record up after a start or stop that this command did not perform."""
+        self.observed = {}
+        if self.host_state() not in ("running", "stopped"):
+            raise HostError(f"dns cannot proceed from {self.state}; retry after the current transition")
+        self.sync_dns()
+        return {"host": self.state}
 
     def status(self) -> dict:
         if self.host_state() != "running":
@@ -216,7 +353,7 @@ class HostSession:
         return {"host": self.state, "draining": response["draining"], "instances": instances}
 
 
-def main(argv=None, *, aws=None) -> int:
+def main(argv=None, *, aws=None, cloudflare=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--deployment", type=Path, required=True)
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -224,25 +361,34 @@ def main(argv=None, *, aws=None) -> int:
     start.add_argument("--instance", required=True)
     subparsers.add_parser("stop", help="drain every instance and stop EC2 after required backups")
     subparsers.add_parser("status", help="inspect host, application and backup states")
+    subparsers.add_parser("dns", help="point the public hostname at a running host, or park it for a stopped one")
     args = parser.parse_args(argv)
     session = None
     try:
         deployment = load_deployment(args.deployment)
         if args.action == "start" and (args.instance not in deployment["instances"] or not INSTANCE_ID.fullmatch(args.instance)):
             raise HostError("instance is invalid or not configured in the deployment")
-        session = HostSession(deployment, aws or AWSCLI(deployment["region"]))
+        if args.action == "dns" and deployment.get("public_hostname") is None:
+            raise HostError("deployment has no public_hostname; it has no DNS record to manage")
+        session = HostSession(deployment, aws or AWSCLI(deployment["region"]), cloudflare or CloudflareAPI())
         session.verify_account()
         if args.action == "start":
             output = session.start(args.instance)
         elif args.action == "stop":
             output = session.stop()
+        elif args.action == "dns":
+            output = session.repair_dns()
         else:
             output = session.status()
+        output.update(session.dns)
+        if session.dns_error:
+            output["error"] = session.dns_error
         print(json.dumps(output, sort_keys=True))
-        return 0
+        return 1 if session.dns_error else 0
     except HostError as exc:
         observed = session.observed if session else {"application": "unknown", "backup": "unverified"}
-        print(json.dumps({"host": session.state if session else "unknown", **observed, "error": str(exc)}, sort_keys=True))
+        dns = session.dns if session else {}
+        print(json.dumps({"host": session.state if session else "unknown", **observed, **dns, "error": str(exc)}, sort_keys=True))
         return 1
 
 
