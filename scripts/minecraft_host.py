@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import ipaddress
 import json
 import os
 import re
 import ssl
+import stat
 import subprocess
 import time
 import urllib.error
@@ -44,19 +46,50 @@ class InvocationNotVisible(HostError):
     """Run Command is eventually consistent immediately after submission."""
 
 
+def verified_executable(path, digest, identity):
+    """Check a reviewed regular launcher under the trusted platform runtime."""
+    path = Path(path)
+    try:
+        if not path.is_absolute() or any(value.is_symlink() for value in (path, *path.parents)):
+            raise HostError('reviewed executable path must be canonical and regular')
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.geteuid())
+                    or stat.S_IMODE(info.st_mode) & 0o022 or not stat.S_IMODE(info.st_mode) & 0o111):
+                raise HostError('reviewed executable is not trusted and executable')
+            actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+        if (not isinstance(identity, dict) or set(identity) != {'device', 'inode'}
+                or any(type(value) is not int for value in identity.values())
+                or identity != {'device': info.st_dev, 'inode': info.st_ino} or actual != digest):
+            raise HostError('reviewed executable identity or digest changed')
+        return str(path)
+    except (OSError, TypeError, ValueError) as exc:
+        raise HostError('cannot validate reviewed executable') from exc
+
+
 class AWSCLI:
-    def __init__(self, region: str, profile: str | None = None, role_arn: str | None = None):
+    def __init__(self, region: str, profile: str | None = None, role_arn: str | None = None,
+                 *, executable=None, executable_sha256=None, executable_identity=None):
         self.region = region
         self.profile = profile
         self.role_arn = role_arn
         self.credentials = None
         self.credentials_deadline = 0
+        self.executable = executable
+        self.executable_sha256 = executable_sha256
+        self.executable_identity = executable_identity
+
+    def command_path(self):
+        if self.executable is None:
+            return 'aws'
+        return verified_executable(self.executable, self.executable_sha256, self.executable_identity)
 
     monotonic = staticmethod(time.monotonic)
     sleep = staticmethod(time.sleep)
 
     def environment(self) -> dict:
-        transport_overrides = {'AWS_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'}
+        transport_overrides = {'AWS_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'PYTHONPATH', 'PYTHONHOME'}
         environment = {key: value for key, value in os.environ.items()
                        if key != CLOUDFLARE_TOKEN and key not in transport_overrides and not key.startswith("AWS_ENDPOINT_URL")}
         environment["AWS_IGNORE_CONFIGURED_ENDPOINT_URLS"] = "true"
@@ -66,7 +99,8 @@ class AWSCLI:
                 environment.pop(name, None)
         if self.role_arn is not None:
             if self.credentials is None or self.monotonic() >= self.credentials_deadline:
-                response = AWSCLI(self.region, self.profile).run("sts", "assume-role", "--role-arn", self.role_arn,
+                response = AWSCLI(self.region, self.profile, executable=self.executable,
+                                  executable_sha256=self.executable_sha256, executable_identity=self.executable_identity).run("sts", "assume-role", "--role-arn", self.role_arn,
                          "--role-session-name", "minecraft-host", "--duration-seconds", "3600", timeout=30)
                 credentials = response.get("Credentials")
                 role_name = self.role_arn.rsplit("/", 1)[-1]
@@ -84,10 +118,11 @@ class AWSCLI:
         return environment
 
     def run(self, service: str, operation: str, *arguments: str, timeout: float) -> dict:
-        command = ["aws", "--region", self.region, "--output", "json", "--no-cli-pager", "--no-cli-auto-prompt", service, operation, *arguments]
+        command = [self.command_path(), "--region", self.region, "--output", "json", "--no-cli-pager", "--no-cli-auto-prompt", service, operation, *arguments]
         if self.profile is not None and self.role_arn is None:
             command[1:1] = ["--profile", self.profile]
         environment = self.environment()
+        command[0] = self.command_path()  # credential refresh may have run another process
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False, env=environment)
         except FileNotFoundError as exc:
@@ -462,9 +497,10 @@ def main(argv=None, *, aws=None, cloudflare=None) -> int:
             if deployment["lifecycle_mode"] == "s3-only":
                 from minecraft_s3_session import S3Session
                 session_type = S3Session
-            session = session_type(deployment, aws or AWSCLI(deployment["region"], policy["aws_profile"], deployment["operator_role_arn"]), cloudflare or CloudflareAPI(), policy, args.deployment, started_at=command_started_at, started_monotonic=command_started_monotonic)
-
-
+            client = aws or AWSCLI(deployment["region"], policy["aws_profile"], deployment["operator_role_arn"],
+                                   executable=policy['aws_cli_path'], executable_sha256=policy['aws_cli_sha256'],
+                                   executable_identity=policy['aws_cli_file_identity'])
+            session = session_type(deployment, client, cloudflare or CloudflareAPI(), policy, args.deployment, started_at=command_started_at, started_monotonic=command_started_monotonic)
         else:
             session = HostSession(deployment, aws or AWSCLI(deployment["region"]), cloudflare or CloudflareAPI())
         session.verify_account()

@@ -59,13 +59,16 @@ class FakeAWS:
         self.inventory = None
         self.unrecorded_host = False
     def environment(self): return {}
+    def command_path(self): return getattr(self, 'cli_path', 'aws')
     def run(self, service, operation, *arguments, timeout):
         self.calls.append((operation, arguments))
         if operation == 'get-caller-identity': return {'Account': DEPLOYMENT['account_id']}
         if operation == 'describe-instances' and '--filters' in arguments:
             filters = json.loads(arguments[arguments.index('--filters') + 1])
             if any(value['Name'] == 'instance-id' for value in filters):
-                return {'Reservations': [] if getattr(self, 'terminated_forgotten', False) else [{'Instances': [{'InstanceId': HOST_ID, 'State': {'Name': 'terminated'}}]}]}
+                current = lifecycle.resources(self.inventory()) if self.inventory else {}
+                cloud_state = FakeSession.host_state_value if 'aws_instance.host[0]' in current else 'terminated'
+                return {'Reservations': [] if getattr(self, 'terminated_forgotten', False) else [{'Instances': [{'InstanceId': HOST_ID, 'State': {'Name': cloud_state}}]}]}
             inventory = lifecycle.resources(self.inventory()) if self.inventory else {}
             recorded = inventory.get('aws_instance.host[0]', {}).get('id')
             hosts = [{'InstanceId': recorded}] if recorded else []
@@ -157,6 +160,7 @@ class FakeSession:
         if action == self.failure: raise host.HostError('remote operation failed')
         if action == 'runtime-probe': return {'runtime': 'installed' if self.installed_runtime else 'missing'}
         if action == 'private-input-verification': return {'private_inputs': 'verified'}
+        if action == 'runtime-attestation': return {'runtime':'installed', 'bootstrap_sha256':DIGEST}
         return {}
     def remote(self, action):
         self.commands.append((action, ''))
@@ -174,6 +178,18 @@ class FakeSession:
             self.dns = {'dns': 'failed'}
             self.dns_error = 'DNS record not updated; rerun dns'
     def status(self): return {'host': 'running'}
+
+
+def pin_fixture_tools(directory, policy):
+    tools = directory / 'reviewed-tools'
+    tools.mkdir(exist_ok=True)
+    for prefix, filename in (('aws_cli', 'aws'), ('session_plugin', 'session-manager-plugin')):
+        path = tools / filename
+        path.write_bytes(b'reviewed-executable-fixture')
+        path.chmod(0o755)
+        info = path.stat()
+        policy.update({prefix + '_path':str(path), prefix + '_sha256':lifecycle.digest_file(path),
+                       prefix + '_file_identity':{'device':info.st_dev, 'inode':info.st_ino}})
 
 
 class OnDemandTests(unittest.TestCase):
@@ -199,6 +215,10 @@ class OnDemandTests(unittest.TestCase):
                        'private_inputs_sha256': __import__('hashlib').sha256(self.operator.read_bytes() + b'\0' + self.secret.read_bytes()).hexdigest(),
                        'source_sha256': DIGEST, 'variables_sha256': lifecycle.digest_file(self.variables), 'bootstrap_sha256': DIGEST}
         self.aws = FakeAWS()
+        pin_fixture_tools(self.root, self.policy)
+        self.aws.cli_path = self.policy['aws_cli_path']
+        (self.root / 'scripts').mkdir()
+        (self.root / 'scripts/minecraft_bootstrap_release.py').write_bytes((ROOT / 'scripts/minecraft_bootstrap_release.py').read_bytes())
         FakeSession.instances = []
         FakeSession.failure = None
         FakeSession.drain = DRAIN
@@ -220,7 +240,7 @@ class OnDemandTests(unittest.TestCase):
         session = self.session()
         output = session.stop()
         self.assertEqual(output, {'host': 'absent', 'root_disk': 'absent', 'data_disk': 'retained', 'backup': 'complete'})
-        self.assertEqual([action for action,_ in FakeSession.instances[0].commands], ['private-verifier-release', 'private-input-verification', 'host-drain'])
+        self.assertEqual([action for action,_ in FakeSession.instances[0].commands], ['runtime-verifier-release', 'runtime-attestation', 'private-verifier-release', 'private-input-verification', 'host-drain'])
         self.assertEqual(self.tofu.plans, [False])
         self.assertEqual(session.dns, {'dns': 'parked'})
         self.assertIsNone(json.loads(self.deployment_path.read_text())['host_id'])
@@ -308,7 +328,7 @@ class OnDemandTests(unittest.TestCase):
                 self_outer = self
                 class Process:
                     def __init__(self, args, **kwargs):
-                        self_outer.assertEqual(kwargs['env']['PATH'], str(Path(self_outer.policy['infra_root']).parent / '.tools/bin') + os.pathsep + existing_path)
+                        self_outer.assertEqual(kwargs['env']['PATH'], str(Path(self_outer.policy['session_plugin_path']).parent) + os.pathsep + str(Path(self_outer.policy['infra_root']).parent / '.tools/bin') + os.pathsep + existing_path)
                         parameters = json.loads(args[args.index('--parameters') + 1])
                         port = int(parameters['localPortNumber'][0])
                         server = http.server.ThreadingHTTPServer(('127.0.0.1', port), Handler)
@@ -348,7 +368,7 @@ class OnDemandTests(unittest.TestCase):
         self.assertEqual(self.tofu.plans, [True])
         self.assertEqual(output['ready'], True)
         commands = FakeSession.instances[0].commands
-        self.assertEqual([value[0] for value in commands], ['bootstrap-prerequisites', 'bootstrap-release', 'runtime-install', 'private-verifier-release', 'private-input-verification', 'start'])
+        self.assertEqual([value[0] for value in commands], ['bootstrap-prerequisites', 'bootstrap-release', 'runtime-install', 'private-verifier-release', 'private-input-verification', 'runtime-verifier-release', 'runtime-attestation', 'start'])
         self.assertEqual(len(self.transfers), 1)
         self.assertNotIn(self.secret.read_text(), json.dumps(commands))
         self.assertNotIn(self.secret.read_text(), json.dumps(output))
@@ -363,15 +383,15 @@ class OnDemandTests(unittest.TestCase):
         self.assertEqual(self.tofu.applies, 0)
         self.assertEqual(len(self.transfers), 1)
         self.assertEqual([value[0] for value in FakeSession.instances[1].commands],
-                         ['bootstrap-prerequisites', 'bootstrap-release', 'runtime-install', 'private-verifier-release', 'private-input-verification', 'start'])
+                         ['bootstrap-prerequisites', 'bootstrap-release', 'runtime-install', 'private-verifier-release', 'private-input-verification', 'runtime-verifier-release', 'runtime-attestation', 'start'])
 
     def test_duplicate_start_existing_host_does_not_reinstall_private_files(self):
         session = self.session(True)
         session.start('survival')
         self.assertEqual(self.tofu.applies, 0)
         self.assertEqual(self.transfers, [])
-        self.assertEqual([action for action,_ in FakeSession.instances[0].commands], ['runtime-probe', 'private-verifier-release', 'private-input-verification'])
-        self.assertEqual([action for action,_ in FakeSession.instances[1].commands], ['private-verifier-release', 'private-input-verification', 'start'])
+        self.assertEqual([action for action,_ in FakeSession.instances[0].commands], ['runtime-probe', 'runtime-verifier-release', 'runtime-attestation', 'private-verifier-release', 'private-input-verification'])
+        self.assertEqual([action for action,_ in FakeSession.instances[1].commands], ['private-verifier-release', 'private-input-verification', 'runtime-verifier-release', 'runtime-attestation', 'start'])
 
     def test_changed_reviewed_inputs_require_reconfiguration_before_reusing_host(self):
         session = self.session(True)
@@ -392,6 +412,31 @@ class OnDemandTests(unittest.TestCase):
         self.assertEqual(self.tofu.applies, 0)
         self.assertEqual(self.transfers, [])
         self.assertFalse(any(action in ('start', 'host-drain', 'stop-instances') for remote in FakeSession.instances for action,_ in remote.commands))
+
+    def test_changed_public_runtime_refuses_reuse_and_drain_before_any_deletion(self):
+        original = FakeSession.execute_shell
+        def attest(remote, command, action):
+            if action == 'runtime-attestation': raise host.HostError('installed public runtime differs')
+            return original(remote, command, action)
+        for action in ('start','stop'):
+            with tempfile.TemporaryDirectory() as child:
+                self.policy['journal_dir']=str(Path(child).resolve()/'journal')
+                session=self.session(True)
+                with mock.patch.object(FakeSession,'execute_shell',attest), self.assertRaises(host.HostError):
+                    session.start('survival') if action=='start' else session.stop()
+                self.assertEqual(self.tofu.applies,0)
+                self.assertFalse(any(name in ('start','host-drain','stop-instances') for remote in FakeSession.instances for name,_ in remote.commands))
+
+    def test_plugin_replacement_during_credential_refresh_prevents_tunnel_process(self):
+        session=self.session(True)
+        def environment():
+            Path(self.policy['session_plugin_path']).write_bytes(b'replaced-plugin')
+            return {}
+        self.aws.environment=environment
+        remote=FakeSession(session.deployment,self.aws,None)
+        with mock.patch.object(lifecycle.subprocess,'Popen') as process:
+            with self.assertRaises(host.HostError):session.transfer_private(remote,b'PRIVATE',DIGEST)
+            process.assert_not_called()
 
     def test_invalid_private_encoding_or_bundle_schema_precedes_journal_and_create(self):
         for target, payload in ((self.operator,b'not JSON'), (self.operator,b'\xff'), (self.operator,b'\xef\xbb\xbf{}'), (self.operator,b'[]'), (self.secret,b'invalid secret')):
@@ -568,6 +613,53 @@ class OnDemandTests(unittest.TestCase):
 
 
 
+    def test_interrupted_delete_with_stale_state_refreshes_and_proves_removal(self):
+        for forgotten in (False, True):
+            with self.subTest(forgotten=forgotten), tempfile.TemporaryDirectory() as child:
+                self.policy['journal_dir'] = str(Path(child) / 'journal')
+                self.aws = FakeAWS()
+                self.aws.terminated_forgotten = forgotten
+                FakeSession.host_state_value = 'running'
+                session = self.session()
+                self.tofu.fail_apply_once = True
+                with self.assertRaises(host.HostError): session.stop()
+                old = lifecycle.resources(self.tofu.current)
+                def refreshed_plan(path, present):
+                    self.tofu.plans.append(present)
+                    self.tofu.plan_direction = present
+                    path.write_bytes(b'refresh-only-reviewable-plan')
+                    return {'resource_drift': [
+                        {'address': address, 'change': {'actions': ['delete'], 'before': old[address], 'after': None}}
+                        for address in sorted(lifecycle.SESSION_ADDRESSES)], 'resource_changes': []}
+                self.tofu.plan = refreshed_plan
+                FakeSession.host_state_value = 'terminated'
+                result = session.stop()
+                self.assertEqual(result['host'], 'absent')
+                self.assertEqual(self.tofu.applies, 2)
+                self.assertEqual(json.loads(session.journal_path.read_text())['phase'], 'complete')
+                self.assertIsNone(json.loads(self.deployment_path.read_text())['host_id'])
+                self.assertTrue(any(operation == 'describe-volumes' and '--filters' in args
+                                    for operation, args in self.aws.calls))
+
+    def test_delete_refresh_cannot_complete_without_independent_disk_proof(self):
+        session = self.session()
+        self.tofu.fail_apply_once = True
+        with self.assertRaises(host.HostError): session.stop()
+        old = lifecycle.resources(self.tofu.current)
+        def refreshed_plan(path, present):
+            self.tofu.plan_direction = present
+            path.write_bytes(b'refresh-only-reviewable-plan')
+            return {'resource_drift': [
+                {'address': address, 'change': {'actions': ['delete'], 'before': old[address], 'after': None}}
+                for address in sorted(lifecycle.SESSION_ADDRESSES)], 'resource_changes': []}
+        self.tofu.plan = refreshed_plan
+        self.aws.root_absent = False
+        FakeSession.host_state_value = 'terminated'
+        with self.assertRaises(host.HostError): session.stop()
+        self.assertEqual(json.loads(session.journal_path.read_text())['phase'], 'applied')
+        self.assertIsNotNone(json.loads(self.deployment_path.read_text())['host_id'])
+
+
 class PolicyBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -590,7 +682,7 @@ class PolicyBoundaryTests(unittest.TestCase):
         self.secret = self.directory / 'rcon.secret'
         self.secret.write_text('PRIVATE_SECRET_DONT_DISCLOSE')
         self.secret.chmod(0o600)
-        self.policy = {'schema_version': 2, 'workstation': socket.gethostname(), 'aws_profile': 'workloads-admin',
+        self.policy = {'schema_version': 3, 'workstation': socket.gethostname(), 'aws_profile': 'workloads-admin',
                        'infra_root': str(self.infra), 'variables_file': str(self.variables),
                        'variables_sha256': lifecycle.digest_file(self.variables), 'source_sha256': DIGEST,
                        'backend': {name: self.backend[name] for name in ('bucket', 'key', 'region')},
@@ -604,6 +696,7 @@ class PolicyBoundaryTests(unittest.TestCase):
         self.policy.update(tofu_sha256=lifecycle.digest_file(binary), tofu_file_identity={'device': info.st_dev, 'inode': info.st_ino},
                            backend_sha256=lifecycle.backend_digest(self.infra, self.policy),
                            private_inputs_sha256=lifecycle.private_inputs_digest(self.policy))
+        pin_fixture_tools(self.directory, self.policy)
         self.path = self.directory / 'lifecycle.json'
         self.mock_digest = mock.patch.object(lifecycle, 'source_digest', return_value=DIGEST)
         self.mock_digest.start()
@@ -735,6 +828,47 @@ class PolicyBoundaryTests(unittest.TestCase):
             self.assertNotIn(name, environment)
         self.assertEqual(environment['AWS_IGNORE_CONFIGURED_ENDPOINT_URLS'],'true')
         self.assertEqual(environment['AWS_PROFILE'], 'workloads-admin')
+
+    def test_tofu_uses_fresh_empty_config_instead_of_user_overrides(self):
+        client=lifecycle.TofuCLI(self.policy)
+        def execute(*args,**kwargs):
+            env=kwargs['env']
+            config=Path(env['TF_CLI_CONFIG_FILE'])
+            self.assertEqual(env['TERRAFORM_CONFIG'],str(config))
+            self.assertEqual(config.read_bytes(),b'')
+            self.assertEqual(config.stat().st_mode & 0o777,0o600)
+            self.assertEqual(config.parent.stat().st_mode & 0o777,0o700)
+            self.assertEqual(list(Path(env['XDG_CONFIG_HOME']).iterdir()),[])
+            self.assertEqual(list(Path(env['XDG_DATA_HOME']).iterdir()),[])
+            self.assertNotEqual(env['XDG_CONFIG_HOME'],'/unreviewed/config')
+            return subprocess.CompletedProcess([],0,'{}','')
+        with mock.patch.dict(os.environ, {'TF_CLI_CONFIG_FILE':'/unreviewed/dev.tfrc','TERRAFORM_CONFIG':'/unreviewed/legacy.tfrc',
+                                         'XDG_CONFIG_HOME':'/unreviewed/config','XDG_DATA_HOME':'/unreviewed/data'}), \
+                mock.patch.object(lifecycle.subprocess,'run',side_effect=execute):
+            client.run('state','pull')
+
+    def test_actual_tofu_does_not_execute_a_user_dev_override_provider(self):
+        probe=self.directory/'provider-probe'; probe.mkdir()
+        (probe/'main.tf').write_text('terraform {\n required_providers {\n aws = { source = "hashicorp/aws", version = "6.63.0" }\n }\n}\nprovider "aws" {}\n')
+        (probe/'.terraform.lock.hcl').write_bytes((ROOT/'infra/.terraform.lock.hcl').read_bytes())
+        provider=self.directory/'hostile-provider'; provider.mkdir()
+        marker=self.directory/'provider-executed'
+        binary=provider/'terraform-provider-aws'
+        binary.write_text('#!/bin/sh\ntouch '+str(marker)+'\nexit 1\n'); binary.chmod(0o755)
+        hostile=self.directory/'hostile.tfrc'
+        hostile.write_text('provider_installation {\n dev_overrides { "registry.opentofu.org/hashicorp/aws" = '+json.dumps(str(provider))+' }\n direct {}\n}\n')
+        environment={**os.environ,'TF_CLI_CONFIG_FILE':str(hostile),'TERRAFORM_CONFIG':str(hostile)}
+        actual_run=subprocess.run
+        actual_run([str(ROOT/'.tools/bin/tofu'),'-chdir='+str(probe),'validate','-no-color'],
+                   env=environment,capture_output=True,text=True,timeout=10)
+        self.assertTrue(marker.exists(),'hostile fixture did not exercise provider override loading')
+        marker.unlink()
+        client=lifecycle.TofuCLI(self.policy)
+        def execute(arguments,**kwargs):
+            return actual_run([str(ROOT/'.tools/bin/tofu'),'-chdir='+str(probe),'validate','-no-color'],**kwargs)
+        with mock.patch.dict(os.environ,environment), mock.patch.object(lifecycle.subprocess,'run',side_effect=execute):
+            with self.assertRaises(host.HostError):client.run('validate')
+        self.assertFalse(marker.exists())
     def test_removal_accepts_only_matching_launch_lookup_state_removal(self):
         current = state(True)
         plan = {'resource_changes': [
@@ -744,6 +878,36 @@ class PolicyBoundaryTests(unittest.TestCase):
         lifecycle.validate_plan(plan, present=False, state=current, deployment=DEPLOYMENT)
         plan['resource_changes'][2]['change']['before']['id'] = 'ami-unreviewed'
         with self.assertRaises(host.HostError): lifecycle.validate_plan(plan, present=False, state=current, deployment=DEPLOYMENT)
+
+    def test_exact_deleted_session_drift_reconciles_only_after_removal_started(self):
+        for addresses in (['aws_instance.host[0]'], ['aws_volume_attachment.data[0]'], sorted(lifecycle.SESSION_ADDRESSES)):
+            with self.subTest(addresses=addresses):
+                current = state(True)
+                inventory = lifecycle.resources(current)
+                plan = {'resource_drift': [
+                    {'address': address, 'change': {'actions': ['delete'], 'before': inventory[address], 'after': None}}
+                    for address in addresses], 'resource_changes': [
+                    {'address': address, 'change': {'actions': ['delete'], 'before': inventory[address], 'after': None}}
+                    for address in sorted(lifecycle.SESSION_ADDRESSES - set(addresses))]}
+                lifecycle.validate_plan(plan, present=False, state=current, deployment=DEPLOYMENT,
+                                        stopped_host=True, removal_started=True)
+                for kwargs in ({'stopped_host': True}, {'removal_started': True},
+                               {'stopped_host': True, 'removal_started': True, 'present': True}):
+                    options = {'present': False, **kwargs}
+                    with self.assertRaises(host.HostError):
+                        lifecycle.validate_plan(plan, state=current, deployment=DEPLOYMENT, **options)
+                for kind in ('before', 'after', 'duplicate', 'protected'):
+                    bad = copy.deepcopy(plan)
+                    first = bad['resource_drift'][0]
+                    if kind == 'before': first['change']['before']['id'] = 'unreviewed-id'
+                    elif kind == 'after': first['change']['after'] = {}
+                    elif kind == 'duplicate': bad['resource_drift'].append(copy.deepcopy(first))
+                    else:
+                        first['address'] = 'aws_ebs_volume.data'
+                        first['change']['before'] = inventory['aws_ebs_volume.data']
+                    with self.subTest(kind=kind), self.assertRaises(host.HostError):
+                        lifecycle.validate_plan(bad, present=False, state=current, deployment=DEPLOYMENT,
+                                                stopped_host=True, removal_started=True)
 
     def test_stopped_host_refresh_drift_is_narrow_and_retained_disk_drift_still_refused(self):
         current = state(True)

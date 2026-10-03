@@ -42,10 +42,23 @@ def without_data(state):
 
 def validate_s3_plan(plan, *, present, state, deployment, journal):
     inventory = resources(state)
-    reduced = {**plan, 'resource_changes': [value for value in plan.get('resource_changes', []) if value.get('address') != DATA_ADDRESS]}
+    data_drift = [value for value in plan.get('resource_drift', []) if value.get('address') == DATA_ADDRESS
+                  and value.get('change', {}).get('actions') != ['no-op']]
+    if data_drift:
+        change = data_drift[0].get('change', {})
+        if (len(data_drift) != 1 or present or journal.get('removal_started') is not True
+                or journal.get('host_stop_requested') is not True or not journal.get('receipts') or not journal.get('receipt_ids')
+                or change.get('actions') != ['delete'] or change.get('after') is not None
+                or change.get('before') != inventory.get(DATA_ADDRESS)
+                or not isinstance(change.get('before'), dict)
+                or change['before'].get('id') != deployment['data_volume_id']):
+            raise HostError('session data deletion drift lacks exact prior removal and receipt authority')
+        del inventory[DATA_ADDRESS]
+    reduced = {**plan, 'resource_changes': [value for value in plan.get('resource_changes', []) if value.get('address') != DATA_ADDRESS],
+               'resource_drift': [value for value in plan.get('resource_drift', []) if value.get('address') != DATA_ADDRESS]}
     expected_deployment = {**deployment, 'data_volume_id': None if present else deployment['data_volume_id']}
     validate_plan(reduced, present=present, state=without_data(state), deployment=expected_deployment,
-                  stopped_host=journal.get('host_stop_requested', False))
+                  stopped_host=journal.get('host_stop_requested', False), removal_started=journal.get('removal_started', False))
     changes = [value for value in plan.get('resource_changes', []) if value.get('address') == DATA_ADDRESS
                and value.get('change', {}).get('actions') != ['no-op']]
     expected = DATA_ADDRESS not in inventory if present else DATA_ADDRESS in inventory
@@ -114,12 +127,13 @@ class S3Session(OnDemandSession):
     def make_store(self):
         from minecraft_backup_store import S3Store
         return S3Store(self.deployment['backup_bucket_name'], self.deployment['region'], timeout=3000,
-                       environment_provider=self.aws.environment)
+                       environment_provider=self.aws.environment, executable_provider=self.aws.command_path)
 
     def verify_receipts(self, deployment, drain):
         from minecraft_backup import verify_stop_receipt
         return verify_stop_receipt(deployment, drain, self.directory, self.policy['bootstrap_sha256'],
-                                   store=self.store_factory(), protect=True, timeout=3000)
+                                   store=self.store_factory(), protect=True, timeout=3000,
+                                   fresh_drain=lambda:self.running_session().remote('host-drain-private'))
 
     def load_receipts(self, expected_ids):
         from minecraft_backup import load_current_receipt
@@ -299,6 +313,7 @@ class S3Session(OnDemandSession):
         digest = digest_file(path)
         started = dt.datetime.now(dt.timezone.utc)
         self.record(journal, 'applying', plan_sha256=digest, planned_state=current,
+                    removal_started=not present,
                     planned_changes=[value for value in plan.get('resource_changes', []) if value.get('address') in S3_ADDRESSES])
         if digest_file(path) != digest:
             raise HostError('S3-only saved plan changed before apply')
@@ -345,11 +360,7 @@ class S3Session(OnDemandSession):
         self.deployment = candidate
 
     def attest_runtime(self, session):
-        digest = self.policy['bootstrap_sha256']
-        session.execute_shell(f'/usr/local/sbin/minecraft-bootstrap stage --region {self.deployment["region"]} --bucket {self.deployment["backup_bucket_name"]} --sha256 {digest}', 'bootstrap-release')
-        observed = session.execute_shell(f'/usr/local/sbin/minecraft-bootstrap verify --sha256 {digest}', 'runtime-attestation')
-        if observed != {'runtime': 'installed', 'bootstrap_sha256': digest}:
-            raise HostError('installed runtime is not the pinned release required by recovery receipt')
+        return super().attest_runtime(session)
 
     def verify_removed(self, journal):
         source = journal['source_deployment']
@@ -381,7 +392,7 @@ class S3Session(OnDemandSession):
                 self.record(journal, 'removed', receipts=receipts, receipt_ids=self.deployment['recovery_receipt_ids'])
             if journal['phase'] in ('begun', 'receipts-verified', 'stopping-host', 'host-stopped', 'applying') and 'aws_instance.host[0]' in resources(self.tofu.state()):
                 session = self.running_session()
-                state = session.host_state()
+                state = self.removal_host_state(journal, session)
                 self.state = state
                 if state == 'running':
                     session.wait_ssm()
@@ -401,6 +412,8 @@ class S3Session(OnDemandSession):
                     session.wait_host('stopped', 'stopping', previous='running')
                 elif state == 'stopping' and journal.get('host_stop_requested'):
                     session.wait_host('stopped', 'stopping')
+                elif state in ('absent', 'terminated') and journal.get('removal_started') is True and journal.get('host_stop_requested') is True and journal.get('receipts'):
+                    pass  # exact drift gate and final independent disk proof still apply
                 elif state != 'stopped' or not journal.get('host_stop_requested') or not journal.get('receipts'):
                     raise HostError('source lacks verified receipt and graceful stop evidence')
                 # Re-read exact selected versions outside the disk on every resumed delete.

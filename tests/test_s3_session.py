@@ -12,7 +12,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 sys.path.insert(0, str(ROOT / 'tests'))
-from test_on_demand_host import DEPLOYMENT, HOST_ATTRIBUTES, ATTACHMENT_ATTRIBUTES, DIGEST, HOST_ID, VOLUME_ID, state, FakeAWS, FakeSession
+from test_on_demand_host import DEPLOYMENT, HOST_ATTRIBUTES, ATTACHMENT_ATTRIBUTES, DIGEST, HOST_ID, VOLUME_ID, state, FakeAWS, FakeSession, pin_fixture_tools
 import minecraft_host as host
 import minecraft_on_demand as base
 import minecraft_s3_session as s3
@@ -22,8 +22,9 @@ NEW_HOST = 'i-1123456789abcdef0'
 NEW_VOLUME = 'vol-1123456789abcdef0'
 DATA = {'id': VOLUME_ID, 'encrypted': True, 'type': 'gp3', 'size': 5, 'availability_zone': 'us-west-2a', 'snapshot_id': ''}
 DRAIN = {'draining': True, 'instances': {'survival': {'instance': 'survival', 'application': 'stopped', 'backup': 'complete'}},
+         'boot_id':'controlled-source-boot',
          'recovery': {'survival': {'session': 'source-session', 'manifest_sha256': DIGEST, 'recovery_point': 'c' * 64}}}
-RECEIPT = {'receipt_id': RECEIPT_ID, 'instance': 'survival', 'recovery_point': 'c' * 64, 'bootstrap_sha256': DIGEST,
+RECEIPT = {'boot_id':'controlled-source-boot', 'receipt_id': RECEIPT_ID, 'instance': 'survival', 'recovery_point': 'c' * 64, 'bootstrap_sha256': DIGEST,
            'required_capacity_bytes': 2 * 1024 ** 3, 'source': {'volume_id': VOLUME_ID, 'filesystem_uuid': DEPLOYMENT['data_filesystem_uuid'],
            'account_id': DEPLOYMENT['account_id'], 'region': DEPLOYMENT['region'], 'backup_bucket_name': DEPLOYMENT['backup_bucket_name']}}
 RECEIPTS = {'survival': {'receipt_id': RECEIPT_ID, 'receipt': RECEIPT, 'selection': {'receipt_id': RECEIPT_ID, 'revision': {'version_id': 'selected-version'}}}}
@@ -130,6 +131,9 @@ class S3SessionTests(unittest.TestCase):
                        'backend': {'bucket': 'private-state', 'key': 'state', 'region': 'us-west-2'},
                        'private_inputs_sha256': __import__('hashlib').sha256(self.operator.read_bytes()+b'\0'+self.secret.read_bytes()).hexdigest()}
         self.patch_source = mock.patch.object(base, 'source_digest', return_value=DIGEST); self.patch_source.start(); self.addCleanup(self.patch_source.stop)
+        pin_fixture_tools(self.root,self.policy)
+        (self.root/'scripts').mkdir()
+        (self.root/'scripts/minecraft_bootstrap_release.py').write_bytes((ROOT/'scripts/minecraft_bootstrap_release.py').read_bytes())
         self.patch_remote = mock.patch.object(s3, 'HostSession', S3Remote); self.patch_remote.start(); self.addCleanup(self.patch_remote.stop)
         self.patch_running = mock.patch.object(base, 'HostSession', S3Remote); self.patch_running.start(); self.addCleanup(self.patch_running.stop)
         S3Remote.instances = []; S3Remote.failure = None; S3Remote.host_state_value = 'running'
@@ -137,6 +141,7 @@ class S3SessionTests(unittest.TestCase):
     def create(self, present=True):
         self.tofu = S3Tofu(present)
         self.aws = S3AWS()
+        self.aws.cli_path=self.policy['aws_cli_path']
         self.path = self.root / 'deployment.json'
         base.save_private(self.path, self.tofu.output)
         def verify(deployment, drain):
@@ -226,6 +231,51 @@ class S3SessionTests(unittest.TestCase):
         self.assertEqual(len(self.verifications), captured)
         self.assertEqual(self.tofu.applies, 1)
         self.assertEqual(session.deployment['data_volume_id'], VOLUME_ID)
+
+    def test_interrupted_three_resource_delete_drift_resumes_with_protection_and_disk_proof(self):
+        session=self.create(True); self.tofu.fail_apply=True
+        with self.assertRaises(host.HostError):session.stop()
+        self.assertTrue(json.loads(session.journal_path.read_text())['removal_started'])
+        self.tofu.fail_apply=False
+        before=base.resources(self.tofu.current)
+        original=self.tofu.plan
+        def refreshed(path,present,**kwargs):
+            original(path,present,**kwargs)
+            return {'resource_drift':[{'address':address,'change':{'actions':['delete'],'before':before[address],'after':None}}
+                    for address in sorted(s3.S3_ADDRESSES)],'resource_changes':[]}
+        self.tofu.plan=refreshed
+        calls=len(self.loads)
+        result=session.stop()
+        self.assertEqual(result['data_disk'],'absent')
+        self.assertEqual(self.tofu.applies,2)
+        self.assertGreater(len(self.loads),calls)
+        self.assertEqual(json.loads(session.journal_path.read_text())['phase'],'complete')
+
+    def test_data_deletion_drift_requires_exact_prior_intent_stop_and_receipts(self):
+        session=self.create(True)
+        inventory=base.resources(self.tofu.current)
+        plan={'resource_drift':[{'address':address,'change':{'actions':['delete'],'before':inventory[address],'after':None}}
+              for address in sorted(s3.S3_ADDRESSES)],'resource_changes':[]}
+        journal={'removal_started':True,'host_stop_requested':True,'receipts':copy.deepcopy(RECEIPTS),'receipt_ids':{'survival':RECEIPT_ID}}
+        s3.validate_s3_plan(plan,present=False,state=self.tofu.current,deployment=session.deployment,journal=journal)
+        for field,value in (('removal_started',False),('host_stop_requested',False),('receipts',{})):
+            with self.subTest(field=field),self.assertRaises(host.HostError):
+                s3.validate_s3_plan(plan,present=False,state=self.tofu.current,deployment=session.deployment,journal={**journal,field:value})
+        changed=copy.deepcopy(plan)
+        next(row for row in changed['resource_drift'] if row['address']==s3.DATA_ADDRESS)['change']['before']['id']=NEW_VOLUME
+        with self.assertRaises(host.HostError):s3.validate_s3_plan(changed,present=False,state=self.tofu.current,deployment=session.deployment,journal=journal)
+
+    def test_fresh_drain_callback_queries_the_current_same_host_and_store_uses_execution_pin(self):
+        session=self.create(True)
+        with mock.patch('minecraft_backup.verify_stop_receipt',return_value=copy.deepcopy(RECEIPTS)) as verify:
+            session.verify_receipts(session.deployment,DRAIN)
+            callback=verify.call_args.kwargs['fresh_drain']
+            self.assertEqual(callback(),DRAIN); self.assertEqual(callback(),DRAIN)
+        self.assertEqual(sum(action=='host-drain-private' for remote in S3Remote.instances for action,_ in remote.commands),2)
+        with mock.patch('minecraft_backup_store.S3Store') as store:
+            session.make_store()
+            self.assertEqual(store.call_args.kwargs['executable_provider'],self.aws.command_path)
+            self.assertEqual(store.call_args.kwargs['environment_provider'],self.aws.environment)
 
     def test_protection_failure_after_plan_refuses_the_first_removal_apply(self):
         session = self.create(True)
