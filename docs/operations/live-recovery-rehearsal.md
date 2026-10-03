@@ -485,7 +485,7 @@ if ! jq -e '
 
 Configuration proves that the rule is installed, not that S3 has carried out either action. For each action, first look for a previously recorded, safe candidate: an exact noncurrent version ID with its successor version or delete-marker ID and successor creation time, or an already abandoned multipart upload with its exact upload ID and initiation time. Save successful `list-object-versions --prefix <exact-key>` or `list-multipart-uploads --prefix <exact-key>` output before waiting. Do not select an active production upload or infer noncurrent age from the old version's `LastModified`. Record both candidates in a mode-0600 `$evidence_dir/lifecycle-targets.json` with the source `bucket`, `noncurrent` fields `key`, `version_id`, `successor_version_id`, and `successor_created_at`, and `multipart` fields `key`, `upload_id`, and `initiated_at`. A candidate that was not observed before expiry cannot prove an actual lifecycle deletion.
 
-If either safe candidate is unavailable, obtain separate concrete approval before creating a complete probe in the **retained source bucket**, outside `instances/`. Add the approval reference, unique `lifecycle-probe/<run-id>/` prefix, exact allowed S3 write/list/delete/abort actions, cost bound, S3 eligibility timestamps and cleanup of exact version and upload IDs to `authorization.txt`. The recovery role must not gain source write access. A probe adds S3 request and object storage charges, including one 5 MiB multipart part until S3 aborts it; use [current S3 pricing](https://aws.amazon.com/s3/pricing/) for the approved estimate. Do not keep EC2, EBS, or the temporary bucket for the 14-day observation. If this extra scope is not approved, leave actual expiry **pending** and do not claim Issue #8 complete.
+If either safe candidate is unavailable, obtain separate concrete approval before creating a complete probe in the **retained source bucket**, outside `instances/`. Add the approval reference, unique `lifecycle-probe/<run-id>/` prefix, exact allowed S3 write/list/delete/abort actions, cost bound, S3 eligibility timestamps and cleanup of exact version and upload IDs to `authorization.txt`. The recovery role must not gain source write access. A probe adds S3 request and object storage charges, including one 5 MiB multipart part until S3 aborts it; use [current S3 pricing](https://aws.amazon.com/s3/pricing/) for the approved estimate. Do not keep EC2, EBS, or the temporary bucket for the 14-day observation. If this extra scope is not approved, leave actual expiry **not performed**. The original October 3 issue #8 authorization excludes this optional lifecycle probe, so it does not block that rehearsal's completion. Issue #24 retains its separate sole-S3 retention criteria.
 
 For an approved probe, use a fresh prefix and save every response privately. The two writes to the same tiny key make the first exact version noncurrent; the incomplete upload has one part and is never completed or manually aborted before the observation:
 
@@ -675,3 +675,21 @@ Record these fields:
 ### Live results
 
 Historical status on 2026-09-18: no deployed run had been completed, and issue #8 was blocked by issue #7. Keep subsequent measured results and remaining checks in issue #8 and their private evidence records; the October 3 removal of the recovery time limit does not turn an unperformed check into a pass.
+
+
+### Completed recovery proof, 2026-10-03
+
+[Issue #8](https://github.com/CraigDevJohnson/minecraft/issues/8) records completed retained-EBS stop/start and host replacement, isolated S3 restore and update, then fresh temporary host/root/data replacement and another guarded restore. Generation two restored the reviewed `62da016` runtime and selected source point. All 15 known checkpoint hashes, including 11 player files, matched. The final 233,153,696-byte temporary backup independently passed its archive checksum and all 249 file inventory entries.
+
+| Generation-two measurement | Actual result |
+| --- | --- |
+| Recovery to checkpoint confirmation | 2,289.6 seconds, 38.16 minutes |
+| Mandatory monotonic provenance wait | 904.3 seconds |
+| Remote restore | 7.34 seconds |
+| Remote ready start | 46.29 seconds |
+| Remote clean stop and backup | 38.31 seconds |
+| Final temporary cleanup apply | 36.0 seconds |
+
+Temporary S3 write denial produced a nonzero clean stop, visible failed backup, blocked restart and blocked host-drain certification. Restoring only the original temporary write policy allowed the pending backup and drain to complete without restarting the game. Final cleanup removed the exact approved temporary resources. Independent AWS checks confirmed host termination, root/data disk deletion, absent temporary bucket and versions, security group, profile, role and inline policies; the dedicated recovery state was empty. Both family survival and creative remained running, their disks unchanged, and the selected source marker/archive exact and current versions, ETags and sizes preserved.
+
+Private evidence index `gen2-evidence-index.json` contains 23 verified files, SHA-256 `6ded0e1c3c9012f68e4c39668231c3e4d36c4b77a73ec9f7ca8aec0224761c0a`. Resource IDs, player paths and raw commands remain in the private evidence directory. Household demonstrations are resolved by owner acceptance rather than claimed as tests performed. The optional source-bucket lifecycle probe was excluded from this authorization; no 14-day observation is claimed. This proof does not activate the separate on-demand or sole-S3 modes.
