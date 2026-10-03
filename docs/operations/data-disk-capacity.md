@@ -353,4 +353,25 @@ Keep `deployment-before-shrink.json` until no retained recovery point names the 
 
 ## Evidence
 
-No live replacement or grow has been recorded. After each one, record here, with no IDs: the date and revision; the phase times for backup, apply, provenance wait, zero-fill, zero check, install, restore, and start; the total downtime; the archive and uncompressed bytes; and the disk use before and after.
+### Replacement on 2026-10-03
+
+The family deployment migrated from 40 GiB to 5 GiB using PR #25 at `c19afcc`, merged as `62da016`. The [migration record](https://github.com/CraigDevJohnson/minecraft/issues/22#issuecomment-5967187882) and [restore evidence](https://github.com/CraigDevJohnson/minecraft/issues/8#issuecomment-5967188290) record these results. Private inventory and evidence files hold the resource identities, filesystem UUIDs, recovery-point selection, state copies, and checkpoint values.
+
+| Phase | Recorded result |
+| --- | --- |
+| Final backup and drain | 39 seconds; completed backup; host stopped and hostname parked |
+| Saved-plan apply | 70 seconds; new encrypted 5 GiB disk and replacement host; old disk detached and unmodified |
+| Provenance wait | 15 minutes; source, attachment, CloudTrail, and first-setup checks passed |
+| Zero-fill | 40 seconds |
+| Initialization | 42 seconds; new filesystem identity |
+| S3 restore | 7 seconds; 233 MB archive and about 264 MB extracted |
+| Start to ready | 54 seconds; data disk 9 percent used |
+| Total family downtime | About 25 minutes |
+
+World command-storage checkpoints, allowlist and operator file hashes, the Floodgate key hash, and the content revision matched after restore. Both game protocols answered through the hostname. The first completed backup from the new disk recorded its new source identity. A subsequent stopped-host plan reported no changes, and the next start updated DNS to the new address.
+
+Craig separately approved retiring the old disk. The [retirement record](https://github.com/CraigDevJohnson/minecraft/issues/22#issuecomment-5967740514) confirms it was detached, matched the recorded tags, and was absent after deletion. At that check, the stopped deployment retained only its 20 GiB root disk, 5 GiB data disk, and S3 storage. Preserve the old source deployment record while any retained recovery point still names the old filesystem.
+
+The linked summaries do not report separate zero-check or runtime-install durations, or a measured pre-migration disk-use percentage. Those timings are not inferred from the total downtime. This family migration is partial evidence for #8; the isolated rehearsal, failed-backup visibility, and isolated update recovery remain open. Real family-device and player-inventory validation remains on #9.
+
+No live grow has been recorded. Future replacements and grows should add their revision, phase times, total downtime, archive and extracted bytes, and disk use before and after here, without private identifiers.
