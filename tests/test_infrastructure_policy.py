@@ -21,6 +21,11 @@ def resource_blocks(directory):
 
 
 class ProtectedInfrastructurePolicyTests(unittest.TestCase):
+    def test_removal_does_not_lookup_a_launch_only_ami(self):
+        source = (INFRA / 'host.tf').read_text()
+        self.assertRegex(source, r'data "aws_ami" "host" \{\s*count\s*=\s*var\.session_present\s*\?\s*1\s*:\s*0')
+        self.assertRegex(resource_blocks(INFRA)['aws_instance.host'], r'ami\s*=\s*data\.aws_ami\.host\[0\]\.id')
+
     def test_retained_resources_refuse_destroy(self):
         main = resource_blocks(INFRA)
         state = resource_blocks(INFRA / "state-bootstrap")
@@ -126,7 +131,7 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
         self.assertRegex(host, r"user_data_base64\s*=\s*base64gzip\(join\(")
         self.assertIn("../scripts/host-bootstrap.sh.tftpl", host)
         self.assertIn("../scripts/minecraft_storage.py", host)
-        self.assertRegex(host, r"data_volume_id\s*=\s*aws_ebs_volume.data.id\b")
+        self.assertRegex(host, r"data_volume_id\s*=\s*local.data_volume_id\b")
         self.assertRegex(host, r"data_filesystem_uuid\s*=\s*var.data_filesystem_uuid\b")
 
     def test_state_backends_require_encryption_and_native_locking(self):

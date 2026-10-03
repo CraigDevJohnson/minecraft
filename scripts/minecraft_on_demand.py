@@ -31,7 +31,21 @@ def digest_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def canonical_infra_root(path: Path) -> Path:
+    """Bind the executed root to the exact repository directory that is hashed."""
+    try:
+        if not path.is_absolute() or path.name != 'infra' or any(part.is_symlink() for part in [path, *path.parents]):
+            raise HostError('lifecycle must execute the canonical reviewed infra directory without symlinks')
+        resolved = path.resolve(strict=True)
+        if resolved != path or not resolved.is_dir():
+            raise HostError('lifecycle infrastructure directory is not canonical')
+        return resolved
+    except OSError as exc:
+        raise HostError('cannot establish canonical lifecycle infrastructure ownership') from exc
+
+
 def source_digest(root: Path) -> str:
+    root = canonical_infra_root(root / 'infra').parent
     paths = sorted(path for pattern in ('*.tf', '*.tf.json', '*.tofu', '*.tofu.json') for path in (root / 'infra').glob(pattern)) + [root / 'infra/.terraform.lock.hcl']
     paths += [root / 'scripts' / name for name in ('host-bootstrap.sh.tftpl', 'on-demand-bootstrap.sh.tftpl',
                                                   'minecraft_storage.py', 'install_aws_cli.sh',
@@ -108,7 +122,7 @@ def load_policy(path: Path, expected_sha256: str, deployment: dict) -> dict:
         for name in ('infra_root', 'variables_file', 'operator_file', 'secret_file', 'journal_dir'):
             if not isinstance(policy[name], str) or not Path(policy[name]).is_absolute():
                 raise HostError('lifecycle paths must be explicit absolute paths')
-        root = Path(policy['infra_root'])
+        root = canonical_infra_root(Path(policy['infra_root']))
         if (root / '.terraform').is_symlink() or not root.is_dir():
             raise HostError('lifecycle infrastructure root is invalid')
         if set(policy['backend']) != {'bucket', 'key', 'region'} or any(not isinstance(value, str) or not value for value in policy['backend'].values()):
@@ -223,6 +237,10 @@ def validate_plan(plan: dict, *, present: bool, state: dict, deployment: dict, s
         actions = resource.get('change', {}).get('actions')
         if actions == ['no-op'] or resource.get('mode') == 'data' and actions == ['read']:
             continue
+        if (not present and resource.get('mode') == 'data' and resource.get('address') in ('data.aws_ami.host', 'data.aws_ami.host[0]')
+                and actions == ['delete'] and resource.get('change', {}).get('before', {}).get('id') == deployment['ami_id']):
+            # Removing a launch-only lookup from state deletes no AWS image.
+            continue
         address = resource.get('address')
         if address not in SESSION_ADDRESSES or address in seen or actions != (['create'] if present else ['delete']):
             raise HostError('saved plan includes changes outside the approved session policy')
@@ -264,10 +282,16 @@ def validate_plan(plan: dict, *, present: bool, state: dict, deployment: dict, s
 class TofuCLI:
     def __init__(self, policy: dict):
         self.policy = policy
-        self.root = Path(policy['infra_root'])
+        self.root = canonical_infra_root(Path(policy['infra_root']))
+        metadata = self.root.stat()
+        self.root_identity = (metadata.st_dev, metadata.st_ino)
         self.binary = self.root.parent / '.tools/bin/tofu'
 
     def run(self, *arguments: str, timeout=600) -> dict | None:
+        root = canonical_infra_root(self.root)
+        metadata = root.stat()
+        if (metadata.st_dev, metadata.st_ino) != self.root_identity or str(root) != self.policy['infra_root']:
+            raise HostError('lifecycle infrastructure directory identity changed before execution')
         if digest_file(Path(self.policy['variables_file'])) != self.policy['variables_sha256'] or source_digest(self.root.parent) != self.policy['source_sha256']:
             raise HostError('reviewed lifecycle source or variables changed before infrastructure execution')
         environment = {key: value for key, value in os.environ.items()
@@ -596,9 +620,14 @@ class OnDemandSession:
         source = journal['source_deployment']
         host = resources(journal['initial_state']).get('aws_instance.host[0]')
         if host:
-            response = self.aws.run('ec2', 'describe-instances', '--instance-ids', host['id'], timeout=30)
-            observed = [value for reservation in response.get('Reservations', []) for value in reservation.get('Instances', [])]
-            if len(observed) != 1 or observed[0].get('InstanceId') != host['id'] or observed[0].get('State', {}).get('Name') != 'terminated':
+            response = self.aws.run('ec2', 'describe-instances', '--filters', json.dumps([{'Name': 'instance-id', 'Values': [host['id']]}]), timeout=30)
+            reservations = response.get('Reservations')
+            if not isinstance(reservations, list) or any(not isinstance(value, dict) or not isinstance(value.get('Instances'), list) for value in reservations):
+                raise HostError('session host removal returned invalid independent EC2 evidence')
+            observed = [value for reservation in reservations for value in reservation['Instances']]
+            if any(not isinstance(value, dict) for value in observed):
+                raise HostError('session host removal returned invalid independent EC2 evidence')
+            if observed and (len(observed) != 1 or observed[0].get('InstanceId') != host['id'] or observed[0].get('State', {}).get('Name') != 'terminated'):
                 raise HostError('session host termination lacks independent EC2 proof')
             roots = host.get('root_block_device', [])
             if len(roots) != 1 or not roots[0].get('volume_id'):

@@ -1,4 +1,5 @@
 data "aws_ami" "host" {
+  count  = var.session_present ? 1 : 0
   owners = [var.ami_owner_account_id]
   filter {
     name   = "image-id"
@@ -32,9 +33,18 @@ moved {
   to   = aws_volume_attachment.data[0]
 }
 
+locals {
+  data_volume_id = var.data_ownership == "retained" ? aws_ebs_volume.data[0].id : try(aws_ebs_volume.session_data[0].id, null)
+}
+
+moved {
+  from = aws_ebs_volume.data
+  to   = aws_ebs_volume.data[0]
+}
+
 resource "aws_instance" "host" {
   count                       = var.session_present ? 1 : 0
-  ami                         = data.aws_ami.host.id
+  ami                         = data.aws_ami.host[0].id
   instance_type               = "m7g.large"
   availability_zone           = var.availability_zone
   subnet_id                   = aws_subnet.public.id
@@ -45,7 +55,7 @@ resource "aws_instance" "host" {
   user_data_replace_on_change = true
   user_data_base64 = base64gzip(join("", [templatefile("${path.module}/../scripts/host-bootstrap.sh.tftpl", {
     storage_script_base64 = filebase64("${path.module}/../scripts/minecraft_storage.py")
-    data_volume_id        = aws_ebs_volume.data.id
+    data_volume_id        = local.data_volume_id
     data_filesystem_uuid  = var.data_filesystem_uuid
     }), var.lifecycle_mode == "retained-host" ? "" : templatefile("${path.module}/../scripts/on-demand-bootstrap.sh.tftpl", {
     cli_installer_base64  = filebase64("${path.module}/../scripts/install_aws_cli.sh")
@@ -85,6 +95,7 @@ resource "aws_instance" "host" {
 }
 
 resource "aws_ebs_volume" "data" {
+  count             = var.data_ownership == "retained" ? 1 : 0
   availability_zone = var.availability_zone
   encrypted         = true
   type              = "gp3"
@@ -98,8 +109,21 @@ resource "aws_ebs_volume" "data" {
 resource "aws_volume_attachment" "data" {
   count        = var.session_present ? 1 : 0
   device_name  = "/dev/sdf"
-  volume_id    = aws_ebs_volume.data.id
+  volume_id    = local.data_volume_id
   instance_id  = aws_instance.host[0].id
   force_detach = false
   skip_destroy = false
+}
+
+# Import/move the existing disk here only through the separately reviewed no-change
+# ownership/protection migration. The retained address above remains protected.
+resource "aws_ebs_volume" "session_data" {
+  count             = var.data_ownership == "session" && var.session_present ? 1 : 0
+  availability_zone = var.availability_zone
+  encrypted         = true
+  type              = "gp3"
+  size              = var.data_volume_size_gib
+  # Preserve physical attributes/tags during ownership migration; the address and
+  # reviewed controller policy carry session ownership, not a destructive retag.
+  tags = { Name = "${var.resource_prefix}-data", Purpose = "retained-instance-data" }
 }

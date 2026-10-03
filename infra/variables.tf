@@ -230,3 +230,17 @@ variable "data_ownership" {
     error_message = "Session data ownership is allowed only in s3-only mode after reviewed migration."
   }
 }
+
+variable "recovery_receipt_ids" {
+  description = "Exact independently verified and durable current recovery selections. S3-only off-state requires one receipt for every configured instance; never catalog latest."
+  type        = map(string)
+  default     = {}
+  validation {
+    condition     = alltrue([for id in values(var.recovery_receipt_ids) : can(regex("^[0-9a-f]{64}$", id))])
+    error_message = "Each recovery receipt ID must be a lowercase SHA-256."
+  }
+  validation {
+    condition     = var.lifecycle_mode != "s3-only" || var.session_present || toset(keys(var.recovery_receipt_ids)) == var.instance_ids
+    error_message = "S3-only absent-data handoff requires a verified receipt for every configured instance."
+  }
+}

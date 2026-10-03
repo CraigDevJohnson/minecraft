@@ -46,7 +46,7 @@ run "retained_encrypted_data_and_replaceable_root" {
   command = plan
 
   assert {
-    condition     = aws_ebs_volume.data.encrypted && aws_ebs_volume.data.type == "gp3" && aws_ebs_volume.data.size == 5
+    condition     = aws_ebs_volume.data[0].encrypted && aws_ebs_volume.data[0].type == "gp3" && aws_ebs_volume.data[0].size == 5
     error_message = "The retained data disk must be encrypted gp3 at the configured 5 GiB."
   }
 
@@ -67,7 +67,7 @@ run "retained_data_disk_size_follows_the_private_input" {
     data_volume_size_gib = 8
   }
   assert {
-    condition     = aws_ebs_volume.data.size == 8 && aws_instance.host[0].root_block_device[0].volume_size == 20
+    condition     = aws_ebs_volume.data[0].size == 8 && aws_instance.host[0].root_block_device[0].volume_size == 20
     error_message = "The retained data disk must take its size from data_volume_size_gib and leave the root disk at 20 GiB."
   }
 }
@@ -459,7 +459,7 @@ run "on_demand_off_preserves_protected_infrastructure" {
     bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   }
   assert {
-    condition     = length(aws_instance.host) == 0 && length(aws_volume_attachment.data) == 0 && aws_ebs_volume.data.size == 5 && aws_ebs_volume.data.encrypted
+    condition     = length(data.aws_ami.host) == 0 && length(aws_instance.host) == 0 && length(aws_volume_attachment.data) == 0 && aws_ebs_volume.data[0].size == 5 && aws_ebs_volume.data[0].encrypted
     error_message = "Off-state removes only session host/attachment and retains the encrypted protected disk."
   }
   assert {
@@ -496,9 +496,57 @@ run "default_bootstrap_bytes_remain_identical" {
   assert {
     condition = aws_instance.host[0].user_data_base64 == base64gzip(templatefile("${path.module}/../scripts/host-bootstrap.sh.tftpl", {
       storage_script_base64 = filebase64("${path.module}/../scripts/minecraft_storage.py")
-      data_volume_id        = aws_ebs_volume.data.id
+      data_volume_id        = aws_ebs_volume.data[0].id
       data_filesystem_uuid  = var.data_filesystem_uuid
     }))
     error_message = "Retained-host defaults must preserve exact existing bootstrap bytes and avoid an unintended host replacement."
+  }
+}
+
+run "s3_only_off_has_no_session_ebs_and_keeps_foundation" {
+  command = plan
+  variables {
+    lifecycle_mode       = "s3-only"
+    data_ownership       = "session"
+    session_present      = false
+    bootstrap_sha256     = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    recovery_receipt_ids = { survival = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+  }
+  assert {
+    condition     = length(aws_instance.host) == 0 && length(aws_volume_attachment.data) == 0 && length(aws_ebs_volume.data) == 0 && length(aws_ebs_volume.session_data) == 0
+    error_message = "S3-only off-state must own no session host/root/data EBS."
+  }
+  assert {
+    condition     = output.deployment.schema_version == 2 && output.deployment.host_id == null && output.deployment.data_volume_id == null && output.deployment.data_filesystem_uuid == null && output.deployment.recovery_receipt_ids == tomap(var.recovery_receipt_ids)
+    error_message = "Absent data requires an explicit receipt-bound versioned handoff."
+  }
+  assert {
+    condition     = aws_s3_bucket.backups.bucket == var.backup_bucket_name && aws_iam_role.host.permissions_boundary == var.host_permissions_boundary_arn && aws_subnet.public.availability_zone == var.availability_zone
+    error_message = "Session removal must retain backups, bounded host role and networking."
+  }
+}
+
+run "s3_only_requires_receipts_before_absent_data" {
+  command = plan
+  variables {
+    lifecycle_mode   = "s3-only"
+    data_ownership   = "session"
+    session_present  = false
+    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+  expect_failures = [var.recovery_receipt_ids]
+}
+
+run "s3_only_keeps_retained_protection_until_ownership_migrates" {
+  command = plan
+  variables {
+    lifecycle_mode   = "s3-only"
+    data_ownership   = "retained"
+    session_present  = true
+    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+  assert {
+    condition     = length(aws_ebs_volume.data) == 1 && length(aws_ebs_volume.session_data) == 0 && aws_ebs_volume.data[0].encrypted
+    error_message = "Before explicit ownership migration, the original data disk remains retained/protected."
   }
 }
