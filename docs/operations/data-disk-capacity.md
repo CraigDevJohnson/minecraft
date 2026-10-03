@@ -196,14 +196,20 @@ cp -R "$repo_dir/infra" "$repo_dir/scripts" "$private_dir/infrastructure/" || ex
   -input=false -lockfile=readonly -backend-config="$private_dir/infrastructure.backend.hcl" || exit 1
 ```
 
-In the private tfvars, set `data_volume_size_gib` to the new size and `data_filesystem_uuid` to the new UUID. Show Craig the dry run. With his approval of this state change, remove the old volume from state:
+Before changing state, prove this revision plans at all. With the private tfvars still naming the old size and UUID, run an unsaved plan. It must succeed and may show only the host replacement and, for a deployment still on an Elastic IP, the Elastic IP destroys:
+
+```sh
+"$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" plan -var-file="$private_dir/infrastructure.tfvars" || exit 1
+```
+
+Then, in the private tfvars, set `data_volume_size_gib` to the new size and `data_filesystem_uuid` to the new UUID. Show Craig the dry run. With his approval of this state change, remove the old volume from state. From here until a saved plan is approved, any failure is handled by [re-importing the old volume](#roll-back):
 
 ```sh
 "$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" state rm -dry-run aws_ebs_volume.data
 "$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" state rm aws_ebs_volume.data
 ```
 
-Make the saved plan. `-replace` guarantees that this apply also creates the host, which the first-setup zero-fill rule requires:
+Make the saved plan. `-replace=aws_instance.host` is mandatory. The new volume's ID is unknown at plan time, so without it the provider plans the host as an in-place update: the old host, launched without an auto-assigned address, would lose its Elastic IP and its reach. An in-place host change is a stop. The flag also makes this apply create the host, which the first-setup zero-fill rule requires:
 
 ```sh
 "$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" plan \
@@ -213,16 +219,25 @@ Make the saved plan. `-replace` guarantees that this apply also creates the host
   "$private_dir/disk-replacement.tfplan" >"$private_dir/disk-replacement-plan.txt" || exit 1
 shasum -a 256 "$private_dir/disk-replacement.tfplan" >"$private_dir/disk-replacement.tfplan.sha256"
 grep -n "$old_volume_id" "$private_dir/disk-replacement-plan.txt"
+"$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" show -json "$private_dir/disk-replacement.tfplan" |
+  jq -e '[.resource_changes[] | select(.address == "aws_instance.host")] | length == 1
+    and .[0].change.actions == ["delete","create"]
+    and .[0].change.after.associate_public_ip_address == true
+    and .[0].change.after.root_block_device[0].volume_size == 20' || exit 1
 ```
+
+The text plan hides attributes that do not change, including the public-address flag while an Elastic IP is still attached, so the JSON check above is the gate for the new host. Do not save that JSON; it contains sensitive values.
 
 The plan must show exactly:
 
 - `aws_ebs_volume.data` created: encrypted gp3 at the new size;
-- `aws_instance.host` replaced, with `associate_public_ip_address = true` and a 20 GiB root disk;
+- `aws_instance.host` replaced, never updated in place. The JSON check above proves its auto-assigned address and 20 GiB root disk;
 - `aws_volume_attachment.data` replaced. Its prior `volume_id` is the old volume, and `grep` must find the old ID nowhere else;
 - for a deployment whose state still holds the Elastic IP, `aws_eip_association.host` and `aws_eip.host` destroyed.
 
 Anything else is a stop: an S3, IAM, network, or budget change, any other destroy, or any resource that creates, updates, or destroys the old volume. If Craig does not approve the plan, [re-import the old volume](#roll-back) at once.
+
+For a deployment that still has an Elastic IP, park the hostname before the apply releases that address. With `public_hostname` and `cloudflare_zone_id` added to a private copy of the old deployment output, the `dns` command parks the stopped host and must print `dns: parked` or `dns: current`.
 
 **7. Apply** only the saved plan that Craig approved, in full and with no `-target`, recording its window for the zero-fill check:
 
@@ -241,8 +256,10 @@ aws ec2 describe-volumes --volume-ids "$old_volume_id" \
 
 The old volume must be `available` at its old size with `0` attachments. The new output must name a new `host_id`, a `data_volume_id` other than `$old_volume_id`, and the new UUID. The apply leaves the new host running at a new address, so with a public hostname point the record at it now:
 
+`cloudflare_env` is the private secret-reference file from [host commands](host-commands.md#cloudflare-token).
+
 ```sh
-CLOUDFLARE_API_TOKEN="$(security find-generic-password -s minecraft-cloudflare-dns -w)" \
+op run --env-file="$cloudflare_env" -- \
   python3 scripts/minecraft_host.py --deployment "$deployment" dns
 ```
 
@@ -274,7 +291,7 @@ sudo /usr/bin/time -p -o /root/restore-time.txt /usr/local/sbin/minecraft-restor
 A failure before publication leaves the target absent: fix the cause and rerun this step before considering rollback. Then start from the operator computer, with the token when the deployment has a hostname:
 
 ```sh
-CLOUDFLARE_API_TOKEN="$(security find-generic-password -s minecraft-cloudflare-dns -w)" \
+op run --env-file="$cloudflare_env" -- \
   python3 scripts/minecraft_host.py --deployment "$deployment" start --instance survival
 ```
 
@@ -326,11 +343,11 @@ Keep `deployment-before-shrink.json` until no retained recovery point names the 
 
   A new plan must show no change to the volume. It can still replace the host, because the revision changed the bootstrap. Do not apply that without separate approval; the rollback does not need it.
 - **A failure after the apply, before the family plays on the new disk.**
-  1. Stop the host if it runs. If a session started, drain it with the `stop` command first.
+  1. Stop the host if it runs. If a session started, drain it with the `stop` command first. A host without an installed runtime cannot give drain evidence, so stop it directly with `aws ec2 stop-instances --instance-ids "$(jq -er .host_id "$deployment")"` and wait for `stopped`. Then run the `dns` command with the token, which parks the record.
   2. Run `tofu state rm aws_ebs_volume.data`, which drops the new volume from state, then the import above.
   3. Restore the old UUID and size in the private tfvars.
   4. Plan. Only the host and attachment replacements may appear, and the imported volume must show no change. Apply the saved plan that Craig approved.
-  5. Cloud-init mounts the old filesystem without intervention. Never zero-fill it. Reinstall the runtime, restage the private configuration with the refreshed output, start, and verify the checkpoint.
+  5. Cloud-init mounts the old filesystem without intervention. Never zero-fill it. Reinstall the runtime, restage the private configuration with the refreshed output, start with the token so the record follows the host, and verify the checkpoint.
   6. The abandoned new volume is unmanaged and holds only a copy of S3 data. Delete it with approval.
 - **After family play on the new disk,** going back to the old volume loses that play. After the old volume is retired, recovery is the normal S3 restore onto a new disk sized from the marker.
 

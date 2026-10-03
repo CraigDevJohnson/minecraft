@@ -71,10 +71,12 @@ sudo /usr/bin/time -p -o /root/source-backup-time.txt \
 
 Copy `source-backup-time.txt` through SSM. Record the completed archive size from `minecraft-backup status` and `s3api head-object`. Then time the host stop and start. `minecraft_host.py` reports the host, application, and backup separately.
 
+`cloudflare_env` is the private secret-reference file from [host commands](host-commands.md#cloudflare-token).
+
 ```sh
 public_hostname="$(jq -er .public_hostname "$source_deployment")"
 
-CLOUDFLARE_API_TOKEN="$(security find-generic-password -s minecraft-cloudflare-dns -w)" \
+op run --env-file="$cloudflare_env" -- \
   /usr/bin/time -p -o "$evidence_dir/clean-stop-time.txt" \
   python3 scripts/minecraft_host.py \
   --deployment "$source_deployment" stop \
@@ -85,7 +87,7 @@ python3 scripts/minecraft_host.py \
   | tee "$evidence_dir/stopped-status.json"
 dig +short "$public_hostname" @1.1.1.1 | tee "$evidence_dir/hostname-stopped.txt"
 
-CLOUDFLARE_API_TOKEN="$(security find-generic-password -s minecraft-cloudflare-dns -w)" \
+op run --env-file="$cloudflare_env" -- \
   /usr/bin/time -p -o "$evidence_dir/clean-start-time.txt" \
   python3 scripts/minecraft_host.py \
   --deployment "$source_deployment" start --instance survival \
@@ -117,7 +119,7 @@ shasum -a 256 "$evidence_dir/host-replacement.tfplan" \
   >"$evidence_dir/host-replacement.tfplan.sha256"
 ```
 
-Stop if the plan replaces or deletes the data volume, filesystem identity, backup bucket, state bucket, network, or IAM role. The plan may replace the host, its root disk, and the volume attachment. The replacement host must show `associate_public_ip_address = true`; stop if it shows anything else. Apply only the exact saved plan that Craig approved.
+Stop if the plan replaces or deletes the data volume, filesystem identity, backup bucket, state bucket, network, or IAM role. The plan may replace the host, its root disk, and the volume attachment. The replacement host must be planned with an auto-assigned address; stop otherwise. The text plan hides that flag when it does not change, so use the plan JSON check in [infrastructure operations](infrastructure.md#normal-replacement-and-explicit-destructive-workflow). Apply only the exact saved plan that Craig approved.
 
 ```sh
 set -o pipefail || exit 1
@@ -133,7 +135,7 @@ source_deployment="$source_dir/deployment-after-replacement.json"
 Wait for SSM on the new host ID in `$source_deployment`. Verify the retained mount. Through the approved private transfer path, install this refreshed handoff on the replacement host as `/etc/minecraft/deployment.json`, a root-owned regular file with mode 0600 inside root-owned mode-0700 `/etc/minecraft`. Compare its SHA-256 with `$source_deployment` privately before running `scripts/install_runtime.sh`; the installer reads this on-host file during preflight. Install the same reviewed revision on the new root disk, restore the private operator configuration, and use `$source_deployment` for every subsequent source-host command. Time the normal host start and record the checkpoints:
 
 ```sh
-CLOUDFLARE_API_TOKEN="$(security find-generic-password -s minecraft-cloudflare-dns -w)" \
+op run --env-file="$cloudflare_env" -- \
   /usr/bin/time -p -o "$evidence_dir/replacement-start-time.txt" \
   python3 scripts/minecraft_host.py \
   --deployment "$source_deployment" start --instance survival \

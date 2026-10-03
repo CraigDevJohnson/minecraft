@@ -91,7 +91,8 @@ class CloudflareAPI:
             raise HostError(f"{CLOUDFLARE_TOKEN} is not set to an API token for this command")
         request = urllib.request.Request(
             CLOUDFLARE_API + path + ("?" + urllib.parse.urlencode(query) if query else ""), method=method,
-            data=None if body is None else json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+            data=None if body is None else json.dumps(body).encode(),
+            headers={"Content-Type": "application/json", "User-Agent": "minecraft-host-dns"})
         request.add_unredirected_header("Authorization", "Bearer " + token)
         try:
             with urllib.request.build_opener(RefuseRedirects).open(request, timeout=timeout) as reply:
@@ -241,7 +242,8 @@ class HostSession:
         # DNS only (never proxied: the proxy carries only HTTP) and a TTL that follows a restart.
         body = {"type": "A", "name": hostname, "content": content, "ttl": DNS_TTL, "proxied": False}
         updated = self.cloudflare.request("PATCH", f"/zones/{zone_id}/dns_records/{record['id']}", body=body, timeout=30)
-        if not matches(updated.get("result")):
+        result = updated.get("result")
+        if not matches(result) or (result.get("id"), result.get("name"), result.get("type")) != (record["id"], hostname, "A"):
             raise HostError("Cloudflare did not confirm the DNS record update")
         return True
 
@@ -254,11 +256,12 @@ class HostSession:
         try:
             changed = self.set_record(self.public_address() if running else PARKED_ADDRESS)
             self.dns = {"dns": "current" if not changed else "updated" if running else "parked"}
-        except HostError as exc:
+        except Exception as exc:  # anything unexpected is a DNS failure too, with no detail printed
+            reason = exc if isinstance(exc, HostError) else "unexpected Cloudflare client error"
             # The address is the one exception to printing no deployment identifiers:
             # the operator can hand it to players until the record is repaired.
             self.dns = {"dns": "failed", **({"public_ip": self.address} if self.state == "running" and self.address else {})}
-            self.dns_error = f"DNS record not updated: {exc}; fix the cause and rerun the dns command"
+            self.dns_error = f"DNS record not updated: {reason}; fix the cause and rerun the dns command"
 
     def wait_host(self, expected: str, transitional: str, *, previous=None) -> None:
         deadline = self.aws.monotonic() + HOST_TIMEOUT

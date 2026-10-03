@@ -6,7 +6,7 @@ The host runs only during play, but its Elastic IP billed all month: about $3.65
 
 Give the host an auto-assigned address and no Elastic IP. Players use one endpoint: a single Cloudflare A record, DNS only, TTL 60, supplied as a private deployment input. The operator command (`scripts/minecraft_host.py`) points the record at the host after a start and parks it on `192.0.2.1` after a stop. AWS can assign a released address to another customer, so the name must not keep pointing at one. A DNS failure never blocks the game start, the drain, or the EC2 stop.
 
-The update runs on the operator computer. That needs no IAM, permissions-boundary, or AWS resource change, shows a failure to the person starting the server, and keeps the token off the internet-facing host. A Cloudflare token cannot be scoped to one record, so it stays in the operator's Keychain and is set for one command.
+The update runs on the operator computer. That needs no IAM, permissions-boundary, or AWS resource change, shows a failure to the person starting the server, and keeps the token off the internet-facing host. A Cloudflare token cannot be scoped to one record, so it stays in the operator's password manager and is set for one command.
 
 Rejected:
 

@@ -62,20 +62,23 @@ A DNS failure never blocks or undoes the game start, the drain, or the EC2 stop.
 
 Create a custom API token with **Zone → DNS → Edit**, scoped to **Include → Specific zone →** the hostname's zone, with an expiry of about 12 months. A Cloudflare token cannot be scoped to one record: it can edit every record in the zone. It therefore stays on the operator computer and never goes in tfvars, OpenTofu state, the repository, CI, or the host.
 
-Store it in the macOS Keychain. Ending with `-w` prompts for the value, which keeps it out of shell history:
+Store it in a password manager, not in a file. The examples use the 1Password CLI: save the token as an API Credential item, and keep one private file outside Git, `cloudflare_env` below, that holds only the secret reference, never the value:
 
 ```sh
-security add-generic-password -s minecraft-cloudflare-dns -a "$USER" -w
+CLOUDFLARE_API_TOKEN="op://<vault>/<item>/credential"
 ```
 
-Set it for one command rather than exporting it into a long-lived shell:
+`op run` resolves the reference for one command, after the usual 1Password approval, and masks the value if anything prints it:
 
 ```sh
-CLOUDFLARE_API_TOKEN="$(security find-generic-password -s minecraft-cloudflare-dns -w)" \
+cloudflare_env=operator-config/family/cloudflare.env
+op run --env-file="$cloudflare_env" -- \
   python3 scripts/minecraft_host.py --deployment operator-config/family/deployment.json start --instance survival
 ```
 
-The command reads the token only from `CLOUDFLARE_API_TOKEN`. It sends it only in the `Authorization` header to the fixed `https://api.cloudflare.com/client/v4` endpoint, refuses redirects, never prints it, and removes it from the environment of every `aws` process it runs. To rotate, use **Roll** on the token in the Cloudflare dashboard, then store the new value by adding `-U` to the `add-generic-password` command. If the token leaks, revoke it in the dashboard.
+Any other source works if it sets the variable for that one command rather than exporting it into a long-lived shell.
+
+The command reads the token only from `CLOUDFLARE_API_TOKEN`. It sends it only in the `Authorization` header to the fixed `https://api.cloudflare.com/client/v4` endpoint, refuses redirects, never prints it, and removes it from the environment of every `aws` process it runs. To rotate, use **Roll** on the token in the Cloudflare dashboard, then replace the value in the password manager item; the reference file does not change.
 
 Requests use Python's standard library with default TLS verification. A python.org macOS build has no CA bundle until its `Install Certificates.command` has run; until then every request fails certificate verification and is reported as `dns: failed`.
 
@@ -91,7 +94,7 @@ The family allowlist remains the access control. The hostname is not a secret, b
 
 - Each AWS CLI process is bounded to 30 seconds, or the remaining phase deadline when shorter.
 - EC2 transitions and SSM online readiness each have a 300-second deadline.
-- With a public hostname, a running host that has not yet reported a global IPv4 address is polled for at most 300 seconds. Each Cloudflare request has a 30-second network timeout, and one DNS update makes at most two requests.
+- With a public hostname, a running host that has not yet reported a global IPv4 address is polled for at most 300 seconds. Each Cloudflare request applies a 30-second timeout to each network operation, not to the whole request, and one DNS update makes at most two requests.
 - After an acknowledged EC2 start or stop request, polling also accepts the previous `stopped` or `running` state within that same 300-second deadline. [EC2 eventual consistency](https://docs.aws.amazon.com/ec2/latest/devguide/eventual-consistency.html) can delay visibility of the request. The command sends the mutation once; a persistently old state times out, and unrelated or terminal states still fail immediately. Observing an already-pending start without submitting a mutation does not enable this previous-state retry.
 - SSM delivery has a 60-second timeout and the remote command has a 3,600-second execution timeout. Local invocation polling is bounded to 3,660 seconds and handles initial `InvocationDoesNotExist` propagation.
 - Missing, failed, incomplete, or timed-out drain evidence forbids EC2 stop. No timeout path force-stops EC2.

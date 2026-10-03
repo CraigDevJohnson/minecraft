@@ -121,7 +121,9 @@ class FakeCloudflare:
         self.calls = []
         self.context = []
         self.fail_method = None
+        self.fail_with = None
         self.confirm = True
+        self.confirm_as = {}
 
     def request(self, method, path, *, query=None, body=None, timeout):
         if not 0 < timeout <= 30:
@@ -130,7 +132,7 @@ class FakeCloudflare:
         if self.aws:
             self.context.append((self.aws.reported, [call[1] for call in self.aws.calls]))
         if method == self.fail_method:
-            raise minecraft_host.HostError(f"Cloudflare {method} failed")
+            raise self.fail_with or minecraft_host.HostError(f"Cloudflare {method} failed")
         if (method, path, query, body) == ("GET", f"/zones/{ZONE_ID}/dns_records", {"name.exact": HOSTNAME}, None):
             return {"success": True, "result": json.loads(json.dumps(self.records))}
         if method == "PATCH" and query is None:
@@ -138,7 +140,7 @@ class FakeCloudflare:
                 if path == f"/zones/{ZONE_ID}/dns_records/{record['id']}":
                     if self.confirm:
                         record.update(body)
-                    return {"success": True, "result": dict(record)}
+                    return {"success": True, "result": {**record, **self.confirm_as}}
         raise AssertionError(f"unexpected Cloudflare request: {method} {path}")
 
     def patches(self):
@@ -794,6 +796,11 @@ class HostDNSTests(unittest.TestCase):
             "lookup failed": lambda api: setattr(api, "fail_method", "GET"),
             "update failed": lambda api: setattr(api, "fail_method", "PATCH"),
             "update unconfirmed": lambda api: setattr(api, "confirm", False),
+            "update confirms another record": lambda api: setattr(api, "confirm_as", {"id": "2" * 32}),
+            "update confirms another name": lambda api: setattr(api, "confirm_as", {"name": "www.example.com"}),
+            "update confirms another type": lambda api: setattr(api, "confirm_as", {"type": "AAAA"}),
+            "lookup failed unexpectedly": lambda api: (setattr(api, "fail_method", "GET"), setattr(api, "fail_with", RecursionError("deep reply"))),
+            "update failed unexpectedly": lambda api: (setattr(api, "fail_method", "PATCH"), setattr(api, "fail_with", ValueError("bad proxy"))),
             "no record": lambda api: api.records.clear(),
             "no record list": lambda api: setattr(api, "records", None),
             "not a record": lambda api: api.records.__setitem__(0, "A"),
