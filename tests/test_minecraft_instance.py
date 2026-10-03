@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,7 @@ class FakeMachine:
         self.ready = True
         self.starts = 0
         self.locked = False
+        self.usage = {"size_bytes": 5_000_000_000, "available_bytes": 4_000_000_000, "used_percent": 16}
 
     @contextlib.contextmanager
     def lock(self):
@@ -42,6 +44,12 @@ class FakeMachine:
     def verify_storage(self):
         if not self.storage_ok:
             raise minecraft_instance.OperationError("wrong or missing retained mount")
+
+    def storage_usage(self):
+        if not self.locked:
+            raise AssertionError("storage usage was read outside lifecycle exclusion")
+        self.events.append("storage-usage")
+        return dict(self.usage)
 
     def boot_id(self):
         return self.boot
@@ -350,6 +358,81 @@ class InstanceTests(unittest.TestCase):
         self.manager.execute("stop", "survival")
         self.assertEqual(self.machine.events.count("save"), 1)
         self.assertEqual(self.machine.events.count("backup"), 2)
+
+    def test_only_start_and_host_status_report_retained_disk_usage(self):
+        self.machine.backup_works = True
+        started = self.manager.execute("start", "survival")
+        self.assertEqual(started, {"instance": "survival", "application": "running", "backup": "pending",
+                                   "ready": True, "storage": self.machine.usage})
+        # Usage is read after preparation staged content and the instance became ready.
+        self.assertEqual(self.machine.events, ["prepare", "launch", "ready", "storage-usage"])
+        self.assertEqual(self.manager.execute("host-status"), {
+            "draining": False, "storage": self.machine.usage,
+            "instances": {"survival": {"instance": "survival", "application": "running", "backup": "pending"}}})
+        self.assertEqual(self.machine.events.count("storage-usage"), 2)
+        self.machine.revision = "b" * 64
+        responses = {
+            "status": self.manager.execute("status", "survival"),
+            "update": self.manager.execute("update", "survival"),
+            "backup": self.manager.execute("backup", "survival"),
+            "stop": self.manager.execute("stop", "survival"),
+            "host-drain": self.manager.execute("host-drain"),
+        }
+        for action, response in responses.items():
+            with self.subTest(action=action):
+                self.assertNotIn("storage", response)
+        # Host stop and the idle-stop function validate exactly this drain evidence.
+        self.assertEqual(responses["host-drain"], {"draining": True, "instances": {
+            "survival": {"instance": "survival", "application": "stopped", "backup": "complete"}}})
+        self.assertEqual(responses["update"], {"instance": "survival", "application": "running",
+                                               "backup": "pending", "ready": True})
+        self.assertEqual(self.machine.events.count("storage-usage"), 2)
+
+    def test_storage_usage_is_never_read_from_unverified_storage(self):
+        self.machine.storage_ok = False
+        for action, instance in (("start", "survival"), ("host-status", None)):
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(minecraft_instance.OperationError, "mount"):
+                    self.manager.execute(action, instance)
+        self.assertNotIn("storage-usage", self.machine.events)
+
+    def test_linux_machine_reports_usage_of_its_own_root_with_the_df_formula(self):
+        machine = object.__new__(minecraft_instance.LinuxMachine)
+        machine.root = self.root / "any-retained-root"
+        cases = (
+            # f_blocks, f_bfree, f_bavail -> used percent of the space an unprivileged writer can use
+            (1_000_000, 300_000, 250_000, 74),  # 700000 / 950000 = 73.7, rounded up like df
+            (1050, 250, 200, 80),               # exactly 80: the root-reserved 50 blocks are excluded
+            (1050, 259, 209, 80),               # 79.1 rounds up
+            (1050, 260, 210, 79),               # exactly 79
+            (1000, 1000, 950, 0),
+            (1000, 50, 0, 100),                 # only root-reserved blocks remain
+            (1000, 0, 0, 100),
+            (0, 0, 0, 100),                     # no capacity at all is full, not a division error
+        )
+        for blocks, free, available, percent in cases:
+            with self.subTest(blocks=blocks, free=free, available=available):
+                usage = mock.Mock(f_frsize=4096, f_bsize=1024 ** 2, f_blocks=blocks, f_bfree=free, f_bavail=available)
+                with mock.patch.object(minecraft_instance.os, "statvfs", return_value=usage) as statvfs:
+                    reported = machine.storage_usage()
+                statvfs.assert_called_once_with(machine.root)
+                self.assertEqual(reported, {"size_bytes": 4096 * blocks, "available_bytes": 4096 * available,
+                                            "used_percent": percent})
+                self.assertTrue(all(type(value) is int for value in reported.values()))
+
+    def test_local_validation_machines_inherit_usage_of_their_fixture_root(self):
+        import validate_lifecycle
+        import validate_recovery
+        for machine_type in (validate_lifecycle.LocalMachine, validate_recovery.RecoveryMachine):
+            with self.subTest(machine=machine_type.__name__):
+                machine = object.__new__(machine_type)
+                machine.root = self.root
+                reported = machine.storage_usage()
+                actual = os.statvfs(self.root)
+                self.assertEqual(reported["size_bytes"], actual.f_frsize * actual.f_blocks)
+                self.assertLessEqual(0, reported["available_bytes"])
+                self.assertLessEqual(reported["available_bytes"], reported["size_bytes"])
+                self.assertIn(reported["used_percent"], range(101))
 
     def test_host_drain_retries_stopped_pending_backup_and_blocks_same_boot_start(self):
         self.manager.execute("start", "survival")

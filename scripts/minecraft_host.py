@@ -31,6 +31,9 @@ CLOUDFLARE_RESPONSE_LIMIT = 1 << 20
 # be assigned to another AWS customer, so the hostname must not keep pointing at it.
 PARKED_ADDRESS = "192.0.2.1"
 DNS_TTL = 60
+# Growing the data disk takes minutes; warn while that is still comfortably ahead of a full disk.
+STORAGE_WARNING_PERCENT = 80
+STORAGE_FIELDS = ("size_bytes", "available_bytes", "used_percent")
 
 
 class HostError(Exception):
@@ -154,6 +157,21 @@ def public_instance(value: dict, instance: str) -> dict:
     if isinstance(value.get("ready"), bool):
         result["ready"] = value["ready"]
     return result
+
+
+def storage_report(response: dict) -> dict:
+    """Validated data-disk usage from the host, with a warning once growing the disk is
+    due. A host runtime that predates the report sends none; that is not an error."""
+    if "storage" not in response:
+        return {}
+    storage = response["storage"]
+    if (not isinstance(storage, dict) or any(type(storage.get(field)) is not int for field in STORAGE_FIELDS)
+            or not 0 <= storage["available_bytes"] <= storage["size_bytes"] or not 0 <= storage["used_percent"] <= 100):
+        raise HostError("remote response has invalid storage usage")
+    report = {"storage": {field: storage[field] for field in STORAGE_FIELDS}}
+    if storage["used_percent"] >= STORAGE_WARNING_PERCENT:
+        report["storage_warning"] = f"data disk {storage['used_percent']}% used; grow it (docs/operations/data-disk-capacity.md)"
+    return report
 
 
 class HostSession:
@@ -303,11 +321,12 @@ class HostSession:
             raise HostError(f"host start cannot proceed from {state}; retry after the current transition")
         self.sync_dns()  # before the game boots, so the record propagates meanwhile
         self.wait_ssm()
-        result = public_instance(self.remote("start", instance), instance)
+        response = self.remote("start", instance)
+        result = public_instance(response, instance)
         self.observed = result
         if result["application"] != "running" or result.get("ready") is not True:
             raise HostError("instance did not report ready after start")
-        return {"host": self.state, **result}
+        return {"host": self.state, **result, **storage_report(response)}
 
     def instance_statuses(self, response: dict) -> dict:
         instances = response.get("instances")
@@ -350,7 +369,7 @@ class HostSession:
         self.observed = {"instances": instances}
         if not isinstance(response.get("draining"), bool):
             raise HostError("remote host status lacks drain state")
-        return {"host": self.state, "draining": response["draining"], "instances": instances}
+        return {"host": self.state, "draining": response["draining"], "instances": instances, **storage_report(response)}
 
 
 def main(argv=None, *, aws=None, cloudflare=None) -> int:

@@ -35,6 +35,8 @@ PARKED_IP = "192.0.2.1"
 TOKEN = "placeholder-cloudflare-token"
 CLOUDFLARE_API = minecraft_host.CLOUDFLARE_API
 DRAINED = {"draining": True, "instances": {"survival": {"instance": "survival", "application": "stopped", "backup": "complete"}}}
+STORAGE = {"size_bytes": 5_196_382_208, "available_bytes": 4_100_000_000, "used_percent": 16}
+STORAGE_DOC = "docs/operations/data-disk-capacity.md"
 
 
 class FakeAWS:
@@ -523,6 +525,112 @@ class HostCommandTests(unittest.TestCase):
                 self.assertEqual(result, 1, output)
                 self.assertEqual(aws.calls, [])
 
+    def remote_for(self, action, storage):
+        """A host response to start or host-status, optionally carrying data-disk usage."""
+        status = {"instance": "survival", "application": "running", "backup": "pending"}
+        response = {**status, "ready": True} if action == "start" else {"draining": False, "instances": {"survival": status}}
+        return response if storage is None else {**response, "storage": storage}
+
+    def test_start_and_status_report_validated_data_disk_usage(self):
+        for action in ("start", "status"):
+            with self.subTest(action=action):
+                aws = FakeAWS()
+                aws.state = "running"
+                aws.remote = self.remote_for(action, {**STORAGE, "device": "private-device-name"})
+                result, output = self.invoke(aws, action, *(["--instance", "survival"] if action == "start" else []))
+                self.assertEqual(result, 0, output)
+                self.assertEqual(output, {"host": "running", **self.remote_for(action, STORAGE)})
+                self.assertNotIn("private-device-name", json.dumps(output))
+
+    def test_storage_warning_starts_at_80_percent_and_never_fails_the_command(self):
+        for action in ("start", "status"):
+            for percent, warned in ((0, False), (79, False), (80, True), (81, True), (100, True)):
+                with self.subTest(action=action, percent=percent):
+                    aws = FakeAWS()
+                    aws.state = "running"
+                    aws.remote = self.remote_for(action, {**STORAGE, "used_percent": percent})
+                    result, output = self.invoke(aws, action, *(["--instance", "survival"] if action == "start" else []))
+                    self.assertEqual(result, 0, output)
+                    self.assertEqual(output["storage"]["used_percent"], percent)
+                    self.assertNotIn("error", output)
+                    if warned:
+                        self.assertEqual(output["storage_warning"], f"data disk {percent}% used; grow it ({STORAGE_DOC})")
+                    else:
+                        self.assertNotIn("storage_warning", output)
+
+    def test_host_runtime_that_reports_no_storage_keeps_the_previous_output(self):
+        for action in ("start", "status"):
+            with self.subTest(action=action):
+                aws = FakeAWS()
+                aws.state = "running"
+                aws.remote = self.remote_for(action, None)
+                result, output = self.invoke(aws, action, *(["--instance", "survival"] if action == "start" else []))
+                self.assertEqual((result, output), (0, {"host": "running", **aws.remote}))
+
+    def test_malformed_storage_usage_is_rejected_and_keeps_the_verified_states(self):
+        malformed = (
+            None, [], "16%", 16, {}, {"size_bytes": 5, "available_bytes": 4},
+            {**STORAGE, "used_percent": 16.0}, {**STORAGE, "used_percent": "16"}, {**STORAGE, "used_percent": True},
+            {**STORAGE, "used_percent": 101}, {**STORAGE, "used_percent": -1},
+            {**STORAGE, "size_bytes": 4_099_999_999}, {**STORAGE, "available_bytes": -1},
+            {**STORAGE, "size_bytes": None}, {**STORAGE, "available_bytes": "4100000000"},
+        )
+        for action in ("start", "status"):
+            for storage in malformed:
+                with self.subTest(action=action, storage=storage):
+                    aws = FakeAWS()
+                    aws.state = "running"
+                    aws.remote = {**self.remote_for(action, None), "storage": storage}
+                    result, output = self.invoke(aws, action, *(["--instance", "survival"] if action == "start" else []))
+                    self.assertEqual(result, 1, output)
+                    self.assertIn("storage", output["error"])
+                    self.assertNotIn("storage", output)
+                    self.assertNotIn("storage_warning", output)
+                    # The game was started and verified; only the usage report is refused.
+                    observed = output if action == "start" else output["instances"]["survival"]
+                    self.assertEqual((observed["application"], observed["backup"]), ("running", "pending"))
+                    self.assertEqual(output.get("ready"), True if action == "start" else None)
+
+    def test_stop_ignores_storage_and_requires_exactly_the_previous_drain_evidence(self):
+        for storage in (STORAGE, {**STORAGE, "used_percent": 95}, "malformed"):
+            with self.subTest(storage=storage):
+                aws = FakeAWS()
+                aws.state = "running"
+                aws.remote = {**DRAINED, "storage": storage}
+                self.assertEqual(self.invoke(aws, "stop"), (0, {"host": "stopped", **DRAINED}))
+                self.assertEqual(sum(call[1] == "stop-instances" for call in aws.calls), 1)
+
+    def test_actual_lifecycle_start_and_status_usage_reaches_the_operator(self):
+        import minecraft_instance
+        from test_minecraft_instance import FakeMachine
+
+        retained = Path(self.temp.name) / "retained"
+        retained.mkdir()
+        machine = FakeMachine(retained)
+        # The real statvfs report of the fixture root, exactly as the host serializes it.
+        machine.storage_usage = lambda: minecraft_instance.LinuxMachine.storage_usage(machine)
+        manager = minecraft_instance.Manager(retained, machine, ["survival"])
+
+        class LifecycleAWS(FakeAWS):
+            def run(self, service, operation, *arguments, timeout):
+                response = super().run(service, operation, *arguments, timeout=timeout)
+                if operation == "send-command":
+                    parameters = json.loads(arguments[arguments.index("--parameters") + 1])
+                    action = parameters["commands"][0].removeprefix(minecraft_host.REMOTE_COMMAND + " ").split()
+                    self.remote = json.loads(json.dumps(manager.execute(*action)))
+                return response
+
+        aws = LifecycleAWS()
+        expected = minecraft_instance.LinuxMachine.storage_usage(machine)
+        for action in ("start", "status"):
+            with self.subTest(action=action):
+                result, output = self.invoke(aws, action, *(["--instance", "survival"] if action == "start" else []))
+                self.assertEqual(result, 0, output)
+                self.assertEqual(set(output["storage"]), {"size_bytes", "available_bytes", "used_percent"})
+                self.assertEqual(output["storage"]["size_bytes"], expected["size_bytes"])
+                self.assertEqual("storage_warning" in output, output["storage"]["used_percent"] >= 80)
+        self.assertTrue(machine.running)
+
     def test_deployment_without_public_hostname_makes_no_dns_call_and_prints_no_dns_field(self):
         aws, cloudflare = FakeAWS(), FakeCloudflare()
         result, output = self.invoke(aws, "start", "--instance", "survival", cloudflare=cloudflare)
@@ -631,6 +739,23 @@ class HostDNSTests(unittest.TestCase):
         self.assertEqual((result, output["dns"]), (0, "updated"))
         self.assertEqual(cloudflare.patches()[1:], [{**self.update, "content": NEXT_HOST_IP}])
         self.assertNotIn("public_ip", output)
+
+    def test_storage_usage_and_its_warning_are_reported_beside_any_dns_outcome(self):
+        full = {**STORAGE, "used_percent": 85}
+        warning = f"data disk 85% used; grow it ({STORAGE_DOC})"
+        started = {"host": "running", "instance": "survival", "application": "running", "backup": "pending", "ready": True, "storage": full, "storage_warning": warning}
+        for dns_works in (True, False):
+            with self.subTest(dns_works=dns_works):
+                aws = FakeAWS()
+                aws.remote = {**aws.remote, "storage": full}
+                cloudflare = FakeCloudflare()
+                cloudflare.fail_method = None if dns_works else "GET"
+                result, output = self.invoke(aws, "start", "--instance", "survival", cloudflare=cloudflare)
+                if dns_works:
+                    self.assertEqual((result, output), (0, {**started, "dns": "updated"}))
+                else:
+                    self.assertEqual((result, output), (1, {**started, "dns": "failed", "public_ip": HOST_IP, "error": output["error"]}))
+                    self.assertIn("DNS record not updated", output["error"])
 
     def test_a_drifted_record_is_forced_back_to_dns_only_and_ttl_60(self):
         for drift in ({"proxied": True}, {"ttl": 1}, {"ttl": 300}, {"proxied": True, "ttl": 1}):
