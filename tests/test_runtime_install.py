@@ -81,9 +81,11 @@ elif name == "aws":
         assert args[0] == "s3api"
         assert args[2:] == ["--generate-cli-skeleton", "input", "--no-cli-pager", "--no-cli-auto-prompt"]
         skeletons = {
-            "put-object": {"IfNoneMatch": "", "ChecksumSHA256": ""},
+            "put-object": {"IfNoneMatch": "", "IfMatch": "", "ChecksumSHA256": ""},
             "complete-multipart-upload": {"IfNoneMatch": ""},
             "create-multipart-upload": {"ChecksumType": "COMPOSITE", "ChecksumAlgorithm": "SHA256"},
+            "head-object": {"VersionId": "", "IfMatch": ""},
+            "get-object": {"VersionId": "", "IfMatch": ""},
         }
         skeleton = skeletons[args[1]]
         for field in list(skeleton):
@@ -163,8 +165,9 @@ elif name == "stat":
     def test_incompatible_backup_cli_is_rejected_before_any_installation_mutation(self):
         unsupported = [{"AWS_VERSION": "aws-cli/1.99.0 fixture-only"}]
         unsupported.extend({"AWS_MISSING_FIELD": field} for field in (
-            "put-object:IfNoneMatch", "put-object:ChecksumSHA256", "complete-multipart-upload:IfNoneMatch",
-            "create-multipart-upload:ChecksumType", "create-multipart-upload:ChecksumAlgorithm"))
+            "put-object:IfNoneMatch", "put-object:IfMatch", "put-object:ChecksumSHA256", "complete-multipart-upload:IfNoneMatch",
+            "create-multipart-upload:ChecksumType", "create-multipart-upload:ChecksumAlgorithm",
+            "head-object:VersionId", "head-object:IfMatch", "get-object:VersionId", "get-object:IfMatch"))
         for settings in unsupported:
             with self.subTest(settings=settings), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)

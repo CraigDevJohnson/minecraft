@@ -16,7 +16,7 @@ import sys
 import tarfile
 import tempfile
 
-from minecraft_backup_store import BackupError, S3Store
+from minecraft_backup_store import BackupError, S3Store, valid_version
 from minecraft_content import _validate_definition, _validate_manifest, manifest_digest
 
 MAX_ARCHIVE_BYTES = 100 * 1024 ** 3
@@ -166,6 +166,269 @@ def load_recovery(store, instance, recovery_point, workspace):
             or digest_file(archive_path) != archive['sha256']):
         raise BackupError('recovery archive is missing or corrupt')
     return metadata, archive_path
+
+
+def _object_receipt(store, key, target, max_bytes, *, expected=None):
+    if expected is not None:
+        _validate_object_receipt(expected, key, max_bytes)
+    revision = store.download_revision(key, target, max_bytes=max_bytes,
+                                       version_id=expected['version_id'] if expected else None)
+    if revision is None:
+        raise BackupError('the selected recovery object version is unavailable')
+    result = {**revision, 'sha256': digest_file(target)}
+    if expected is not None and result != expected:
+        raise BackupError('the selected recovery object version differs from its receipt')
+    return result
+
+
+def _validate_object_receipt(item, key, maximum):
+    if (not isinstance(item, dict) or set(item) != {'key', 'version_id', 'etag', 'size_bytes', 'sha256'}
+            or item['key'] != key or not isinstance(item['etag'], str)
+            or not re.fullmatch(r'[\x21-\x7e]{1,1024}', item['etag'])
+            or type(item['size_bytes']) is not int or not 0 < item['size_bytes'] <= maximum):
+        raise BackupError('invalid receipt object identity')
+    valid_version(item['version_id'])
+    check_digest(item['sha256'])
+
+
+def validate_receipt(receipt):
+    """Private evidence required before the world may exist only in S3."""
+    try:
+        fields = {'schema_version', 'status', 'receipt_id', 'instance', 'session', 'recovery_point',
+                  'created_at', 'manifest_sha256', 'definition_sha256', 'bootstrap_sha256', 'source',
+                  'marker', 'archive', 'data_size_bytes', 'required_capacity_bytes', 'sequence', 'previous_receipt_id'}
+        if (not isinstance(receipt, dict) or set(receipt) != fields
+                or type(receipt['schema_version']) is not int or receipt['schema_version'] != 1
+                or receipt['status'] != 'verified'):
+            raise BackupError('malformed or incompatible recovery receipt')
+        check_instance(receipt['instance'])
+        for field in ('receipt_id', 'recovery_point', 'manifest_sha256', 'definition_sha256', 'bootstrap_sha256'):
+            check_digest(receipt[field])
+        if (not isinstance(receipt['session'], str) or not re.fullmatch(r'[a-zA-Z0-9._-]{1,128}', receipt['session'])
+                or point_identity(receipt['instance'], receipt['session'], receipt['manifest_sha256']) != receipt['recovery_point']):
+            raise BackupError('recovery receipt final session does not match its point')
+        timestamp(receipt['created_at'])
+        if type(receipt['sequence']) is not int or receipt['sequence'] < 1:
+            raise BackupError('invalid recovery receipt sequence')
+        previous = receipt['previous_receipt_id']
+        if (receipt['sequence'] == 1) != (previous is None):
+            raise BackupError('recovery receipt selection history is inconsistent')
+        if previous is not None:
+            check_digest(previous)
+        source = receipt['source']
+        if (set(source) != {'account_id', 'region', 'host_id', 'backup_bucket_name', 'volume_id',
+                           'filesystem_uuid', 'deployment_sha256'}
+                or not re.fullmatch(r'[0-9]{12}', source['account_id'])
+                or not re.fullmatch(r'[a-z]{2}(?:-[a-z]+)+-[0-9]+', source['region'])
+                or not re.fullmatch(r'i-(?:[a-f0-9]{8}|[a-f0-9]{17})', source['host_id'])
+                or not re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]', source['backup_bucket_name'])
+                or not re.fullmatch(r'vol-(?:[a-f0-9]{8}|[a-f0-9]{17})', source['volume_id'])
+                or not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', source['filesystem_uuid'])):
+            raise BackupError('invalid receipt source deployment or storage')
+        check_digest(source['deployment_sha256'])
+        for field, key, maximum in (
+                ('marker', marker_key(receipt['instance'], receipt['recovery_point']), MAX_METADATA_BYTES),
+                ('archive', f"instances/{receipt['instance']}/objects/{receipt['recovery_point']}/data.tar.gz", MAX_ARCHIVE_BYTES)):
+            _validate_object_receipt(receipt[field], key, maximum)
+        if (type(receipt['data_size_bytes']) is not int or not 0 < receipt['data_size_bytes'] <= MAX_ARCHIVE_BYTES
+                or type(receipt['required_capacity_bytes']) is not int
+                or receipt['required_capacity_bytes'] != receipt['data_size_bytes'] + receipt['archive']['size_bytes'] + 1024 ** 3):
+            raise BackupError('invalid recovery receipt capacity requirement')
+        core = {key: value for key, value in receipt.items() if key != 'receipt_id'}
+        if hashlib.sha256(encoded(core)).hexdigest() != receipt['receipt_id']:
+            raise BackupError('recovery receipt checksum mismatch')
+    except (KeyError, ValueError, TypeError, AttributeError) as error:
+        raise BackupError('malformed or incompatible recovery receipt') from error
+    return receipt
+
+
+def load_receipt_recovery(store, receipt, workspace, *, bootstrap_sha256=None):
+    validate_receipt(receipt)
+    if bootstrap_sha256 is not None and bootstrap_sha256 != receipt['bootstrap_sha256']:
+        raise BackupError('bootstrap release differs from the recorded recovery receipt')
+    if getattr(store, 'bucket', receipt['source']['backup_bucket_name']) != receipt['source']['backup_bucket_name']:
+        raise BackupError('recovery receipt belongs to a different backup bucket')
+    workspace = Path(workspace)
+    metadata_path = workspace / 'recovery.json'
+    _object_receipt(store, receipt['marker']['key'], metadata_path, MAX_METADATA_BYTES, expected=receipt['marker'])
+    metadata = validate_metadata(read_json(metadata_path), receipt['instance'], receipt['recovery_point'])
+    if (any(metadata[field] != receipt[field] for field in ('session', 'manifest_sha256', 'definition_sha256', 'created_at'))
+            or metadata['source'] != {'volume_id': receipt['source']['volume_id'],
+                                      'filesystem_uuid': receipt['source']['filesystem_uuid']}
+            or any(metadata['archive'][field] != receipt['archive'][field] for field in ('key', 'sha256', 'size_bytes'))
+            or sum(item.get('size_bytes', 0) for item in metadata['files']) != receipt['data_size_bytes']):
+        raise BackupError('completed recovery point differs from the final-session receipt')
+    archive = workspace / 'recovery.tar.gz'
+    _object_receipt(store, receipt['archive']['key'], archive, receipt['archive']['size_bytes'], expected=receipt['archive'])
+    return metadata, archive
+
+
+def create_recovery_receipt(store, source_deployment, instance, evidence, bootstrap_sha256, workspace, *, previous=None):
+    """Verify the drained final session independently, outside the disposable volume."""
+    check_digest(bootstrap_sha256)
+    if getattr(store, 'bucket', source_deployment.get('backup_bucket_name')) != source_deployment.get('backup_bucket_name'):
+        raise BackupError('recovery receipt source uses a different backup bucket')
+    if (not isinstance(evidence, dict) or evidence.get('application') != 'stopped'
+            or evidence.get('backup') != 'complete'):
+        raise BackupError('a completed final-session backup is required for S3-only storage')
+    workspace = Path(workspace)
+    point = evidence.get('recovery_point')
+    marker_path = workspace / 'recovery.json'
+    marker = _object_receipt(store, marker_key(instance, point), marker_path, MAX_METADATA_BYTES)
+    metadata = validate_metadata(read_json(marker_path), instance, point)
+    if (metadata['session'] != evidence.get('session') or metadata['manifest_sha256'] != evidence.get('manifest_sha256')
+            or metadata['source'] != {'volume_id': source_deployment.get('data_volume_id'),
+                                      'filesystem_uuid': source_deployment.get('data_filesystem_uuid')}):
+        raise BackupError('final session, content or source storage differs from the completed recovery point')
+    archive_path = workspace / 'recovery.tar.gz'
+    archive = _object_receipt(store, metadata['archive']['key'], archive_path, metadata['archive']['size_bytes'])
+    if any(archive[field] != metadata['archive'][field] for field in ('key', 'size_bytes', 'sha256')):
+        raise BackupError('final-session recovery archive is corrupt')
+    # Inspect every archived file before this receipt can authorize deletion of the only live copy.
+    from minecraft_restore import extract_recovery
+    with tempfile.TemporaryDirectory(prefix='.minecraft-receipt-check-', dir=workspace) as temporary:
+        extract_recovery(metadata, archive_path, Path(temporary) / 'verified')
+    if previous is not None:
+        validate_receipt(previous)
+        if (previous['instance'] != instance or previous['source']['account_id'] != source_deployment.get('account_id')
+                or previous['source']['backup_bucket_name'] != source_deployment.get('backup_bucket_name')
+                or timestamp(metadata['created_at']) < timestamp(previous['created_at'])):
+            raise BackupError('recovery receipt selection cannot regress or change ownership')
+    data_bytes = sum(item.get('size_bytes', 0) for item in metadata['files'])
+    core = {'schema_version': 1, 'status': 'verified', 'instance': instance, 'session': metadata['session'],
+            'recovery_point': point, 'created_at': metadata['created_at'], 'manifest_sha256': metadata['manifest_sha256'],
+            'definition_sha256': metadata['definition_sha256'], 'bootstrap_sha256': bootstrap_sha256,
+            'source': {'account_id': source_deployment.get('account_id'), 'region': source_deployment.get('region'),
+                       'host_id': source_deployment.get('host_id'), 'backup_bucket_name': source_deployment.get('backup_bucket_name'),
+                       **metadata['source'], 'deployment_sha256': hashlib.sha256(encoded(source_deployment)).hexdigest()},
+            'marker': marker, 'archive': archive, 'data_size_bytes': data_bytes,
+            'required_capacity_bytes': data_bytes + archive['size_bytes'] + 1024 ** 3,
+            'sequence': previous['sequence'] + 1 if previous else 1,
+            'previous_receipt_id': previous['receipt_id'] if previous else None}
+    return validate_receipt({**core, 'receipt_id': hashlib.sha256(encoded(core)).hexdigest()})
+
+
+def _selection_key(instance):
+    check_instance(instance)
+    return f'instances/{instance}/receipts/current.json'
+
+
+def load_current_receipt(store, instance, workspace, *, expected_receipt_id=None, allow_absent=False):
+    """The authoritative current selection is mandatory; never choose catalog latest."""
+    workspace = Path(workspace)
+    path = workspace / 'selection.json'
+    revision = store.download_revision(_selection_key(instance), path, max_bytes=MAX_METADATA_BYTES)
+    if revision is None:
+        if allow_absent and expected_receipt_id is None:
+            return None, None
+        raise BackupError('authoritative recovery selection is unavailable')
+    try:
+        selection = read_json(path)
+        if (set(selection) != {'schema_version', 'instance', 'receipt_id', 'sequence', 'previous_receipt_id', 'receipt'}
+                or type(selection['schema_version']) is not int or selection['schema_version'] != 1
+                or type(selection['sequence']) is not int or selection['sequence'] < 1
+                or selection['instance'] != instance or (expected_receipt_id is not None and selection['receipt_id'] != expected_receipt_id)):
+            raise BackupError('authoritative recovery selection differs from the expected receipt')
+        check_digest(selection['receipt_id'])
+        reference = selection['receipt']
+        if reference['key'] != f"instances/{instance}/receipts/{selection['receipt_id']}.json":
+            raise BackupError('authoritative recovery selection has an invalid receipt key')
+        receipt_path = workspace / 'selected-receipt.json'
+        _object_receipt(store, reference['key'], receipt_path, MAX_METADATA_BYTES, expected=reference)
+        receipt = validate_receipt(read_json(receipt_path))
+        if any(receipt[field] != selection[field] for field in ('instance', 'receipt_id', 'sequence', 'previous_receipt_id')):
+            raise BackupError('authoritative recovery selection and its receipt disagree')
+        return receipt, {**selection, 'revision': revision}
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise BackupError('malformed authoritative recovery selection') from error
+
+
+def publish_recovery_receipt(store, receipt, workspace, *, previous_selection=None):
+    validate_receipt(receipt)
+    workspace = Path(workspace)
+    current, observed = load_current_receipt(store, receipt['instance'], workspace, allow_absent=True)
+    if current and current['receipt_id'] == receipt['receipt_id']:
+        return observed
+    if observed != previous_selection:
+        raise BackupError('authoritative recovery selection changed during publication')
+    if (receipt['previous_receipt_id'] != (current['receipt_id'] if current else None)
+            or receipt['sequence'] != (current['sequence'] + 1 if current else 1)):
+        raise BackupError('recovery receipt cannot replace an unrelated or newer selection')
+    if current and (timestamp(receipt['created_at']) < timestamp(current['created_at'])
+            or any(receipt['source'][field] != current['source'][field]
+                   for field in ('account_id', 'region', 'backup_bucket_name'))):
+        raise BackupError('recovery receipt selection cannot regress or change ownership')
+    load_receipt_recovery(store, receipt, workspace, bootstrap_sha256=receipt['bootstrap_sha256'])
+    path = workspace / 'receipt-publication.json'
+    path.write_bytes(encoded(receipt))
+    key = f"instances/{receipt['instance']}/receipts/{receipt['receipt_id']}.json"
+    store.upload(key, path)
+    reference = _object_receipt(store, key, workspace / 'published-receipt.json', MAX_METADATA_BYTES)
+    if read_json(workspace / 'published-receipt.json') != receipt:
+        raise BackupError('published receipt contains different evidence')
+    selection = {field: receipt[field] for field in ('schema_version', 'instance', 'receipt_id', 'sequence', 'previous_receipt_id')}
+    selection['receipt'] = reference
+    path = workspace / 'selection-publication.json'
+    path.write_bytes(encoded(selection))
+    store.conditional_write(_selection_key(receipt['instance']), path,
+                            expected_etag=previous_selection['revision']['etag'] if previous_selection else None)
+    _, verified = load_current_receipt(store, receipt['instance'], workspace, expected_receipt_id=receipt['receipt_id'])
+    return verified
+
+
+def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, store=None):
+    """Publish exact final-session receipts and durable private selection before disk deletion."""
+    from minecraft_instance import private_json, write_json
+    journal_dir = Path(journal_dir)
+    if (not journal_dir.is_dir() or journal_dir.is_symlink() or journal_dir.stat().st_uid != os.geteuid()
+            or stat.S_IMODE(journal_dir.stat().st_mode) != 0o700):
+        raise BackupError('recovery receipt journal must be operator-owned mode 0700')
+    instances = deployment.get('instances')
+    if (not isinstance(instances, dict) or not instances or not isinstance(drain, dict)
+            or drain.get('draining') is not True or set(drain.get('instances', {})) != set(instances)
+            or set(drain.get('recovery', {})) != set(instances)):
+        raise BackupError('complete private drain evidence is required for every configured instance')
+    store = store or S3Store(deployment['backup_bucket_name'], region=deployment.get('region'))
+    result = {}
+    with tempfile.TemporaryDirectory(prefix='.minecraft-receipts-', dir=journal_dir) as temporary:
+        workspace = Path(temporary)
+        for instance in sorted(instances):
+            check_instance(instance)
+            if (set(drain['recovery'][instance]) != {'session', 'manifest_sha256', 'recovery_point'}
+                    or drain['instances'][instance].get('instance') != instance
+                    or drain['instances'][instance].get('application') != 'stopped'
+                    or drain['instances'][instance].get('backup') != 'complete'):
+                raise BackupError('a completed final-session backup is required for every configured instance')
+            evidence = {**drain['instances'][instance], **drain['recovery'][instance]}
+            local_path = journal_dir / f'current-{instance}.json'
+            local = private_json(local_path) if local_path.exists() or local_path.is_symlink() else None
+            prior, selection = load_current_receipt(store, instance, workspace, allow_absent=local is None)
+            if local is not None and (selection is None or local != selection):
+                candidate_path = journal_dir / f"receipt-{prior['receipt_id']}.json" if prior else None
+                if (prior is None or prior['previous_receipt_id'] != local.get('receipt_id')
+                        or candidate_path is None or not candidate_path.exists() or private_json(candidate_path) != prior
+                        or prior['session'] != evidence.get('session') or prior['recovery_point'] != evidence.get('recovery_point')
+                        or prior['manifest_sha256'] != evidence.get('manifest_sha256')
+                        or prior['source']['deployment_sha256'] != hashlib.sha256(encoded(deployment)).hexdigest()
+                        or prior['bootstrap_sha256'] != bootstrap_sha256):
+                    raise BackupError('durable local recovery selection differs from authoritative S3 selection')
+                # The same operation published its recorded candidate before interruption.
+                load_receipt_recovery(store, prior, workspace, bootstrap_sha256=bootstrap_sha256)
+                write_json(local_path, selection)
+            if (prior and prior['session'] == evidence.get('session') and prior['recovery_point'] == evidence.get('recovery_point')
+                    and prior['manifest_sha256'] == evidence.get('manifest_sha256')
+                    and prior['source']['deployment_sha256'] == hashlib.sha256(encoded(deployment)).hexdigest()
+                    and prior['bootstrap_sha256'] == bootstrap_sha256):
+                load_receipt_recovery(store, prior, workspace, bootstrap_sha256=bootstrap_sha256)
+                receipt = prior
+            else:
+                receipt = create_recovery_receipt(store, deployment, instance, evidence, bootstrap_sha256, workspace, previous=prior)
+                write_json(journal_dir / f"receipt-{receipt['receipt_id']}.json", receipt)
+                selection = publish_recovery_receipt(store, receipt, workspace, previous_selection=selection)
+            write_json(journal_dir / f"receipt-{receipt['receipt_id']}.json", receipt)
+            write_json(local_path, selection)
+            result[instance] = {'receipt_id': receipt['receipt_id'], 'selection': selection, 'receipt': receipt}
+    return result
 
 
 def tree_snapshot(data):

@@ -82,6 +82,16 @@ class BackupStoreTests(unittest.TestCase):
         self.assertEqual(args[args.index("--region") + 1], "us-west-2")
         self.assertEqual(call["environment"], {"AWS_PAGER": "", "AWS_CLI_AUTO_PROMPT": "off"})
 
+    def test_workstation_operations_pin_the_reviewed_profile(self):
+        self.store = backup_store.S3Store('family-backups', region='us-west-2', profile='workloads-admin')
+        self.steps({'operation': 'put-object'})
+        self.store.upload('instances/survival/receipts/one.json', self.source)
+        args = self.calls()[0]['args']
+        self.assertEqual(args[args.index('--profile') + 1], 'workloads-admin')
+        for profile in ('', '--debug', 'secret\nvalue', True):
+            with self.subTest(profile=profile), self.assertRaises(backup_store.BackupError):
+                backup_store.S3Store('family-backups', profile=profile)
+
     def test_download_checks_head_size_and_pins_etag_before_fetching_bytes(self):
         self.steps(
             {"operation": "head-object", "response": {"ContentLength": 3, "ETag": '\"revision-one\"'}},
@@ -92,6 +102,51 @@ class BackupStoreTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"abc")
         args = self.calls()[1]["args"]
         self.assertEqual(args[args.index("--if-match") + 1], '\"revision-one\"')
+
+    def test_versioned_reads_pin_current_or_explicit_version_and_validate_get_identity(self):
+        for supplied in (None, 'version-one'):
+            with self.subTest(version=supplied):
+                metadata = {'ContentLength': 3, 'ETag': '"revision-one"', 'VersionId': 'version-one'}
+                self.steps({'operation': 'head-object', 'response': metadata},
+                           {'operation': 'get-object', 'download': 'abc', 'response': metadata})
+                result = self.store.download_revision('instances/survival/completed/one.json',
+                    self.directory / 'versioned', max_bytes=3, version_id=supplied)
+                self.assertEqual(result['version_id'], 'version-one')
+                for index, call in enumerate(self.calls()):
+                    if index or supplied:
+                        args = call['args']
+                        self.assertEqual(args[args.index('--version-id') + 1], 'version-one')
+
+    def test_versioned_read_never_substitutes_missing_or_unversioned_objects(self):
+        self.steps({'operation': 'head-object', 'exit': 254,
+                    'error': 'An error occurred (NoSuchVersion) when calling the HeadObject operation: absent'})
+        self.assertIsNone(self.store.download_revision('one', self.directory / 'versioned', max_bytes=3, version_id='old'))
+        self.assertEqual(len(self.calls()), 1)
+        for version in (None, 'null'):
+            self.steps({'operation': 'head-object', 'response': {'ContentLength': 3, 'ETag': 'one', 'VersionId': version}})
+            with self.assertRaises(backup_store.BackupError):
+                self.store.download_revision('one', self.directory / 'versioned', max_bytes=3)
+
+    def test_changed_get_version_preserves_previous_local_bytes(self):
+        self.steps({'operation': 'head-object', 'response': {'ContentLength': 3, 'ETag': 'one', 'VersionId': 'old'}},
+                   {'operation': 'get-object', 'download': 'abc', 'response': {'ContentLength': 3, 'ETag': 'one', 'VersionId': 'new'}})
+        target = self.directory / 'versioned'
+        target.write_bytes(b'keep')
+        with self.assertRaises(backup_store.BackupError):
+            self.store.download_revision('one', target, max_bytes=3)
+        self.assertEqual(target.read_bytes(), b'keep')
+
+    def test_selection_publication_uses_conditional_write_and_requires_versioning(self):
+        for expected in (None, '"prior"'):
+            self.steps({'operation': 'put-object', 'response': {'ETag': '"next"', 'VersionId': 'next-version'}})
+            result = self.store.conditional_write('instances/survival/receipts/current.json', self.source, expected_etag=expected)
+            args = self.calls()[0]['args']
+            condition = '--if-match' if expected else '--if-none-match'
+            self.assertEqual(args[args.index(condition) + 1], expected or '*')
+            self.assertEqual(result['version_id'], 'next-version')
+        self.steps({'operation': 'put-object', 'response': {'ETag': '"next"', 'VersionId': 'null'}})
+        with self.assertRaises(backup_store.BackupError):
+            self.store.conditional_write('current', self.source, expected_etag=None)
 
     def test_oversize_or_unknown_length_is_rejected_without_a_download(self):
         for size in (4, -1, True, "3", None):

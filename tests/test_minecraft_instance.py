@@ -448,6 +448,20 @@ class InstanceTests(unittest.TestCase):
         self.machine.boot = "boot-after-ec2-restart"
         self.assertEqual(self.manager.execute("start", "survival")["application"], "running")
 
+    def test_private_drain_reports_exact_final_session_without_changing_public_shape(self):
+        self.machine.backup_works = True
+        self.manager.execute('start', 'survival')
+        session = self.manager.state('survival')['session']
+        result = self.manager.execute('host-drain-private')
+        self.assertEqual(result['recovery']['survival'], {'session': session,
+            'manifest_sha256': self.machine.revision, 'recovery_point': 'instances/survival/session-1'})
+        self.assertEqual(self.manager.execute('host-drain'), {key: result[key] for key in ('draining', 'instances')})
+        self.assertEqual(self.machine.events.count('backup'), 1)
+
+    def test_private_drain_cannot_call_an_unplayed_instance_a_recoverable_session(self):
+        with self.assertRaisesRegex(minecraft_instance.OperationError, 'final-session'):
+            self.manager.execute('host-drain-private')
+
 
 if __name__ == "__main__":
     unittest.main()
