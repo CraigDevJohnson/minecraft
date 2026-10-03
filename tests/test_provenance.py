@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from minecraft_host import HostError
-from minecraft_provenance import first_setup_command, moment, verify_fresh_volume
+from minecraft_provenance import events, first_setup_command, moment, verify_fresh_volume
 
 EPOCH = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
 DEPLOYMENT = {'account_id': '123456789012', 'region': 'us-west-2', 'availability_zone': 'us-west-2a',
@@ -42,6 +42,7 @@ class FakeAWS:
     def __init__(self):
         self.clock = 30
         self.calls = []
+        self.timeouts = []
         self.volume_calls = 0
         self.volume = {'VolumeId': DEPLOYMENT['data_volume_id'], 'Encrypted': True, 'Size': 2,
                        'VolumeType': 'gp3', 'SnapshotId': '', 'State': 'in-use',
@@ -76,6 +77,7 @@ class FakeAWS:
 
     def run(self, service, operation, *args, timeout):
         self.calls.append((service, operation, args, self.clock))
+        self.timeouts.append(timeout)
         if (service, operation) == ('sts', 'get-caller-identity'):
             return {'Account': DEPLOYMENT['account_id']}
         if (service, operation) == ('ec2', 'describe-volumes'):
@@ -212,6 +214,21 @@ class FreshVolumeBoundaryTests(unittest.TestCase):
         aws.page_token = 'repeat-token'
         with self.assertRaises(HostError):
             verify_fresh_volume(aws, DEPLOYMENT, JOURNAL)
+
+    def test_pagination_and_read_calls_share_the_operation_deadline(self):
+        aws = FakeAWS()
+        aws.page_token = 'next-page'
+        original = aws.run
+        def slow_page(service, operation, *args, timeout):
+            response = original(service, operation, *args, timeout=timeout)
+            aws.clock += 6
+            response['Events'] = []
+            response['NextToken'] = str(aws.clock)
+            return response
+        aws.run = slow_page
+        with self.assertRaises(HostError):
+            events(aws, DEPLOYMENT['host_id'], aws.monotonic() + 10)
+        self.assertEqual(aws.timeouts, [10, 4])
 
     def test_documented_first_setup_script_compiles_and_checks_exact_storage(self):
         command = first_setup_command(DEPLOYMENT, moment((EPOCH + dt.timedelta(seconds=2)).isoformat()))

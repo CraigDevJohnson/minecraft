@@ -12,6 +12,13 @@ WAIT_SECONDS = 900
 MAX_EVENT_PAGES = 100
 
 
+def read(aws, deadline, service, operation, *arguments):
+    remaining = deadline - aws.monotonic()
+    if remaining <= 0:
+        raise HostError('fresh-volume provenance timed out; no initialization is authorized')
+    return aws.run(service, operation, *arguments, timeout=min(30, remaining))
+
+
 def moment(value):
     if not isinstance(value, str):
         raise HostError('fresh-volume evidence has an invalid timestamp')
@@ -69,9 +76,9 @@ def inputs(deployment, journal):
         raise HostError('fresh-volume provenance lacks exact successful-apply and recovery identities') from exc
 
 
-def inventory(aws, deployment, start, end):
-    volumes = aws.run('ec2', 'describe-volumes', '--volume-ids', deployment['data_volume_id'], timeout=30).get('Volumes')
-    hosts = aws.run('ec2', 'describe-instances', '--instance-ids', deployment['host_id'], timeout=30).get('Reservations')
+def inventory(aws, deployment, start, end, deadline):
+    volumes = read(aws, deadline, 'ec2', 'describe-volumes', '--volume-ids', deployment['data_volume_id']).get('Volumes')
+    hosts = read(aws, deadline, 'ec2', 'describe-instances', '--instance-ids', deployment['host_id']).get('Reservations')
     try:
         instances = [host for reservation in hosts for host in reservation['Instances']]
         if not isinstance(volumes, list) or len(volumes) != 1 or len(instances) != 1:
@@ -79,7 +86,7 @@ def inventory(aws, deployment, start, end):
         volume, host = volumes[0], instances[0]
         attachments = volume['Attachments']
         if (volume['VolumeId'] != deployment['data_volume_id'] or volume['Encrypted'] is not True
-                or volume['Size'] != deployment['data_volume_size_gib'] or volume['VolumeType'] != 'gp3'
+                or type(volume['Size']) is not int or volume['Size'] != deployment['data_volume_size_gib'] or volume['VolumeType'] != 'gp3'
                 or volume.get('SnapshotId') or volume.get('SourceVolumeId') or volume.get('MultiAttachEnabled') is True
                 or volume['AvailabilityZone'] != deployment['availability_zone'] or volume['State'] != 'in-use'
                 or not isinstance(attachments, list) or len(attachments) != 1
@@ -95,14 +102,14 @@ def inventory(aws, deployment, start, end):
         raise HostError('current fresh-volume or host identity differs from its successful apply') from exc
 
 
-def events(aws, identifier):
+def events(aws, identifier, deadline):
     result, tokens, token = {}, set(), None
     for _ in range(MAX_EVENT_PAGES):
         args = ['--lookup-attributes', 'AttributeKey=ResourceName,AttributeValue=' + identifier,
                 '--max-results', '50', '--no-paginate']
         if token:
             args += ['--next-token', token]
-        page = aws.run('cloudtrail', 'lookup-events', *args, timeout=30)
+        page = read(aws, deadline, 'cloudtrail', 'lookup-events', *args)
         rows = page.get('Events')
         if not isinstance(rows, list):
             raise HostError('CloudTrail returned incomplete fresh-volume evidence')
@@ -220,16 +227,16 @@ MINECRAFT_PROVENANCE'''
 
 
 def host_check(aws, deployment, command, deadline):
-    sent = aws.run('ssm', 'send-command', '--instance-ids', deployment['host_id'], '--document-name',
+    sent = read(aws, deadline, 'ssm', 'send-command', '--instance-ids', deployment['host_id'], '--document-name',
                    'AWS-RunShellScript', '--timeout-seconds', '60', '--parameters',
-                   json.dumps({'commands': [command], 'executionTimeout': ['120']}), timeout=30)
+                   json.dumps({'commands': [command], 'executionTimeout': ['120']}))
     identity = sent.get('Command', {}).get('CommandId')
     if not isinstance(identity, str) or not re.fullmatch(r'[0-9a-f-]{36}', identity):
         raise HostError('first-setup inspection lacks a command identity')
     while aws.monotonic() < deadline:
         try:
-            result = aws.run('ssm', 'get-command-invocation', '--command-id', identity,
-                             '--instance-id', deployment['host_id'], timeout=min(30, deadline-aws.monotonic()))
+            result = read(aws, deadline, 'ssm', 'get-command-invocation', '--command-id', identity,
+                          '--instance-id', deployment['host_id'])
         except InvocationNotVisible:
             aws.sleep(2)
             continue
@@ -256,14 +263,14 @@ def verify_fresh_volume(aws, deployment, journal, *, timeout=1800):
     start, end = inputs(deployment, journal)
     if type(timeout) is not int or not 120 <= timeout <= 3600:
         raise HostError('fresh-volume provenance timeout is invalid')
-    caller = aws.run('sts', 'get-caller-identity', timeout=30)
+    deadline = aws.monotonic() + timeout
+    caller = read(aws, deadline, 'sts', 'get-caller-identity')
     if caller.get('Account') != deployment['account_id']:
         raise HostError('fresh-volume inspection is using another AWS account')
-    deadline = aws.monotonic() + timeout
     wallclock = getattr(aws, 'utcnow', lambda: dt.datetime.now(dt.timezone.utc))
     original = None
     while aws.monotonic() < deadline:
-        volume, _ = inventory(aws, deployment, start, end)
+        volume, _ = inventory(aws, deployment, start, end, deadline)
         attachment = volume['Attachments'][0]
         binding = (volume['VolumeId'], volume['CreateTime'], attachment['InstanceId'], attachment['AttachTime'])
         if original is not None and binding != original:
@@ -273,11 +280,11 @@ def verify_fresh_volume(aws, deployment, journal, *, timeout=1800):
         if remaining > 0:
             aws.sleep(min(30, remaining, max(0, deadline-aws.monotonic())))
             continue
-        history = events(aws, deployment['data_volume_id'])
+        history = events(aws, deployment['data_volume_id'], deadline)
         if any(event['ReadOnly'] == 'false' and event['EventName'] not in ('CreateVolume', 'AttachVolume')
                for event, _ in history.values()):
             raise HostError('fresh data volume has another write in its history')
-        for identity, event in events(aws, deployment['host_id']).items():
+        for identity, event in events(aws, deployment['host_id'], deadline).items():
             if identity in history and history[identity] != event:
                 raise HostError('CloudTrail indexes disagree about fresh-volume provenance')
             history[identity] = event
@@ -286,7 +293,7 @@ def verify_fresh_volume(aws, deployment, journal, *, timeout=1800):
             continue
         launches = [raw for event, raw in history.values() if event['EventName'] == 'RunInstances']
         checked = host_check(aws, deployment, first_setup_command(deployment, moment(launches[0]['eventTime'])), deadline)
-        final, _ = inventory(aws, deployment, start, end)
+        final, _ = inventory(aws, deployment, start, end, deadline)
         final_binding = (final['VolumeId'], final['CreateTime'], final['Attachments'][0]['InstanceId'], final['Attachments'][0]['AttachTime'])
         if final_binding != original:
             raise HostError('fresh-volume attachment changed before first-setup certification')
