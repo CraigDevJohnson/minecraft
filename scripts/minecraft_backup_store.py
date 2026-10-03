@@ -51,11 +51,13 @@ class S3Store:
     def for_operation(self, *, timeout: int):
         return S3Store(self.bucket, self.region, timeout=timeout, profile=self.profile)
 
-    def _call(self, operation: str, *arguments: str, download_limit: tuple[Path, int] | None = None) -> dict:
+    def _call(self, operation: str, *arguments: str, download_limit: tuple[Path, int] | None = None,
+              transfer_budget: bool = False) -> dict:
         started = time.monotonic()
         if started >= self.deadline:
             raise BackupError("S3 operation timed out")
-        deadline = min(self.deadline, started + COMMAND_TIMEOUT)
+        deadline = (self.deadline if operation == 'get-object' and transfer_budget and download_limit is not None
+                    else min(self.deadline, started + COMMAND_TIMEOUT))
         command = ["aws", "s3api", operation, "--bucket", self.bucket,
                    "--output", "json", "--no-cli-pager", "--no-cli-auto-prompt",
                    "--cli-connect-timeout", "10", "--cli-read-timeout", "60"]
@@ -180,7 +182,7 @@ class S3Store:
                 temporary = Path(directory) / "object"
                 result = self._call("get-object", "--key", key, *version_arguments,
                                     "--if-match", etag, str(temporary),
-                                    download_limit=(temporary, max_bytes))
+                                    download_limit=(temporary, max_bytes), transfer_budget=key.endswith('.tar.gz'))
                 if (not temporary.is_file() or temporary.stat().st_size != size
                         or type(result.get("ContentLength")) is not int or result["ContentLength"] != size
                         or (versioned and (result.get("VersionId") != selected_version or result.get("ETag") != etag))):

@@ -355,6 +355,32 @@ class BackupStoreTests(unittest.TestCase):
         self.assertEqual(later.profile, 'workloads-admin')
         self.assertEqual(later.bucket, initial.bucket)
 
+    def test_archive_transfer_can_exceed_metadata_deadline_within_operation_budget(self):
+        def elapsed_transfer():
+            try:
+                calls = json.loads(self.state.read_text())['calls']
+                return elapsed_after_start if any(call['args'][1] == 'get-object' for call in calls) else 0
+            except (OSError, ValueError):
+                return 0
+        for key, elapsed_after_start, succeeds in (('instances/survival/objects/point/data.tar.gz', 1000, True),
+                                                   ('instances/survival/completed/point.json', 1000, False),
+                                                   ('instances/survival/objects/point/data.tar.gz', 4000, False)):
+            with self.subTest(key=key):
+                self.steps({'operation': 'head-object', 'response': {'ContentLength': 3, 'ETag': 'one'}},
+                           {'operation': 'get-object', 'download': 'abc', 'sleep': 0.05,
+                            'response': {'ContentLength': 3}})
+                target = self.directory / 'long-transfer'
+                target.write_bytes(b'preserve')
+                with mock.patch.object(backup_store.time, 'monotonic', side_effect=elapsed_transfer):
+                    store = backup_store.S3Store('family-backups', timeout=3000)
+                    if succeeds:
+                        self.assertTrue(store.download(key, target, max_bytes=3))
+                        self.assertEqual(target.read_bytes(), b'abc')
+                    else:
+                        with self.assertRaisesRegex(backup_store.BackupError, 'timed out'):
+                            store.download(key, target, max_bytes=3)
+                        self.assertEqual(target.read_bytes(), b'preserve')
+
     def test_a_part_checksum_mismatch_aborts_before_publication(self):
         self.source.write_bytes(b"abcabc")
         self.steps(
