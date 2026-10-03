@@ -116,7 +116,7 @@ def verify_installed_release(release: Path, installed=Path('/opt/minecraft'), *,
     if not installed.exists():
         return 'missing'
     owner = 0 if require_root else os.geteuid()
-    scripts = ('minecraft_instance.py', 'minecraft_content.py', 'minecraft_access.py', 'minecraft_backup.py', 'minecraft_backup_store.py', 'minecraft_restore.py')
+    scripts = ('minecraft_instance.py', 'minecraft_content.py', 'minecraft_access.py', 'minecraft_backup.py', 'minecraft_backup_store.py', 'minecraft_restore.py', 'minecraft_retention.py')
     expected = {f'scripts/{name}': (release / 'scripts' / name).read_bytes() for name in scripts}
     expected.update({f'runtime/{name}': (release / 'runtime' / name).read_bytes() for name in RUNTIME})
     for name in ('minecraft-instance', 'minecraft-backup', 'minecraft-restore'):

@@ -93,7 +93,7 @@ stage="$(mktemp -d)"
 copy_dir=''
 trap 'rm -rf "$stage" "$copy_dir"' EXIT
 install -d -m 0755 "$stage/scripts" "$stage/runtime" "$stage/bin"
-for name in minecraft_instance.py minecraft_content.py minecraft_access.py minecraft_backup.py minecraft_backup_store.py minecraft_restore.py; do
+for name in minecraft_instance.py minecraft_content.py minecraft_access.py minecraft_backup.py minecraft_backup_store.py minecraft_restore.py minecraft_retention.py; do
 	install -m 0644 "$root_dir/scripts/$name" "$stage/scripts/$name"
 done
 for name in survival.json content.json creative.json content-raknet.json operator.json.example minecraft@.service; do
@@ -112,7 +112,7 @@ chmod 0755 "$stage"
 # Preflight every managed path before writing any installed content.
 if [[ -d "$install_dir" ]]; then
 	diff -rq --no-dereference "$stage" "$install_dir" >/dev/null || fail 'Installed release or desired content differs. Follow docs/operations/runtime-installation.md for a staged upgrade; nothing was replaced.'
-	for relative in scripts runtime bin scripts/minecraft_instance.py scripts/minecraft_content.py scripts/minecraft_access.py scripts/minecraft_backup.py scripts/minecraft_backup_store.py scripts/minecraft_restore.py runtime/survival.json runtime/content.json runtime/creative.json runtime/content-raknet.json runtime/operator.json.example runtime/minecraft@.service bin/minecraft-instance bin/minecraft-backup bin/minecraft-restore; do
+	for relative in scripts runtime bin scripts/minecraft_instance.py scripts/minecraft_content.py scripts/minecraft_access.py scripts/minecraft_backup.py scripts/minecraft_backup_store.py scripts/minecraft_restore.py scripts/minecraft_retention.py runtime/survival.json runtime/content.json runtime/creative.json runtime/content-raknet.json runtime/operator.json.example runtime/minecraft@.service bin/minecraft-instance bin/minecraft-backup bin/minecraft-restore; do
 		trusted_path "$install_dir/$relative"
 	done
 fi

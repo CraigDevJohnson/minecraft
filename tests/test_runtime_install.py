@@ -20,7 +20,7 @@ class RuntimeInstallTests(unittest.TestCase):
         (source / "scripts").mkdir(parents=True)
         (source / "runtime").mkdir()
         for name in ("minecraft_instance.py", "minecraft_content.py", "minecraft_access.py", "minecraft_backup.py",
-                     "minecraft_backup_store.py", "minecraft_restore.py", "check_runtime_install.py"):
+                     "minecraft_backup_store.py", "minecraft_restore.py", "minecraft_retention.py", "check_runtime_install.py"):
             shutil.copy2(ROOT / "scripts" / name, source / "scripts" / name)
         for name in ("survival.json", "content.json", "creative.json", "content-raknet.json", "operator.json.example", "minecraft@.service"):
             shutil.copy2(ROOT / "runtime" / name, source / "runtime" / name)
@@ -132,7 +132,7 @@ elif name == "stat":
             self.assertEqual(private.stat().st_mode & 0o777, 0o600)
             installed = root / "opt/minecraft"
             for name in ("minecraft_instance.py", "minecraft_content.py", "minecraft_access.py", "minecraft_backup.py",
-                         "minecraft_backup_store.py", "minecraft_restore.py"):
+                         "minecraft_backup_store.py", "minecraft_restore.py", "minecraft_retention.py"):
                 self.assertEqual((installed / "scripts" / name).read_bytes(), (source / "scripts" / name).read_bytes())
             self.assertEqual((installed / "runtime/content.json").read_bytes(), (source / "runtime/content.json").read_bytes())
             example = json.loads((installed / "runtime/operator.json.example").read_text())
