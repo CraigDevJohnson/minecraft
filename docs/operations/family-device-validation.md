@@ -9,7 +9,7 @@ Use this runbook for [issue #9](https://github.com/CraigDevJohnson/minecraft/iss
 3. Start `survival` through the [host commands](host-commands.md), including the private Cloudflare token reference when required. Wait for `application: running` and the DNS update before giving devices the private hostname. Use Java TCP port `25565` and Bedrock UDP port `19132` for the current release.
 4. Begin with Java and a direct tablet connection. If both fail, investigate server readiness, hostname resolution and protocol compatibility before changing console settings. A hostname can take about a minute to follow a host start; restart a client that retains the previous address.
 
-The current server is Paper 26.2 with ViaVersion for Java 26.3 and Geyser 2.11.3 for Bedrock 26.30–26.52. Recheck [runtime content](runtime-content.md) after any client or content update. The future NetherNet rollout changes Bedrock transport and needs its own real-device checks; this runbook does not certify Bedrock 26.60.
+The current server is Paper 26.2 with ViaVersion for Java 26.3 and Geyser 2.11.3 for Bedrock 26.30–26.52. Recheck [runtime content](runtime-content.md) after any client or content update. The approved dual-transport revision keeps this hostname/port while adding built-in NetherNet signaling on TCP `19132` and WebRTC UDP `19133`. After an approved rollout, confirm the hostname before accepting its first-use trust prompt; WebRTC UDP `19133` is negotiated, not a separate Add Server port. Preserve the Geyser identity through backup/restore and investigate unexpected trust changes. The exact client UI and each console transfer need real-device tests. This runbook does not certify Bedrock 26.60.
 
 ## Join on Java and tablet/iPad
 

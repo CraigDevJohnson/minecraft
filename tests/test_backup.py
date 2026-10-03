@@ -241,6 +241,43 @@ class BackupTests(unittest.TestCase):
         self.assertEqual((status['completion'], status['invalid_points']), ('unavailable', 1))
         self.assertEqual(backup.prune(self.store, 'survival', self.workspace)['outcome'], 'pending')
 
+    def test_raknet_v8_points_remain_valid_and_retained_after_dual_transport_upgrade(self):
+        current = json.loads((REPO / 'runtime/content.json').read_text())
+        previous = json.loads((REPO / 'tests/fixtures/content-survival-2026-10-02-bedrock-2650-viaversion.json').read_text())
+        self.use_manifest(previous)
+        points = []
+        with mock.patch.object(backup, '_validate_manifest'):
+            for sequence in range(15):
+                self.request['session'] = f'raknet-v8-{sequence}'
+                self.record_session()
+                points.append(self.publish()['recovery_point'])
+        self.use_manifest(current)
+        self.request['session'] = 'dual-transport'
+        self.record_session()
+        latest = self.publish()['recovery_point']
+        self.assertEqual(backup.status(self.store, 'survival', self.workspace)['invalid_points'], 0)
+        self.assertEqual(backup.load_recovery(self.store, 'survival', points[-1], self.workspace)[0]['manifest'], previous)
+        pruned = backup.prune(self.store, 'survival', self.workspace)
+        self.assertEqual((pruned['outcome'], pruned['removed']), ('complete', 2))
+        retained = backup.status(self.store, 'survival', self.workspace)['recovery_points']
+        self.assertEqual([point['recovery_point'] for point in retained], [latest, *reversed(points[2:])])
+
+    def test_custom_current_webrtc_port_round_trips_through_backup_metadata_and_catalog(self):
+        manifest = json.loads((REPO / 'runtime/content.json').read_text())
+        managed = manifest['managed_files'][0]
+        managed['content']['bedrock']['webrtc-port'] = 19134
+        import hashlib
+        from minecraft_content import _managed_file_bytes
+        managed['sha256'] = hashlib.sha256(_managed_file_bytes(managed)).hexdigest()
+        self.use_manifest(manifest)
+        self.record_session()
+        point = self.publish()['recovery_point']
+        recovered, _ = backup.load_recovery(self.store, 'survival', point, self.workspace)
+        self.assertEqual(recovered['manifest'], manifest)
+        status = backup.status(self.store, 'survival', self.workspace)
+        self.assertEqual(status['invalid_points'], 0)
+        self.assertEqual(status['recovery_points'][0]['manifest_sha256'], manifest_digest(manifest))
+
     def test_retention_keeps_fourteen_and_latest_after_long_inactivity(self):
         points = []
         for day in range(1, 17):

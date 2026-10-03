@@ -14,7 +14,7 @@ from unittest import mock
 
 import minecraft_content as content
 import minecraft_instance as runtime
-from validate_runtime import free_port
+from validate_runtime import free_port, free_signaling_port, require_local_webrtc_port
 import socket
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +62,9 @@ class LocalMachine(runtime.LinuxMachine):
     def boot_id(self):
         return self.simulated_boot
 
+    def nethernet_advertise_address(self):
+        return "127.0.0.1"
+
     def verify_inventory(self):
         # Limit inventory to the configured test project, leaving other local apps alone.
         for instance in self.definitions:
@@ -88,11 +91,14 @@ def validate(operator_config: Path, output: Path) -> dict:
     local_root = output / "retained-fixture"
     local_root.mkdir()
     instance = "lifecycle-" + secrets.token_hex(5)
+    manifest = content.load_manifest(ROOT / "runtime/content.json")
+    native_port = content.webrtc_port(manifest)
     definition = content.load_definition(ROOT / "runtime/survival.json")
-    definition.update(id=instance, java_port=free_port(socket.SOCK_STREAM), bedrock_port=free_port(socket.SOCK_DGRAM))
+    definition.update(id=instance, java_port=free_port(socket.SOCK_STREAM))
+    definition["bedrock_port"] = free_signaling_port(native_port, definition["java_port"])
+    require_local_webrtc_port(native_port)
     definition_path = output / "definition.json"
     runtime.write_json(definition_path, definition)
-    manifest = content.load_manifest(ROOT / "runtime/content.json")
     runtime.write_json(output / definition["manifest"], manifest)
     deployment_path = output / "deployment.json"
     runtime.write_json(deployment_path, {

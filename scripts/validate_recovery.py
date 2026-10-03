@@ -20,7 +20,7 @@ import minecraft_content as content
 import minecraft_instance as runtime
 import minecraft_restore as recovery
 from validate_lifecycle import LocalMachine
-from validate_runtime import DIMENSIONS, free_port, player_fixture
+from validate_runtime import DIMENSIONS, free_port, free_signaling_port, player_fixture, require_local_webrtc_port
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_HOOK = ["/fixture-only/minecraft-backup", "hook"]
@@ -128,9 +128,12 @@ def validate(operator_config, output):
         raise ValueError("recovery evidence directory must be new")
     output.mkdir(parents=True, mode=0o700)
     instance = "recovery-" + secrets.token_hex(5)
-    definition = content.load_definition(ROOT / "runtime/survival.json")
-    definition.update(id=instance, java_port=free_port(socket.SOCK_STREAM), bedrock_port=free_port(socket.SOCK_DGRAM))
     manifest = content.load_manifest(ROOT / "runtime/content.json")
+    native_port = content.webrtc_port(manifest)
+    definition = content.load_definition(ROOT / "runtime/survival.json")
+    definition.update(id=instance, java_port=free_port(socket.SOCK_STREAM))
+    definition["bedrock_port"] = free_signaling_port(native_port, definition["java_port"])
+    require_local_webrtc_port(native_port)
     runtime.write_json(output / "definition.json", definition)
     runtime.write_json(output / definition["manifest"], manifest)
     source_secret = write_rcon_secret(output / "source-rcon.secret")

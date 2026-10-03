@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -28,6 +29,9 @@ CROSSPLAY_PLUGINS = ("Geyser-Spigot", "floodgate", "ViaVersion")
 JAVA_PROTOCOLS = {"26.2": 776, "26.3": 777}
 BEDROCK_DISCOVERY = {"protocol": 2193, "version": "26.51"}
 MAX_STATUS_BYTES = 256 * 1024
+# Official eclipse-temurin:25-jdk-noble Linux ARM64 manifest, resolved 2026-10-03.
+# Only this disposable compiler uses a JDK; the server stays on its existing pinned JRE.
+NATIVE_PROBE_COMPILER = "eclipse-temurin@sha256:12f85590d237a882284d98f76886e6395a50764e91038d13a8a87b4f03b8b64b"
 
 
 def run(command: list[str], *, timeout: int = 60) -> str:
@@ -39,6 +43,92 @@ def free_port(kind: int) -> int:
     with socket.socket(socket.AF_INET, kind) as listener:
         listener.bind(("127.0.0.1", 0))
         return listener.getsockname()[1]
+
+
+def free_signaling_port(webrtc_port: int = 19133, java_port: int | None = None) -> int:
+    """One loopback host port carries both RakNet UDP and HTTP signaling TCP."""
+    for _ in range(20):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+            tcp.bind(("127.0.0.1", 0))
+            port = tcp.getsockname()[1]
+            if port in (webrtc_port, java_port):
+                continue
+            try:
+                udp.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("cannot allocate one free TCP/UDP signaling port")
+
+
+def require_local_webrtc_port(port: int = 19133) -> None:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.bind(("127.0.0.1", port))
+    except OSError as error:
+        raise RuntimeError(f"local UDP {port} is occupied; preserve the other runtime and retry validation later") from error
+
+
+def check_nethernet_metadata(value: dict) -> dict:
+    expected = {"protocol": 2193, "version": "26.51", "maxPlayers": 6,
+                "transportLayer": 2, "connection": 4, "onlineAuth": True, "selfSignedAuth": False}
+    if not isinstance(value, dict) or any(type(value.get(key)) is not type(item) or value[key] != item
+                                         for key, item in expected.items()):
+        raise RuntimeError("NetherNet signaling metadata differs from the pinned authenticated transport")
+    if type(value.get("players")) is not int or not 0 <= value["players"] <= value["maxPlayers"]:
+        raise RuntimeError("NetherNet signaling player count is invalid")
+    return {**expected, "players": value["players"]}
+
+
+def nethernet_signaling(port: int) -> dict:
+    """Discovery and admission denial only; an unauthenticated request creates no ICE peer."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        connection.request("GET", "/v1/join")
+        reply = connection.getresponse()
+        body = reply.read(65537)
+        if (reply.status != 200 or reply.getheader("Content-Type", "").split(";")[0] != "application/json"
+                or len(body) > 65536):
+            raise RuntimeError("NetherNet signaling did not return bounded discovery JSON")
+        try:
+            metadata = check_nethernet_metadata(json.loads(body))
+        except (ValueError, UnicodeError) as error:
+            raise RuntimeError("NetherNet signaling returned malformed JSON") from error
+        connection.request("POST", "/v1/join/native-probe", body=b"v=0\r\n",
+                           headers={"Content-Type": "application/sdp"})
+        reply = connection.getresponse()
+        if reply.status != 401 or reply.read(65537):
+            raise RuntimeError("NetherNet signaling did not reject unauthenticated admission")
+        return {"discovery": metadata, "unauthenticated_admission": "denied",
+                "authenticated_geyser_peer": "unverified", "real_bedrock_join": "unverified"}
+    except (OSError, http.client.HTTPException) as error:
+        raise RuntimeError("NetherNet signaling request failed") from error
+    finally:
+        connection.close()
+
+
+def native_transport_probe(manifest: dict, artifacts: Path, output: Path) -> dict:
+    """Separate native peer pair; no production auth override or Minecraft assertion."""
+    classes = output / "native-probe-classes"
+    classes.mkdir(mode=0o700)
+    jar = artifacts / "plugins/Geyser-Spigot.jar"
+    mounts = ["--mount", f"type=bind,source={jar},target=/probe/geyser.jar,readonly",
+              "--mount", f"type=bind,source={classes},target=/probe/classes"]
+    isolated = ["docker", "run", "--rm", "--platform", "linux/arm64", "--network", "none",
+                "--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,size=64m"]
+    run([*isolated, *mounts, "--mount", f"type=bind,source={ROOT / 'scripts/NetherNetNativeProbe.java'},target=/probe/NetherNetNativeProbe.java,readonly",
+         "--entrypoint", "javac", NATIVE_PROBE_COMPILER, "--release", "17", "-cp", "/probe/geyser.jar",
+         "-d", "/probe/classes", "/probe/NetherNetNativeProbe.java"], timeout=300)
+    port = content.webrtc_port(manifest)
+    result = json.loads(run([*isolated, *mounts, "--entrypoint", "java", manifest["image"],
+        "--enable-native-access=ALL-UNNAMED", "-cp", "/probe/classes:/probe/geyser.jar",
+        "NetherNetNativeProbe", str(port)], timeout=45))
+    expected = {"status": "passed", "scope": "isolated_bundled_native_transport", "udp_port": port,
+                "reliable_echo": True, "unreliable_echo": True,
+                "geyser_admission_verified": False, "bedrock_join_verified": False}
+    if result != expected or any(type(result.get(key)) is not type(value) for key, value in expected.items()):
+        raise RuntimeError("bundled native UDP/data-channel probe failed or returned invalid evidence")
+    return result
 
 
 def player_fixture() -> bytes:
@@ -170,18 +260,22 @@ def validate(operator_config: Path, output: Path) -> dict:
     data.mkdir(mode=0o755)
     manifest = content.load_manifest(ROOT / "runtime/content.json")
     definition = content.load_definition(ROOT / "runtime/survival.json")
+    native_port = content.webrtc_port(manifest)
     definition["java_port"] = free_port(socket.SOCK_STREAM)
-    definition["bedrock_port"] = free_port(socket.SOCK_DGRAM)
+    definition["bedrock_port"] = free_signaling_port(native_port, definition["java_port"])
+    # The pinned native API advertises same-port NAT only.
+    require_local_webrtc_port(native_port)
     artifacts = content.stage_content(manifest, output / "artifacts")
     compose = content.render_compose(definition, manifest, data_dir=data, artifacts_dir=artifacts,
-        rcon_password=secrets.token_urlsafe(32), eula_accepted=True, bind_address="127.0.0.1")
+        rcon_password=secrets.token_urlsafe(32), eula_accepted=True, bind_address="127.0.0.1",
+        nethernet_advertise_address="127.0.0.1")
     compose_file = output / "compose.json"
     compose_file.write_text(json.dumps(compose, indent=2, sort_keys=True) + "\n")
     compose_file.chmod(0o600)
     project = "minecraft-verify-" + secrets.token_hex(5)
     base = ["docker", "compose", "-p", project, "-f", str(compose_file)]
     report = {"platform": platform, "manifest_sha256": content.manifest_digest(manifest),
-              "image": manifest["image"], "project": project, "status": "incomplete"}
+              "image": manifest["image"], "project": project, "webrtc_port": native_port, "status": "incomplete"}
     container = ""
 
     def rcon(command):
@@ -222,6 +316,7 @@ def validate(operator_config: Path, output: Path) -> dict:
         raise RuntimeError("Minecraft clean shutdown timed out; retained container for inspection")
 
     try:
+        report["nethernet_native_transport"] = native_transport_probe(manifest, artifacts, output)
         start()
         first_container = container
         report["server_version"] = rcon("version")
@@ -235,14 +330,24 @@ def validate(operator_config: Path, output: Path) -> dict:
         check_plugins(report["plugins"])
         report["bedrock_advertised"] = check_bedrock_discovery(report["bedrock_discovery"])
         report["java_status"] = java_statuses(definition["java_port"])
+        report["nethernet_signaling"] = nethernet_signaling(definition["bedrock_port"])
+        report["nethernet_acceptance"] = "unverified"
         properties = (data / "server.properties").read_text()
         for setting in ("online-mode=true", "white-list=true", "enforce-whitelist=true", "rcon.ip=127.0.0.1"):
             if setting not in properties.splitlines():
                 raise RuntimeError("runtime access configuration failed verification")
         inspect = json.loads(run(["docker", "inspect", container]))[0]
+        if "JVM_OPTS=-DgeyserAdvertiseAddresses=127.0.0.1" not in inspect["Config"]["Env"]:
+            raise RuntimeError("the local NetherNet NAT advertisement override was not applied")
         bindings = inspect["HostConfig"]["PortBindings"]
-        if "25575/tcp" in bindings or any(binding["HostIp"] != "127.0.0.1" for values in bindings.values() for binding in values):
-            raise RuntimeError("runtime smoke ports were not isolated")
+        expected_bindings = {
+            "25565/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(definition["java_port"])}],
+            "19132/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(definition["bedrock_port"])}],
+            "19132/udp": [{"HostIp": "127.0.0.1", "HostPort": str(definition["bedrock_port"])}],
+            f"{native_port}/udp": [{"HostIp": "127.0.0.1", "HostPort": str(native_port)}],
+        }
+        if bindings != expected_bindings:
+            raise RuntimeError("runtime smoke ports did not preserve the isolated dual-transport mapping")
         sockets = run([*base, "exec", "-T", "minecraft", "cat", "/proc/net/tcp", "/proc/net/tcp6"])
         rcon_sockets = [line.split()[1] for line in sockets.splitlines() if len(line.split()) > 3 and line.split()[3] == "0A" and line.split()[1].endswith(":63E7")]
         if len(rcon_sockets) != 1 or rcon_sockets[0] not in {"0100007F:63E7", "0000000000000000FFFF00000100007F:63E7"}:
@@ -270,6 +375,10 @@ def validate(operator_config: Path, output: Path) -> dict:
         fixtures["plugins/floodgate/key.pem"] = floodgate_key.read_bytes()
         fixtures["plugins/floodgate/config.yml"] = (data / "plugins/floodgate/config.yml").read_bytes()
         fixtures["plugins/Geyser-Spigot/config.yml"] = (data / "plugins/Geyser-Spigot/config.yml").read_bytes()
+        identity = data / "plugins/Geyser-Spigot/nethernet/identity.pem"
+        if not identity.is_file():
+            raise RuntimeError("NetherNet did not retain its first-use trust identity")
+        fixtures["plugins/Geyser-Spigot/nethernet/identity.pem"] = identity.read_bytes()
         # Geyser rewrites config.yml only when its config-version is not the pinned build's.
         report["geyser_config_sha256"] = hashlib.sha256(fixtures["plugins/Geyser-Spigot/config.yml"]).hexdigest()
         if report["geyser_config_sha256"] != manifest["managed_files"][0]["sha256"]:
@@ -280,6 +389,7 @@ def validate(operator_config: Path, output: Path) -> dict:
             if not (data / "world/dimensions/minecraft" / dimension / "region/r.0.0.mca").is_file():
                 raise RuntimeError("missing dimension fixture region")
         start()
+        report["nethernet_signaling_after_recreation"] = nethernet_signaling(definition["bedrock_port"])
         if container == first_container:
             raise RuntimeError("container was not recreated")
         for dimension in DIMENSIONS:
@@ -294,6 +404,7 @@ def validate(operator_config: Path, output: Path) -> dict:
                       recreated_container=True, dimensions=list(DIMENSIONS),
                       preserved_fixture_files=len(fixtures),
                       limitations=["Synthetic player data; no authenticated player/device join.",
+                                   "Signaling discovery/denial and separate bundled native transport smoke do not prove authenticated Geyser WebRTC admission or external UDP reachability.",
                                    "Java 26.3 support is a ViaVersion status handshake, not a 26.3 client join.",
                                    "Local bind storage; EBS guard and backup/AWS orchestration use separate tests.",
                                    "No S3 backup, live recovery, or console compatibility claim."])

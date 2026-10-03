@@ -25,14 +25,71 @@ def write_manifest(directory: str, manifest: dict) -> Path:
     return path
 
 
+def with_webrtc_port(manifest: dict, port) -> dict:
+    changed = copy.deepcopy(manifest)
+    managed = changed["managed_files"][0]
+    managed["content"]["bedrock"]["webrtc-port"] = port
+    managed["sha256"] = hashlib.sha256(content._managed_file_bytes(managed)).hexdigest()
+    return changed
+
+
 class ContentTests(unittest.TestCase):
+    def test_two_instances_own_non_overlapping_same_port_webrtc_bindings(self):
+        survival = content.load_definition(ROOT / "runtime/survival.json")
+        creative = dict(survival, id="creative", java_port=25566, bedrock_port=19135)
+        manifest = content.load_manifest(ROOT / "runtime/content.json")
+        creative_manifest = with_webrtc_port(manifest, 19134)
+        content._validate_manifest(creative_manifest)
+        content._validate_manifest(creative_manifest, recorded=True)
+        ports = []
+        for definition, selected in ((survival, manifest), (creative, creative_manifest)):
+            rendered = content.render_compose(definition, selected,
+                data_dir=Path("/private") / definition["id"] / "data", artifacts_dir=Path("/private/artifacts"),
+                rcon_password="a-private-fixture-password", eula_accepted=True)
+            ports.append(content.published_game_ports(definition, selected))
+            port = content.webrtc_port(selected)
+            self.assertIn(f"0.0.0.0:{port}:{port}/udp", rendered["services"]["minecraft"]["ports"])
+        self.assertFalse(ports[0] & ports[1])
+        self.assertEqual(content.webrtc_port(manifest), 19133)
+
+    def test_manifest_port_variation_preserves_every_other_typed_configuration_value(self):
+        manifest = content.load_manifest(ROOT / "runtime/content.json")
+        for port in (1, 19134, 65535):
+            custom = with_webrtc_port(manifest, port)
+            content._validate_manifest(custom)
+            content._validate_manifest(custom, recorded=True)
+        for port in (0, -1, 65536, 19132, True, False, 19134.0, "19134", None):
+            custom = with_webrtc_port(manifest, port)
+            with self.subTest(port=port), self.assertRaisesRegex(content.ContentError, "configuration schema"):
+                content._validate_manifest(custom)
+        for mutate in (lambda c: c["bedrock"]["signaling"].update(mode="nxs"),
+                       lambda c: c["java"].update({"auth-type": "offline"}),
+                       lambda c: c.update({"log-player-ip-addresses": True})):
+            custom = with_webrtc_port(manifest, 19134)
+            managed = custom["managed_files"][0]
+            mutate(managed["content"])
+            managed["sha256"] = hashlib.sha256(content._managed_file_bytes(managed)).hexdigest()
+            with self.assertRaisesRegex(content.ContentError, "configuration schema"):
+                content._validate_manifest(custom, recorded=True)
+
+    def test_custom_webrtc_port_rejects_udp_collision_but_may_share_a_tcp_number(self):
+        definition = content.load_definition(ROOT / "runtime/survival.json")
+        manifest = content.load_manifest(ROOT / "runtime/content.json")
+        parameters = dict(data_dir=Path("/private/data"), artifacts_dir=Path("/private/artifacts"),
+                          rcon_password="a-private-fixture-password", eula_accepted=True)
+        with self.assertRaises(content.ContentError):
+            content.render_compose(dict(definition, bedrock_port=19134), with_webrtc_port(manifest, 19134), **parameters)
+        rendered = content.render_compose(definition, with_webrtc_port(manifest, 25565), **parameters)
+        self.assertIn("0.0.0.0:25565:25565/udp", rendered["services"]["minecraft"]["ports"])
+
     def test_managed_configuration_is_recoverable_from_the_exact_manifest(self):
         manifest = content.load_manifest(ROOT / "runtime/content.json")
-        expected = (b'{"bedrock":{"address":"0.0.0.0","clone-remote-port":false,"port":19132},'
+        expected = (b'{"bedrock":{"address":"0.0.0.0","clone-remote-port":false,"port":19132,'
+                    b'"signaling":{"mode":"builtin"},"transport":"both","webrtc-port":19133},'
                     b'"config-version":8,"java":{"auth-type":"floodgate"},'
                     b'"log-player-ip-addresses":false,"saved-user-logins":[]}\n')
         self.assertEqual(hashlib.sha256(expected).hexdigest(),
-                         "a98d3442120aa0cfe4eb63e28eebb935b01e7c52b0aa1d8e55bb6d618d1c442f")
+                         "961fc91c79c38f8e09fd14d1e959b06522ec72b595b933e78fef83563e4b8e42")
         artifact_bytes = b"fixture artifact contents"
         for artifact in manifest["artifacts"]:
             artifact["sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
@@ -68,6 +125,12 @@ class ContentTests(unittest.TestCase):
             lambda c: c.update({"config-version": 7}),
             lambda c: c.update({"config-version": 9}),
             lambda c: c["bedrock"].update(transport="webrtc"),
+            lambda c: c["bedrock"].update(transport="raknet"),
+            lambda c: c["bedrock"].update({"webrtc-port": 19132}),
+            lambda c: c["bedrock"].update({"webrtc-port": True}),
+            lambda c: c["bedrock"]["signaling"].update(mode="nxs"),
+            lambda c: c["bedrock"]["signaling"].update(token="unapproved"),
+            lambda c: c["bedrock"].pop("signaling"),
             lambda c: c.update({"log-player-ip-addresses": True}),
             lambda c: c.update({"saved-user-logins": ["unapproved-fixture"]}),
             lambda c: c["java"].clear(),
@@ -100,7 +163,7 @@ class ContentTests(unittest.TestCase):
         self.assertEqual(viaversion["url"], "https://github.com/ViaVersion/ViaVersion/releases/download/5.12.0/ViaVersion-5.12.0.jar")
         managed = manifest["managed_files"][0]
         self.assertEqual(managed["content"]["config-version"], 8)
-        self.assertEqual(managed["sha256"], "a98d3442120aa0cfe4eb63e28eebb935b01e7c52b0aa1d8e55bb6d618d1c442f")
+        self.assertEqual(managed["sha256"], "961fc91c79c38f8e09fd14d1e959b06522ec72b595b933e78fef83563e4b8e42")
         self.assertNotEqual(content.manifest_digest(manifest),
                             content.manifest_digest(json.loads(PREVIOUS_MANIFEST.read_text())))
 
@@ -172,6 +235,34 @@ class ContentTests(unittest.TestCase):
             with self.subTest(invalid=invalid["artifacts"]), self.assertRaises(content.ContentError):
                 content._validate_manifest(invalid, recorded=True)
 
+    def test_raknet_v8_is_recorded_only_and_requires_the_exact_reviewed_manifest(self):
+        previous = json.loads((ROOT / "tests/fixtures/content-survival-2026-10-02-bedrock-2650-viaversion.json").read_text())
+        self.assertEqual(content.manifest_digest(previous),
+                         "72f0640583a5fec446ccd299cbbf35c5aff6815a358eb251cece7975bd148c82")
+        content._validate_manifest(previous, recorded=True)
+        with self.assertRaises(content.ContentError):
+            content._validate_manifest(previous)
+        changed = copy.deepcopy(previous)
+        changed["revision"] = "unreviewed-raknet-copy"
+        with self.assertRaisesRegex(content.ContentError, "exact earlier reviewed"):
+            content._validate_manifest(changed, recorded=True)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(content.ContentError):
+                content.stage_content(previous, Path(directory))
+
+    def test_custom_local_ports_publish_both_transports_without_exposing_rcon(self):
+        definition = content.load_definition(ROOT / "runtime/survival.json")
+        definition.update(java_port=25566, bedrock_port=29000)
+        compose = content.render_compose(definition, content.load_manifest(ROOT / "runtime/content.json"),
+            data_dir=Path("/private/data"), artifacts_dir=Path("/private/artifacts"),
+            rcon_password="a-private-fixture-password", eula_accepted=True, bind_address="127.0.0.1",
+            nethernet_advertise_address="127.0.0.1")
+        self.assertEqual(compose["services"]["minecraft"]["ports"], [
+            "127.0.0.1:25566:25565/tcp", "127.0.0.1:29000:19132/udp",
+            "127.0.0.1:29000:19132/tcp", "127.0.0.1:19133:19133/udp"])
+        self.assertEqual(compose["services"]["minecraft"]["environment"]["JVM_OPTS"],
+                         "-DgeyserAdvertiseAddresses=127.0.0.1")
+
     def test_managed_configuration_integrity_and_file_identity_are_required(self):
         manifest = content.load_manifest(ROOT / "runtime/content.json")
         for mutate in (
@@ -209,7 +300,8 @@ class ContentTests(unittest.TestCase):
         self.assertEqual(env["CUSTOM_SERVER"], "/runtime/paper.jar")
         self.assertEqual(env["MAX_PLAYERS"], "6")
         self.assertNotIn("OPS", env)
-        self.assertEqual(service["ports"], ["0.0.0.0:25565:25565/tcp", "0.0.0.0:19132:19132/udp"])
+        self.assertEqual(service["ports"], ["0.0.0.0:25565:25565/tcp", "0.0.0.0:19132:19132/udp",
+                                          "0.0.0.0:19132:19132/tcp", "0.0.0.0:19133:19133/udp"])
         self.assertTrue(all(not mount["bind"]["create_host_path"] for mount in service["volumes"]))
         # Every pinned plugin JAR, including ViaVersion, is synced from one read-only staged source.
         self.assertIn({"type": "bind", "source": "/opt/minecraft/content/fixture/plugins", "target": "/plugins",
