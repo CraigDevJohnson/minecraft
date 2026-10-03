@@ -23,7 +23,7 @@ def build(output: Path) -> str:
         binary = Path(directory) / "bootstrap"
         environment = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64", "GOFLAGS": "-mod=readonly"}
         subprocess.run(
-            ["go", "build", "-trimpath", "-tags", "lambda.norpc", "-ldflags", "-s -w -buildid=", "-o", str(binary), "."],
+            ["go", "build", "-trimpath", "-buildvcs=false", "-tags", "lambda.norpc", "-ldflags", "-s -w -buildid=", "-o", str(binary), "."],
             cwd=SOURCE,
             env=environment,
             check=True,
