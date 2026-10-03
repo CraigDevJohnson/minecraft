@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -19,6 +21,13 @@ import minecraft_content as content
 
 ROOT = Path(__file__).resolve().parents[1]
 DIMENSIONS = ("overworld", "the_nether", "the_end")
+# Expectations for the pinned content in runtime/content.json. Paper 26.2 speaks Java protocol
+# 776; ViaVersion 5.12.0 lets Java 26.3 (protocol 777) clients join. Geyser 2.11.3 advertises its
+# newest Bedrock codec (protocol 2193, labelled 26.51) in discovery.
+CROSSPLAY_PLUGINS = ("Geyser-Spigot", "floodgate", "ViaVersion")
+JAVA_PROTOCOLS = {"26.2": 776, "26.3": 777}
+BEDROCK_DISCOVERY = {"protocol": 2193, "version": "26.51"}
+MAX_STATUS_BYTES = 256 * 1024
 
 
 def run(command: list[str], *, timeout: int = 60) -> str:
@@ -58,6 +67,91 @@ def bedrock_ping(port: int) -> str:
     if response[:1] != b"\x1c" or b"MCPE;" not in response:
         raise RuntimeError("Geyser did not answer the Bedrock discovery ping")
     return response[response.index(b"MCPE;"):].decode("utf-8")
+
+
+def check_bedrock_discovery(advertisement: str) -> dict:
+    """Require the pinned Geyser's Bedrock protocol/version in its discovery answer."""
+    fields = advertisement.split(";")
+    try:
+        if fields[0] != "MCPE":
+            raise ValueError("not a Bedrock edition advertisement")
+        advertised = {"protocol": int(fields[2]), "version": fields[3],
+                      "online": int(fields[4]), "max_players": int(fields[5])}
+    except (IndexError, ValueError) as error:
+        raise RuntimeError("Bedrock discovery response is malformed") from error
+    if {key: advertised[key] for key in BEDROCK_DISCOVERY} != BEDROCK_DISCOVERY:
+        raise RuntimeError(f"Bedrock discovery advertised protocol {advertised['protocol']} version "
+                           f"{advertised['version']}; expected {BEDROCK_DISCOVERY}")
+    return advertised
+
+
+def check_plugins(listing: str) -> None:
+    if not all(name in listing for name in CROSSPLAY_PLUGINS):
+        raise RuntimeError("crossplay plugins were not loaded")
+
+
+def varint(value: int) -> bytes:
+    encoded = bytearray()
+    while True:
+        byte, value = value & 0x7F, value >> 7
+        encoded.append(byte | (0x80 if value else 0))
+        if not value:
+            return bytes(encoded)
+
+
+def handshake(protocol: int, port: int) -> bytes:
+    """A Java Edition handshake from a loopback client asking for status (next state 1)."""
+    host = b"127.0.0.1"
+    body = varint(0) + varint(protocol) + varint(len(host)) + host + struct.pack(">H", port) + varint(1)
+    return varint(len(body)) + body
+
+
+def read_varint(stream) -> int:
+    value = 0
+    for shift in range(0, 35, 7):
+        byte = stream.read(1)
+        if not byte:
+            raise RuntimeError("Java status response ended early")
+        value |= (byte[0] & 0x7F) << shift
+        if not byte[0] & 0x80:
+            return value
+    raise RuntimeError("Java status response has an invalid length")
+
+
+def java_status(port: int, protocol: int) -> dict:
+    """Ask the loopback Java listener for its status as a client speaking ``protocol``."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as client, client.makefile("rb") as stream:
+            client.sendall(handshake(protocol, port) + varint(1) + varint(0))
+            length = read_varint(stream)
+            body = stream.read(length) if 0 < length <= MAX_STATUS_BYTES else b""
+    except OSError as error:
+        raise RuntimeError(f"Java status ping with protocol {protocol} failed") from error
+    if not body or len(body) != length:
+        raise RuntimeError("Java status response ended early or exceeded its size limit")
+    packet = io.BytesIO(body)
+    if read_varint(packet) != 0:
+        raise RuntimeError("Java listener did not answer with a status response")
+    text = packet.read(read_varint(packet))
+    try:
+        version = json.loads(text.decode("utf-8"))["version"]
+        status = {"name": version["name"], "protocol": version["protocol"]}
+    except (ValueError, KeyError, TypeError) as error:
+        raise RuntimeError("Java status response is malformed") from error
+    if not isinstance(status["name"], str) or type(status["protocol"]) is not int:
+        raise RuntimeError("Java status response is malformed")
+    return status
+
+
+def java_statuses(port: int) -> dict:
+    """Paper must answer 26.2 natively and ViaVersion must accept 26.3 clients."""
+    statuses = {}
+    for release, protocol in JAVA_PROTOCOLS.items():
+        statuses[release] = java_status(port, protocol)
+        if statuses[release]["protocol"] != protocol:
+            raise RuntimeError(f"Java {release} status handshake (protocol {protocol}) was answered "
+                               f"with protocol {statuses[release]['protocol']}")
+    return statuses
 
 
 def validate(operator_config: Path, output: Path) -> dict:
@@ -136,9 +230,11 @@ def validate(operator_config: Path, output: Path) -> dict:
             report["server_version"] = rcon("version")
         report["plugins"] = rcon("plugins")
         report["geyser_version"] = rcon("geyser version")
+        report["viaversion_version"] = rcon("version ViaVersion")
         report["bedrock_discovery"] = bedrock_ping(definition["bedrock_port"])
-        if not all(name in report["plugins"] for name in ("Geyser", "floodgate")):
-            raise RuntimeError("crossplay plugins were not loaded")
+        check_plugins(report["plugins"])
+        report["bedrock_advertised"] = check_bedrock_discovery(report["bedrock_discovery"])
+        report["java_status"] = java_statuses(definition["java_port"])
         properties = (data / "server.properties").read_text()
         for setting in ("online-mode=true", "white-list=true", "enforce-whitelist=true", "rcon.ip=127.0.0.1"):
             if setting not in properties.splitlines():
@@ -174,6 +270,10 @@ def validate(operator_config: Path, output: Path) -> dict:
         fixtures["plugins/floodgate/key.pem"] = floodgate_key.read_bytes()
         fixtures["plugins/floodgate/config.yml"] = (data / "plugins/floodgate/config.yml").read_bytes()
         fixtures["plugins/Geyser-Spigot/config.yml"] = (data / "plugins/Geyser-Spigot/config.yml").read_bytes()
+        # Geyser rewrites config.yml only when its config-version is not the pinned build's.
+        report["geyser_config_sha256"] = hashlib.sha256(fixtures["plugins/Geyser-Spigot/config.yml"]).hexdigest()
+        if report["geyser_config_sha256"] != manifest["managed_files"][0]["sha256"]:
+            raise RuntimeError("Geyser rewrote the managed configuration; check its config-version")
         if not (data / "world/level.dat").is_file():
             raise RuntimeError("missing world metadata")
         for dimension in DIMENSIONS:
@@ -194,6 +294,7 @@ def validate(operator_config: Path, output: Path) -> dict:
                       recreated_container=True, dimensions=list(DIMENSIONS),
                       preserved_fixture_files=len(fixtures),
                       limitations=["Synthetic player data; no authenticated player/device join.",
+                                   "Java 26.3 support is a ViaVersion status handshake, not a 26.3 client join.",
                                    "Local bind storage; EBS guard and backup/AWS orchestration use separate tests.",
                                    "No S3 backup, live recovery, or console compatibility claim."])
         return report

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
 	"strings"
@@ -19,6 +20,7 @@ import (
 
 // DrainCommand is the same fixed host-side interface scripts/minecraft_host.py uses for host stop.
 const DrainCommand = "/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json host-drain"
+const HostStatusCommand = "/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json host-status"
 
 const (
 	remoteTimeoutSeconds = 3600
@@ -53,11 +55,13 @@ type Pinger func(ctx context.Context, address string) (int, error)
 
 // Config is supplied by the function's environment.
 type Config struct {
-	HostID         string
-	StateParameter string
-	GameAddress    string
-	IdleAfter      time.Duration
-	Instances      []string
+	HostID                   string
+	StateParameter           string
+	IdleAfter                time.Duration
+	Instances                []string
+	PublicHostname           string
+	CloudflareZoneID         string
+	CloudflareTokenSecretARN string
 }
 
 // State persists between invocations in an SSM parameter. LaunchTime ties it to one EC2 run, so a stop and
@@ -68,6 +72,8 @@ type State struct {
 	DrainCommandID string     `json:"drain_command_id,omitempty"`
 	DrainSentAt    *time.Time `json:"drain_sent_at,omitempty"`
 	Blocked        string     `json:"blocked,omitempty"`
+	StopRequested  bool       `json:"stop_requested,omitempty"`
+	DNSPending     bool       `json:"dns_pending,omitempty"`
 }
 
 // Result is logged after every invocation. It holds no addresses, identifiers or player data.
@@ -82,16 +88,18 @@ var ErrBlocked = errors.New("idle stop blocked")
 
 // Controller decides, one scheduled invocation at a time, whether an idle host should be drained and stopped.
 type Controller struct {
-	Config Config
-	EC2    EC2API
-	SSM    SSMAPI
-	Ping   Pinger
-	Now    func() time.Time
+	Config  Config
+	EC2     EC2API
+	SSM     SSMAPI
+	Ping    Pinger
+	Now     func() time.Time
+	ParkDNS func(context.Context) error
 }
 
 type host struct {
 	state      ec2types.InstanceStateName
 	launchTime time.Time
+	publicIP   string
 }
 
 // Run performs one idle check. A returned error fails the invocation, which the deployment alarms on.
@@ -105,6 +113,11 @@ func (c *Controller) Run(ctx context.Context) (Result, error) {
 		return Result{Action: "error"}, err
 	}
 	if h.state != ec2types.InstanceStateNameRunning {
+		if saved.DNSPending && (h.state == ec2types.InstanceStateNameStopping || h.state == ec2types.InstanceStateNameStopped) {
+			if err := c.parkDNS(ctx, &saved); err != nil {
+				return Result{Action: "dns-pending"}, err
+			}
+		}
 		if saved != (State{}) {
 			if err := c.saveState(ctx, State{}); err != nil {
 				return Result{Action: "error"}, err
@@ -116,7 +129,7 @@ func (c *Controller) Run(ctx context.Context) (Result, error) {
 	if !state.LaunchTime.Equal(h.launchTime) {
 		state = State{LaunchTime: h.launchTime}
 	}
-	result, err := c.step(ctx, &state)
+	result, err := c.step(ctx, &state, h.publicIP)
 	if !statesEqual(state, saved) {
 		if saveErr := c.saveState(ctx, state); saveErr != nil {
 			return Result{Action: "error"}, errors.Join(err, saveErr)
@@ -125,7 +138,15 @@ func (c *Controller) Run(ctx context.Context) (Result, error) {
 	return result, err
 }
 
-func (c *Controller) step(ctx context.Context, state *State) (Result, error) {
+func (c *Controller) step(ctx context.Context, state *State, publicIP string) (Result, error) {
+	if state.StopRequested {
+		if state.DNSPending {
+			if err := c.parkDNS(ctx, state); err != nil {
+				return Result{Action: "dns-pending"}, err
+			}
+		}
+		return Result{Action: "stop-pending"}, nil
+	}
 	if state.Blocked != "" {
 		return Result{Action: "blocked", Detail: state.Blocked}, fmt.Errorf("%w: %s", ErrBlocked, state.Blocked)
 	}
@@ -133,17 +154,20 @@ func (c *Controller) step(ctx context.Context, state *State) (Result, error) {
 		return c.followDrain(ctx, state)
 	}
 	now := c.Now().UTC()
-	players, pingErr := c.Ping(ctx, c.Config.GameAddress)
-	if pingErr == nil && players > 0 {
+	if net.ParseIP(publicIP) == nil {
+		state.IdleSince = nil
+		return Result{Action: "error"}, errors.New("running host has no valid public address")
+	}
+	players, pingErr := c.Ping(ctx, net.JoinHostPort(publicIP, "25565"))
+	if pingErr != nil {
+		state.IdleSince = nil
+		return Result{Action: "error"}, errors.New("server status ping failed; idle countdown cleared")
+	}
+	if players > 0 {
 		state.IdleSince = nil
 		return Result{Action: "active", Players: &players}, nil
 	}
 	detail := "no players online"
-	if pingErr != nil {
-		// An unreachable server on a running host still costs money. The drain is the safe path either way:
-		// it saves and backs up anything that is running and refuses to report success otherwise.
-		detail = "server did not answer the status ping"
-	}
 	if state.IdleSince == nil {
 		state.IdleSince = &now
 		return Result{Action: "idle-started", Detail: detail}, nil
@@ -196,12 +220,94 @@ func (c *Controller) followDrain(ctx context.Context, state *State) (Result, err
 	if err := ValidateDrain(aws.ToString(invocation.StandardOutputContent), c.Config.Instances); err != nil {
 		return c.block(state, err.Error())
 	}
+	if err := c.confirmDrain(ctx); err != nil {
+		if errors.Is(err, ErrBlocked) {
+			return c.block(state, "fresh host status lacks complete drain evidence")
+		}
+		return Result{Action: "error"}, err
+	}
+	current, err := c.describeHost(ctx)
+	if err != nil {
+		return Result{Action: "error"}, err
+	}
+	if current.state != ec2types.InstanceStateNameRunning || !current.launchTime.Equal(state.LaunchTime) {
+		*state = State{LaunchTime: current.launchTime}
+		return Result{Action: "host-changed"}, nil
+	}
+	// Persist the parking obligation before stopping EC2. Even a timeout or failed later state write
+	// must leave enough durable progress for the next invocation to park an already stopped host.
+	if !state.DNSPending {
+		state.DNSPending = true
+		if err := c.saveState(ctx, *state); err != nil {
+			state.DNSPending = false
+			return Result{Action: "error"}, err
+		}
+	}
 	if _, err := c.EC2.StopInstances(ctx, &ec2.StopInstancesInput{InstanceIds: []string{c.Config.HostID}}); err != nil {
 		// The drain barrier is boot-bound and stays in place, so a retry on the next invocation is safe.
 		return Result{Action: "error"}, fmt.Errorf("stop host after verified drain: %w", err)
 	}
-	*state = State{LaunchTime: state.LaunchTime}
+	*state = State{LaunchTime: state.LaunchTime, StopRequested: true, DNSPending: true}
+	if err := c.parkDNS(ctx, state); err != nil {
+		return Result{Action: "dns-pending"}, err
+	}
 	return Result{Action: "stopped"}, nil
+}
+
+// A reboot keeps EC2 LaunchTime but clears the boot-bound drain barrier. Read current host status
+// immediately before every stop attempt; never reuse its completion on a later invocation.
+func (c *Controller) confirmDrain(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	id, err := c.sendCommand(ctx, HostStatusCommand, 20)
+	if err != nil {
+		return err
+	}
+	for {
+		invocation, err := c.SSM.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
+			CommandId: aws.String(id), InstanceId: aws.String(c.Config.HostID),
+		})
+		var missing *ssmtypes.InvocationDoesNotExist
+		if err != nil && !errors.As(err, &missing) {
+			return errors.New("fresh host status could not be read")
+		}
+		if err == nil {
+			switch invocation.Status {
+			case ssmtypes.CommandInvocationStatusSuccess:
+				if invocation.ResponseCode != 0 || ValidateDrain(aws.ToString(invocation.StandardOutputContent), c.Config.Instances) != nil {
+					return ErrBlocked
+				}
+				return nil
+			case ssmtypes.CommandInvocationStatusPending, ssmtypes.CommandInvocationStatusInProgress, ssmtypes.CommandInvocationStatusDelayed:
+			default:
+				return ErrBlocked
+			}
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.New("fresh host status did not complete within the stop check")
+		case <-timer.C:
+		}
+	}
+}
+
+func (c *Controller) parkDNS(ctx context.Context, state *State) error {
+	current, err := c.describeHost(ctx)
+	if err != nil {
+		return err
+	}
+	// A new launch supersedes the previous stop even when DNS parking failed.
+	if !current.launchTime.Equal(state.LaunchTime) {
+		*state = State{LaunchTime: current.launchTime}
+		return nil
+	}
+	if err := c.ParkDNS(ctx); err != nil {
+		return errors.New("DNS parking failed; retry pending")
+	}
+	state.DNSPending = false
+	return nil
 }
 
 func (c *Controller) block(state *State, reason string) (Result, error) {
@@ -212,14 +318,18 @@ func (c *Controller) block(state *State, reason string) (Result, error) {
 }
 
 func (c *Controller) sendDrain(ctx context.Context) (string, error) {
+	return c.sendCommand(ctx, DrainCommand, remoteTimeoutSeconds)
+}
+
+func (c *Controller) sendCommand(ctx context.Context, command string, timeout int) (string, error) {
 	output, err := c.SSM.SendCommand(ctx, &ssm.SendCommandInput{
 		InstanceIds:    []string{c.Config.HostID},
 		DocumentName:   aws.String("AWS-RunShellScript"),
 		Comment:        aws.String("minecraft idle stop"),
 		TimeoutSeconds: aws.Int32(60),
 		Parameters: map[string][]string{
-			"commands":         {DrainCommand},
-			"executionTimeout": {fmt.Sprint(remoteTimeoutSeconds)},
+			"commands":         {command},
+			"executionTimeout": {fmt.Sprint(timeout)},
 		},
 	})
 	if err != nil {
@@ -243,7 +353,7 @@ func (c *Controller) describeHost(ctx context.Context) (host, error) {
 	if len(found) != 1 || aws.ToString(found[0].InstanceId) != c.Config.HostID || found[0].State == nil {
 		return host{}, errors.New("describe host: AWS returned an unexpected host")
 	}
-	h := host{state: found[0].State.Name}
+	h := host{state: found[0].State.Name, publicIP: aws.ToString(found[0].PublicIpAddress)}
 	if found[0].LaunchTime != nil {
 		h.launchTime = found[0].LaunchTime.UTC()
 	}

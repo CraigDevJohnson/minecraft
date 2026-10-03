@@ -28,7 +28,7 @@ resource "aws_instance" "host" {
   availability_zone           = var.availability_zone
   subnet_id                   = aws_subnet.public.id
   vpc_security_group_ids      = [aws_security_group.host.id]
-  associate_public_ip_address = false
+  associate_public_ip_address = true
   iam_instance_profile        = aws_iam_instance_profile.host.name
   monitoring                  = false
   user_data_replace_on_change = true
@@ -54,10 +54,18 @@ resource "aws_instance" "host" {
   }
 
   tags = { Name = "${var.resource_prefix}-host", Purpose = "replaceable-host" }
+  lifecycle {
+    # EC2 releases the auto-assigned address when the host stops, and the provider then
+    # reads false: without this, any plan taken while the host is stopped replaces it.
+    ignore_changes = [associate_public_ip_address]
+  }
   depends_on = [
     aws_iam_role_policy.ssm,
     aws_iam_role_policy.backups,
     aws_vpc_security_group_egress_rule.web,
+    # First boot installs packages and registers with SSM through the public route.
+    aws_route.internet,
+    aws_route_table_association.public,
   ]
 }
 
@@ -65,7 +73,7 @@ resource "aws_ebs_volume" "data" {
   availability_zone = var.availability_zone
   encrypted         = true
   type              = "gp3"
-  size              = 40
+  size              = var.data_volume_size_gib
   tags              = { Name = "${var.resource_prefix}-data", Purpose = "retained-instance-data" }
   lifecycle {
     prevent_destroy = true

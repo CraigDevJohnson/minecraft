@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
@@ -29,15 +30,23 @@ func loadConfig(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	cfg := Config{
-		HostID:         getenv("HOST_ID"),
-		StateParameter: getenv("STATE_PARAMETER"),
-		GameAddress:    getenv("GAME_ADDRESS"),
-		IdleAfter:      time.Duration(minutes) * time.Minute,
-		Instances:      instances,
+	if len(instances) != 1 {
+		return Config{}, errors.New("idle stop requires exactly one game instance on port 25565")
 	}
-	if cfg.HostID == "" || cfg.StateParameter == "" || cfg.GameAddress == "" {
-		return Config{}, errors.New("HOST_ID, STATE_PARAMETER and GAME_ADDRESS are required")
+	cfg := Config{
+		HostID:                   getenv("HOST_ID"),
+		StateParameter:           getenv("STATE_PARAMETER"),
+		IdleAfter:                time.Duration(minutes) * time.Minute,
+		Instances:                instances,
+		PublicHostname:           getenv("PUBLIC_HOSTNAME"),
+		CloudflareZoneID:         getenv("CLOUDFLARE_ZONE_ID"),
+		CloudflareTokenSecretARN: getenv("CLOUDFLARE_TOKEN_SECRET_ARN"),
+	}
+	if cfg.HostID == "" || cfg.StateParameter == "" {
+		return Config{}, errors.New("HOST_ID and STATE_PARAMETER are required")
+	}
+	if len(cfg.PublicHostname) > 253 || !hostname.MatchString(cfg.PublicHostname) || !cloudflareID.MatchString(cfg.CloudflareZoneID) || cfg.CloudflareTokenSecretARN == "" {
+		return Config{}, errors.New("valid hostname, zone and token secret ARN are required")
 	}
 	return cfg, nil
 }
@@ -51,12 +60,14 @@ func main() {
 	if err != nil {
 		log.Fatal(fmt.Errorf("load AWS configuration: %w", err))
 	}
+	parker := &DNSParker{Hostname: cfg.PublicHostname, ZoneID: cfg.CloudflareZoneID, SecretARN: cfg.CloudflareTokenSecretARN, Secrets: secretsmanager.NewFromConfig(awsConfig), Client: cloudflareClient()}
 	controller := &Controller{
-		Config: cfg,
-		EC2:    ec2.NewFromConfig(awsConfig),
-		SSM:    ssm.NewFromConfig(awsConfig),
-		Ping:   PingPlayers,
-		Now:    time.Now,
+		Config:  cfg,
+		EC2:     ec2.NewFromConfig(awsConfig),
+		SSM:     ssm.NewFromConfig(awsConfig),
+		Ping:    PingPlayers,
+		Now:     time.Now,
+		ParkDNS: parker.Park,
 	}
 	lambda.Start(func(ctx context.Context) (Result, error) {
 		result, err := controller.Run(ctx)

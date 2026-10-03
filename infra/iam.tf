@@ -8,7 +8,8 @@ resource "aws_iam_role" "host" {
       Principal = { Service = "ec2.amazonaws.com" }
     }]
   })
-  tags = { Purpose = "host-credentials" }
+  permissions_boundary = var.host_permissions_boundary_arn
+  tags                 = { Purpose = "host-credentials" }
 }
 
 resource "aws_iam_instance_profile" "host" {

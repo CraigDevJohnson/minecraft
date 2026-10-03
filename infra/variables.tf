@@ -16,6 +16,19 @@ variable "operator_role_arn" {
   }
 }
 
+variable "host_permissions_boundary_arn" {
+  description = "Administrator-owned managed policy, named outside the operator's IAM prefix, that caps every host role the operator can create or pass."
+  type        = string
+  validation {
+    condition     = can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", var.host_permissions_boundary_arn)) && try(split(":", var.host_permissions_boundary_arn)[4], "") == var.account_id
+    error_message = "host_permissions_boundary_arn must name a managed policy in the target account."
+  }
+  validation {
+    condition     = !startswith(lower(reverse(split("/", var.host_permissions_boundary_arn))[0]), "${var.resource_prefix}-")
+    error_message = "host_permissions_boundary_arn must name a policy outside the resource prefix, so prefix-scoped operator permissions never cover it."
+  }
+}
+
 variable "environment" {
   description = "Deployment environment, distinct from a server instance ID."
   type        = string
@@ -80,6 +93,16 @@ variable "data_filesystem_uuid" {
   }
 }
 
+variable "data_volume_size_gib" {
+  description = "Retained data disk size in GiB. EBS grows online but never shrinks: only ever increase this for an existing disk (docs/operations/data-disk-capacity.md). Recommended start: 5."
+  type        = number
+  nullable    = false
+  validation {
+    condition     = var.data_volume_size_gib >= 2 && var.data_volume_size_gib <= 128 && floor(var.data_volume_size_gib) == var.data_volume_size_gib
+    error_message = "data_volume_size_gib must be a whole number of GiB from 2 through 128."
+  }
+}
+
 variable "backup_bucket_name" {
   description = "Globally unique private backup bucket name, separate from the state bucket."
   type        = string
@@ -96,6 +119,24 @@ variable "instance_ids" {
   validation {
     condition     = length(var.instance_ids) > 0 && alltrue([for id in var.instance_ids : can(regex("^[a-z][a-z0-9-]{0,31}$", id))])
     error_message = "Each instance ID must begin with a lowercase letter and contain at most 32 lowercase letters, digits, or hyphens."
+  }
+}
+
+variable "public_hostname" {
+  description = "Private DNS hostname that players use. The operator command points its existing Cloudflare A record at the running host and parks it while the host is stopped."
+  type        = string
+  validation {
+    condition     = length(var.public_hostname) <= 253 && can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.public_hostname))
+    error_message = "public_hostname must be a lowercase DNS hostname of at most 253 characters with at least one dot and no scheme, port, or trailing dot."
+  }
+}
+
+variable "cloudflare_zone_id" {
+  description = "Cloudflare zone ID of the zone that holds public_hostname. The API token never belongs in OpenTofu inputs or state."
+  type        = string
+  validation {
+    condition     = can(regex("^[0-9a-f]{32}$", var.cloudflare_zone_id))
+    error_message = "cloudflare_zone_id must be a 32-character lowercase hexadecimal zone ID."
   }
 }
 
@@ -122,11 +163,20 @@ variable "budget_notification_email" {
 variable "idle_stop" {
   description = "Optional scheduled function that drains and stops an idle host. package_path is the zip built by `task lambda:package`; null deploys none of its resources."
   type = object({
-    package_path             = string
-    idle_minutes             = optional(number, 30)
-    permissions_boundary_arn = optional(string)
+    package_path                = string
+    cloudflare_token_secret_arn = string
+    idle_minutes                = optional(number, 30)
+    permissions_boundary_arn    = optional(string)
   })
   default = null
+  validation {
+    condition     = var.idle_stop == null || try(can(regex("^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$", var.idle_stop.cloudflare_token_secret_arn)) && split(":", var.idle_stop.cloudflare_token_secret_arn)[3] == var.region && split(":", var.idle_stop.cloudflare_token_secret_arn)[4] == var.account_id, false)
+    error_message = "idle_stop.cloudflare_token_secret_arn must name an administrator-owned secret in the deployment account and region."
+  }
+  validation {
+    condition     = var.idle_stop == null || length(var.instance_ids) == 1
+    error_message = "idle_stop supports exactly one game instance on Java port 25565."
+  }
   validation {
     condition     = var.idle_stop == null || try(var.idle_stop.idle_minutes >= 10 && var.idle_stop.idle_minutes <= 240 && floor(var.idle_stop.idle_minutes) == var.idle_stop.idle_minutes, false)
     error_message = "idle_stop.idle_minutes must be a whole number from 10 to 240."

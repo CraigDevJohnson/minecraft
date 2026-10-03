@@ -16,6 +16,19 @@ variable "operator_role_arn" {
   }
 }
 
+variable "host_permissions_boundary_arn" {
+  description = "Administrator-owned managed policy, named outside the operator's IAM prefix, that caps the recovery host role like every other host role the operator can create or pass."
+  type        = string
+  validation {
+    condition     = can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", var.host_permissions_boundary_arn)) && try(split(":", var.host_permissions_boundary_arn)[4], "") == var.account_id
+    error_message = "host_permissions_boundary_arn must name a managed policy in the target account."
+  }
+  validation {
+    condition     = !startswith(lower(reverse(split("/", var.host_permissions_boundary_arn))[0]), "${var.resource_prefix}-")
+    error_message = "host_permissions_boundary_arn must name a policy outside the resource prefix, so prefix-scoped operator permissions never cover it."
+  }
+}
+
 variable "environment" {
   description = "Temporary recovery environment name."
   type        = string
@@ -153,11 +166,11 @@ variable "recovery_root_volume_size_gib" {
 }
 
 variable "recovery_data_volume_size_gib" {
-  description = "Temporary target disk size in GiB; the recovery plan requires 10 percent staging headroom beyond the measured archive and extracted files."
+  description = "Temporary target disk size in GiB, at least the 2 GiB floor of a retained data disk; the recovery plan requires 10 percent staging headroom beyond the measured archive and extracted files."
   type        = number
   validation {
-    condition     = var.recovery_data_volume_size_gib >= 40 && floor(var.recovery_data_volume_size_gib) == var.recovery_data_volume_size_gib
-    error_message = "recovery_data_volume_size_gib must be a whole number of at least 40 GiB."
+    condition     = var.recovery_data_volume_size_gib >= 2 && floor(var.recovery_data_volume_size_gib) == var.recovery_data_volume_size_gib
+    error_message = "recovery_data_volume_size_gib must be a whole number of at least 2 GiB."
   }
 }
 

@@ -106,7 +106,9 @@ def validate_metadata(metadata, instance=None, recovery_point=None):
                 or point_identity(metadata['instance'], metadata['session'], metadata['manifest_sha256']) != metadata['recovery_point']):
             raise BackupError('recovery identity mismatch')
         timestamp(metadata['created_at'])
-        _validate_manifest(metadata['manifest'])
+        # A recovery point may record an earlier reviewed content release. Restore still
+        # requires the configured manifest to match it exactly (minecraft_restore.restore).
+        _validate_manifest(metadata['manifest'], recorded=True)
         _validate_definition(metadata['definition'])
         if (manifest_digest(metadata['manifest']) != metadata['manifest_sha256']
                 or manifest_digest(metadata['definition']) != metadata['definition_sha256']

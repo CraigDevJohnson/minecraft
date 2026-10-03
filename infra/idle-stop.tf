@@ -60,6 +60,12 @@ resource "aws_iam_role_policy" "idle_stop" {
         Resource = [local.idle_stop_state_arn]
       },
       {
+        Sid      = "ReadOnlyCloudflareToken"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = [var.idle_stop.cloudflare_token_secret_arn]
+      },
+      {
         Sid      = "OwnLogsOnly"
         Effect   = "Allow"
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
@@ -87,24 +93,27 @@ resource "aws_cloudwatch_log_group" "idle_stop" {
 }
 
 resource "aws_lambda_function" "idle_stop" {
-  count            = local.idle_stop_count
-  function_name    = local.idle_stop_name
-  description      = "Drains and stops the Minecraft host after it has been idle."
-  role             = aws_iam_role.idle_stop[0].arn
-  runtime          = "provided.al2023"
-  architectures    = ["arm64"]
-  handler          = "bootstrap"
-  filename         = var.idle_stop.package_path
-  source_code_hash = filebase64sha256(var.idle_stop.package_path)
-  memory_size      = 128
-  timeout          = 60
+  count                          = local.idle_stop_count
+  function_name                  = local.idle_stop_name
+  description                    = "Drains and stops the Minecraft host after it has been idle."
+  role                           = aws_iam_role.idle_stop[0].arn
+  runtime                        = "provided.al2023"
+  architectures                  = ["arm64"]
+  handler                        = "bootstrap"
+  filename                       = var.idle_stop.package_path
+  source_code_hash               = filebase64sha256(var.idle_stop.package_path)
+  memory_size                    = 128
+  timeout                        = 60
+  reserved_concurrent_executions = 1
   environment {
     variables = {
-      HOST_ID         = aws_instance.host.id
-      STATE_PARAMETER = aws_ssm_parameter.idle_stop_state[0].name
-      GAME_ADDRESS    = "${aws_eip.host.public_ip}:25565"
-      IDLE_MINUTES    = tostring(var.idle_stop.idle_minutes)
-      INSTANCES       = join(",", sort(tolist(var.instance_ids)))
+      HOST_ID                     = aws_instance.host.id
+      STATE_PARAMETER             = aws_ssm_parameter.idle_stop_state[0].name
+      PUBLIC_HOSTNAME             = var.public_hostname
+      CLOUDFLARE_ZONE_ID          = var.cloudflare_zone_id
+      CLOUDFLARE_TOKEN_SECRET_ARN = var.idle_stop.cloudflare_token_secret_arn
+      IDLE_MINUTES                = tostring(var.idle_stop.idle_minutes)
+      INSTANCES                   = join(",", sort(tolist(var.instance_ids)))
     }
   }
   logging_config {

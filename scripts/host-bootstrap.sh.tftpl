@@ -64,8 +64,9 @@ DOCKER_GATE
 timeout --kill-after=10s 30s systemctl mask docker.service docker.socket
 timeout --kill-after=10s 30s systemctl daemon-reload
 
-# Both host roots launch without a public IPv4 address; the EIP is associated later.
-# Wait for IMDSv2 to report that association before running network package commands.
+# Both host roots launch with an auto-assigned public IPv4 address, so this normally
+# passes at once. It still fails closed, before any network package command, if a host
+# ever launches without one.
 python3 - <<'WAIT_FOR_PUBLIC_IP'
 import ipaddress
 import sys

@@ -215,10 +215,12 @@ class Manager:
                     self.machine.verify_inventory()
                     for configured in self.instances:
                         self.stop(configured)
-                return {"draining": self.draining(), "instances": {
+                result = {"draining": self.draining(), "instances": {
                     configured: self.status(configured) for configured in self.instances}}
+                # The drain response is completion evidence with a fixed shape; only status reports usage.
+                return {**result, "storage": self.machine.storage_usage()} if action == "host-status" else result
             if action == "start":
-                return self.start(instance)
+                return {**self.start(instance), "storage": self.machine.storage_usage()}
             if action == "status":
                 return self.status(instance)
             if action in ("stop", "backup"):
@@ -428,6 +430,15 @@ class LinuxMachine:
         command(["/usr/local/sbin/minecraft-storage", "verify", "--volume-id", self.deployment["data_volume_id"],
                  "--filesystem-uuid", self.deployment["data_filesystem_uuid"]])
         verify_retained_paths(self.root)
+
+    def storage_usage(self):
+        """Retained-disk capacity as an unprivileged writer sees it; used_percent is df's Use%."""
+        usage = os.statvfs(self.root)
+        used = usage.f_blocks - usage.f_bfree
+        writable = used + usage.f_bavail  # excludes the blocks ext4 reserves for root
+        return {"size_bytes": usage.f_frsize * usage.f_blocks,
+                "available_bytes": usage.f_frsize * usage.f_bavail,
+                "used_percent": -(-100 * used // writable) if writable else 100}
 
     @staticmethod
     def boot_id():
