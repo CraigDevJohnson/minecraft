@@ -68,9 +68,34 @@ def verified_executable(path, digest, identity):
         raise HostError('cannot validate reviewed executable') from exc
 
 
+def source_principal(response):
+    """Stable caller identity; assumed-role session names alone are renewable."""
+    try:
+        account, arn, identifier = (response[name] for name in ('Account','Arn','UserId'))
+        if (not isinstance(account,str) or not re.fullmatch(r'[0-9]{12}',account)
+                or not isinstance(arn,str) or not arn.startswith('arn:aws:')
+                or not isinstance(identifier,str) or not identifier):
+            raise ValueError
+        parts=arn.split(':',5)
+        if len(parts)!=6 or parts[4]!=account:
+            raise ValueError
+        if parts[2]=='sts' and parts[5].startswith('assumed-role/'):
+            if len(parts[5].split('/'))!=3 or not all(parts[5].split('/')) or ':' not in identifier:
+                raise ValueError
+            arn=arn.rsplit('/',1)[0]
+            identifier=identifier.split(':',1)[0]
+        elif parts[2]!='iam' or not (parts[5]=='root' or parts[5].startswith('user/')):
+            raise ValueError
+        if not re.fullmatch(r'[A-Za-z0-9]{1,128}',identifier):
+            raise ValueError
+        return {'account_id':account,'principal_arn':arn,'principal_id':identifier}
+    except (ValueError,KeyError,TypeError) as exc:
+        raise HostError('source caller identity is invalid or unsupported') from exc
+
+
 class AWSCLI:
     def __init__(self, region: str, profile: str | None = None, role_arn: str | None = None,
-                 *, executable=None, executable_sha256=None, executable_identity=None):
+                 *, executable=None, executable_sha256=None, executable_identity=None, source_identity=None, credential_environment=None):
         self.region = region
         self.profile = profile
         self.role_arn = role_arn
@@ -79,6 +104,8 @@ class AWSCLI:
         self.executable = executable
         self.executable_sha256 = executable_sha256
         self.executable_identity = executable_identity
+        self.source_identity = source_identity
+        self.credential_environment = credential_environment
 
     def command_path(self):
         if self.executable is None:
@@ -89,6 +116,8 @@ class AWSCLI:
     sleep = staticmethod(time.sleep)
 
     def environment(self) -> dict:
+        if self.credential_environment is not None:
+            return dict(self.credential_environment)
         transport_overrides = {'AWS_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'PYTHONPATH', 'PYTHONHOME'}
         environment = {key: value for key, value in os.environ.items()
                        if key != CLOUDFLARE_TOKEN and key not in transport_overrides and not key.startswith("AWS_ENDPOINT_URL")}
@@ -99,8 +128,11 @@ class AWSCLI:
                 environment.pop(name, None)
         if self.role_arn is not None:
             if self.credentials is None or self.monotonic() >= self.credentials_deadline:
-                response = AWSCLI(self.region, self.profile, executable=self.executable,
-                                  executable_sha256=self.executable_sha256, executable_identity=self.executable_identity).run("sts", "assume-role", "--role-arn", self.role_arn,
+                source = self.source_client()
+                if self.source_identity is not None:
+                    source.profile = None
+                    source.credential_environment = self.source_environment()
+                response = source.run("sts", "assume-role", "--role-arn", self.role_arn,
                          "--role-session-name", "minecraft-host", "--duration-seconds", "3600", timeout=30)
                 credentials = response.get("Credentials")
                 role_name = self.role_arn.rsplit("/", 1)[-1]
@@ -116,6 +148,31 @@ class AWSCLI:
                 environment.pop(name, None)
             environment.update(self.credentials)
         return environment
+
+    def source_client(self):
+        return AWSCLI(self.region,self.profile,executable=self.executable,executable_sha256=self.executable_sha256,
+                      executable_identity=self.executable_identity)
+
+    def source_environment(self):
+        if self.source_identity is None:
+            raise HostError('reviewed source principal is required for lifecycle credentials')
+        source=self.source_client()
+        exported=source.run('configure','export-credentials','--format','process',timeout=30)
+        if (type(exported.get('Version')) is not int or exported['Version']!=1 or any(not isinstance(exported.get(name),str) or not exported[name]
+                                             for name in ('AccessKeyId','SecretAccessKey'))
+                or exported.get('SessionToken') is not None and (not isinstance(exported['SessionToken'],str) or not exported['SessionToken'])):
+            raise HostError('source profile did not export valid temporary credentials')
+        environment=source.environment()
+        for name in ('AWS_PROFILE','AWS_DEFAULT_PROFILE','AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','AWS_SESSION_TOKEN','AWS_SECURITY_TOKEN'):
+            environment.pop(name,None)
+        environment.update(AWS_ACCESS_KEY_ID=exported['AccessKeyId'],AWS_SECRET_ACCESS_KEY=exported['SecretAccessKey'])
+        if exported.get('SessionToken'):
+            environment['AWS_SESSION_TOKEN']=exported['SessionToken']
+        source.profile=None
+        source.credential_environment=environment
+        if source_principal(source.run('sts','get-caller-identity',timeout=30))!=self.source_identity:
+            raise HostError('source principal differs from reviewed lifecycle identity')
+        return dict(environment)
 
     def run(self, service: str, operation: str, *arguments: str, timeout: float) -> dict:
         command = [self.command_path(), "--region", self.region, "--output", "json", "--no-cli-pager", "--no-cli-auto-prompt", service, operation, *arguments]
@@ -486,7 +543,7 @@ def main(argv=None, *, aws=None, cloudflare=None) -> int:
             policy = load_policy(args.lifecycle, args.policy_sha256, deployment)
             client = aws or AWSCLI(deployment["region"], policy["aws_profile"], deployment["operator_role_arn"],
                                    executable=policy['aws_cli_path'], executable_sha256=policy['aws_cli_sha256'],
-                                   executable_identity=policy['aws_cli_file_identity'])
+                                   executable_identity=policy['aws_cli_file_identity'], source_identity=policy['aws_source_identity'])
             session = OnDemandSession(deployment, client, cloudflare or CloudflareAPI(), policy, args.deployment, started_at=command_started_at, started_monotonic=command_started_monotonic)
         else:
             session = HostSession(deployment, aws or AWSCLI(deployment["region"]), cloudflare or CloudflareAPI())
