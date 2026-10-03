@@ -82,6 +82,16 @@ class BackupStoreTests(unittest.TestCase):
         self.assertEqual(args[args.index("--region") + 1], "us-west-2")
         self.assertEqual(call["environment"], {"AWS_PAGER": "", "AWS_CLI_AUTO_PROMPT": "off"})
 
+    def test_workstation_operations_pin_the_reviewed_profile(self):
+        self.store = backup_store.S3Store('family-backups', region='us-west-2', profile='workloads-admin')
+        self.steps({'operation': 'put-object'})
+        self.store.upload('instances/survival/receipts/one.json', self.source)
+        args = self.calls()[0]['args']
+        self.assertEqual(args[args.index('--profile') + 1], 'workloads-admin')
+        for profile in ('', '--debug', 'secret\nvalue', True):
+            with self.subTest(profile=profile), self.assertRaises(backup_store.BackupError):
+                backup_store.S3Store('family-backups', profile=profile)
+
     def test_download_checks_head_size_and_pins_etag_before_fetching_bytes(self):
         self.steps(
             {"operation": "head-object", "response": {"ContentLength": 3, "ETag": '\"revision-one\"'}},
@@ -92,6 +102,51 @@ class BackupStoreTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"abc")
         args = self.calls()[1]["args"]
         self.assertEqual(args[args.index("--if-match") + 1], '\"revision-one\"')
+
+    def test_versioned_reads_pin_current_or_explicit_version_and_validate_get_identity(self):
+        for supplied in (None, 'version-one'):
+            with self.subTest(version=supplied):
+                metadata = {'ContentLength': 3, 'ETag': '"revision-one"', 'VersionId': 'version-one'}
+                self.steps({'operation': 'head-object', 'response': metadata},
+                           {'operation': 'get-object', 'download': 'abc', 'response': metadata})
+                result = self.store.download_revision('instances/survival/completed/one.json',
+                    self.directory / 'versioned', max_bytes=3, version_id=supplied)
+                self.assertEqual(result['version_id'], 'version-one')
+                for index, call in enumerate(self.calls()):
+                    if index or supplied:
+                        args = call['args']
+                        self.assertEqual(args[args.index('--version-id') + 1], 'version-one')
+
+    def test_versioned_read_never_substitutes_missing_or_unversioned_objects(self):
+        self.steps({'operation': 'head-object', 'exit': 254,
+                    'error': 'An error occurred (NoSuchVersion) when calling the HeadObject operation: absent'})
+        self.assertIsNone(self.store.download_revision('one', self.directory / 'versioned', max_bytes=3, version_id='old'))
+        self.assertEqual(len(self.calls()), 1)
+        for version in (None, 'null'):
+            self.steps({'operation': 'head-object', 'response': {'ContentLength': 3, 'ETag': 'one', 'VersionId': version}})
+            with self.assertRaises(backup_store.BackupError):
+                self.store.download_revision('one', self.directory / 'versioned', max_bytes=3)
+
+    def test_changed_get_version_preserves_previous_local_bytes(self):
+        self.steps({'operation': 'head-object', 'response': {'ContentLength': 3, 'ETag': 'one', 'VersionId': 'old'}},
+                   {'operation': 'get-object', 'download': 'abc', 'response': {'ContentLength': 3, 'ETag': 'one', 'VersionId': 'new'}})
+        target = self.directory / 'versioned'
+        target.write_bytes(b'keep')
+        with self.assertRaises(backup_store.BackupError):
+            self.store.download_revision('one', target, max_bytes=3)
+        self.assertEqual(target.read_bytes(), b'keep')
+
+    def test_selection_publication_uses_conditional_write_and_requires_versioning(self):
+        for expected in (None, '"prior"'):
+            self.steps({'operation': 'put-object', 'response': {'ETag': '"next"', 'VersionId': 'next-version'}})
+            result = self.store.conditional_write('instances/survival/receipts/current.json', self.source, expected_etag=expected)
+            args = self.calls()[0]['args']
+            condition = '--if-match' if expected else '--if-none-match'
+            self.assertEqual(args[args.index(condition) + 1], expected or '*')
+            self.assertEqual(result['version_id'], 'next-version')
+        self.steps({'operation': 'put-object', 'response': {'ETag': '"next"', 'VersionId': 'null'}})
+        with self.assertRaises(backup_store.BackupError):
+            self.store.conditional_write('current', self.source, expected_etag=None)
 
     def test_oversize_or_unknown_length_is_rejected_without_a_download(self):
         for size in (4, -1, True, "3", None):
@@ -148,6 +203,22 @@ class BackupStoreTests(unittest.TestCase):
             self.assertIn("--no-paginate", args)
         args = self.calls()[1]["args"]
         self.assertEqual(args[args.index("--continuation-token") + 1], "page-two")
+
+    def test_authority_history_probe_detects_versions_delete_markers_and_rejects_ambiguity(self):
+        key = 'instances/survival/receipts/current.json'
+        for field in ('Versions', 'DeleteMarkers'):
+            self.steps({'operation': 'list-object-versions', 'response': {'IsTruncated': False,
+                        field: [{'Key': key, 'VersionId': 'prior'}]}})
+            self.assertTrue(self.store.has_version_history(key))
+            args = self.calls()[0]['args']
+            self.assertEqual(args[args.index('--prefix') + 1], key)
+            self.assertEqual(args[args.index('--max-keys') + 1], '1')
+        self.steps({'operation': 'list-object-versions', 'response': {'IsTruncated': False}})
+        self.assertFalse(self.store.has_version_history(key))
+        for page in ({}, {'IsTruncated': True}, {'IsTruncated': False, 'Versions': [{'Key': 'foreign', 'VersionId': 'prior'}]}):
+            self.steps({'operation': 'list-object-versions', 'response': page})
+            with self.assertRaises(backup_store.BackupError):
+                self.store.has_version_history(key)
 
     def test_listing_metadata_fails_closed_on_missing_or_invalid_last_modified(self):
         for value in (None, "not-a-timestamp", 123):
@@ -290,6 +361,41 @@ class BackupStoreTests(unittest.TestCase):
         for timeout in (0, -1, 3001, True, "900"):
             with self.subTest(timeout=timeout), self.assertRaises(backup_store.BackupError):
                 backup_store.S3Store("family-backups", timeout=timeout)
+
+    def test_new_operation_has_its_own_bounded_deadline_and_preserves_reviewed_profile(self):
+        with mock.patch.object(backup_store.time, 'monotonic', side_effect=[10, 1000]):
+            initial = backup_store.S3Store('family-backups', region='us-west-2', profile='workloads-admin', timeout=900)
+            later = initial.for_operation(timeout=3000)
+        self.assertEqual(initial.deadline, 910)
+        self.assertEqual(later.deadline, 4000)
+        self.assertEqual(later.profile, 'workloads-admin')
+        self.assertEqual(later.bucket, initial.bucket)
+
+    def test_archive_transfer_can_exceed_metadata_deadline_within_operation_budget(self):
+        def elapsed_transfer():
+            try:
+                calls = json.loads(self.state.read_text())['calls']
+                return elapsed_after_start if any(call['args'][1] == 'get-object' for call in calls) else 0
+            except (OSError, ValueError):
+                return 0
+        for key, elapsed_after_start, succeeds in (('instances/survival/objects/point/data.tar.gz', 1000, True),
+                                                   ('instances/survival/completed/point.json', 1000, False),
+                                                   ('instances/survival/objects/point/data.tar.gz', 4000, False)):
+            with self.subTest(key=key):
+                self.steps({'operation': 'head-object', 'response': {'ContentLength': 3, 'ETag': 'one'}},
+                           {'operation': 'get-object', 'download': 'abc', 'sleep': 0.05,
+                            'response': {'ContentLength': 3}})
+                target = self.directory / 'long-transfer'
+                target.write_bytes(b'preserve')
+                with mock.patch.object(backup_store.time, 'monotonic', side_effect=elapsed_transfer):
+                    store = backup_store.S3Store('family-backups', timeout=3000)
+                    if succeeds:
+                        self.assertTrue(store.download(key, target, max_bytes=3))
+                        self.assertEqual(target.read_bytes(), b'abc')
+                    else:
+                        with self.assertRaisesRegex(backup_store.BackupError, 'timed out'):
+                            store.download(key, target, max_bytes=3)
+                        self.assertEqual(target.read_bytes(), b'preserve')
 
     def test_a_part_checksum_mismatch_aborts_before_publication(self):
         self.source.write_bytes(b"abcabc")

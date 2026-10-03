@@ -79,11 +79,21 @@ elif name == "aws":
         print(os.environ.get("AWS_VERSION", "aws-cli/2.36.34 fixture-only"))
     else:
         assert args[0] == "s3api"
+        if args[1] == 'get-object':
+            # Real get-object requires an outfile and does not support input skeletons.
+            assert len(args) == 3 and args[2] in ('--version-id', '--if-match')
+            field = 'VersionId' if args[2] == '--version-id' else 'IfMatch'
+            if os.environ.get('AWS_MISSING_FIELD') == 'get-object:' + field:
+                sys.stderr.write('unknown option')
+            else:
+                sys.stderr.write('argument ' + args[2] + ': expected one argument')
+            sys.exit(252)
         assert args[2:] == ["--generate-cli-skeleton", "input", "--no-cli-pager", "--no-cli-auto-prompt"]
         skeletons = {
-            "put-object": {"IfNoneMatch": "", "ChecksumSHA256": ""},
+            "put-object": {"IfNoneMatch": "", "IfMatch": "", "ChecksumSHA256": ""},
             "complete-multipart-upload": {"IfNoneMatch": ""},
             "create-multipart-upload": {"ChecksumType": "COMPOSITE", "ChecksumAlgorithm": "SHA256"},
+            "head-object": {"VersionId": "", "IfMatch": ""},
         }
         skeleton = skeletons[args[1]]
         for field in list(skeleton):
@@ -163,8 +173,9 @@ elif name == "stat":
     def test_incompatible_backup_cli_is_rejected_before_any_installation_mutation(self):
         unsupported = [{"AWS_VERSION": "aws-cli/1.99.0 fixture-only"}]
         unsupported.extend({"AWS_MISSING_FIELD": field} for field in (
-            "put-object:IfNoneMatch", "put-object:ChecksumSHA256", "complete-multipart-upload:IfNoneMatch",
-            "create-multipart-upload:ChecksumType", "create-multipart-upload:ChecksumAlgorithm"))
+            "put-object:IfNoneMatch", "put-object:IfMatch", "put-object:ChecksumSHA256", "complete-multipart-upload:IfNoneMatch",
+            "create-multipart-upload:ChecksumType", "create-multipart-upload:ChecksumAlgorithm",
+            "head-object:VersionId", "head-object:IfMatch", "get-object:VersionId", "get-object:IfMatch"))
         for settings in unsupported:
             with self.subTest(settings=settings), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)

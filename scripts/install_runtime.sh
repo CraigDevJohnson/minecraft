@@ -39,14 +39,23 @@ command -v systemctl >/dev/null
 command -v aws >/dev/null || fail 'Install a reviewed AWS CLI v2 with conditional backup upload and checksum support first.'
 aws_version="$(timeout --kill-after=10s 30s aws --version)" || fail 'Cannot establish the installed AWS CLI v2 version.'
 [[ "$aws_version" == aws-cli/2.* ]] || fail 'Runtime backup requires AWS CLI v2.'
-for operation in put-object complete-multipart-upload create-multipart-upload; do
+for operation in put-object complete-multipart-upload create-multipart-upload head-object; do
 	case "$operation" in
-	put-object) required_fields=(IfNoneMatch ChecksumSHA256) ;;
+	put-object) required_fields=(IfNoneMatch IfMatch ChecksumSHA256) ;;
 	complete-multipart-upload) required_fields=(IfNoneMatch) ;;
 	create-multipart-upload) required_fields=(ChecksumType ChecksumAlgorithm) ;;
+	head-object) required_fields=(VersionId IfMatch) ;;
 	esac
 	aws_skeleton="$(AWS_EC2_METADATA_DISABLED=true AWS_PAGER='' AWS_CLI_AUTO_PROMPT=off timeout --kill-after=10s 30s aws s3api "$operation" --generate-cli-skeleton input --no-cli-pager --no-cli-auto-prompt)" || fail 'Cannot establish the AWS CLI v2 backup capabilities without credentials.'
-	python3 -c 'import json,sys; value=json.load(sys.stdin); sys.exit(not isinstance(value, dict) or not all(key in value for key in sys.argv[1:]))' "${required_fields[@]}" <<<"$aws_skeleton" || fail 'AWS CLI v2 lacks required conditional backup upload or checksum support; install a compatible reviewed CLI first.'
+	python3 -c 'import json,sys; value=json.load(sys.stdin); sys.exit(not isinstance(value, dict) or not all(key in value for key in sys.argv[1:]))' "${required_fields[@]}" <<<"$aws_skeleton" || fail 'AWS CLI v2 lacks required conditional backup writes, version reads or checksum support; install a compatible reviewed CLI first.'
+done
+# get-object has a custom outfile parser and does not support input skeletons.
+# Missing option values prove these flags exist and always fail before an API request.
+for option in --version-id --if-match; do
+	if aws_parser_output="$(LC_ALL=C AWS_EC2_METADATA_DISABLED=true AWS_PAGER='' AWS_CLI_AUTO_PROMPT=off timeout --kill-after=10s 30s aws s3api get-object "$option" 2>&1)"; then
+		fail 'AWS CLI v2 get-object preflight unexpectedly succeeded.'
+	fi
+	[[ "$aws_parser_output" == *"argument $option: expected one argument"* ]] || fail 'AWS CLI v2 lacks the required offline get-object version/condition parser; install a compatible reviewed CLI first.'
 done
 [[ -x /usr/local/sbin/minecraft-storage ]] || fail 'Install the reviewed host/storage prerequisites first.'
 

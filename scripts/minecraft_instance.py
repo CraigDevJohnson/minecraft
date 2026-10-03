@@ -123,7 +123,7 @@ class Manager:
 
     def state(self, instance):
         path = self.state_path(instance)
-        return json.loads(path.read_text()) if path.exists() else None
+        return private_json(path) if path.exists() or path.is_symlink() else None
 
     @staticmethod
     def execution(container):
@@ -148,6 +148,8 @@ class Manager:
         state = self.state(instance)
         container = self.machine.inspect(instance)
         state = self.reconcile_session(instance, state, container)
+        if state and state.get('restore_receipt_id'):
+            verify_restore_control_directories(self.root / 'instances' / instance)
         return {
             "instance": instance,
             "application": "running" if container["running"] else "stopped",
@@ -162,6 +164,13 @@ class Manager:
         revision = self.machine.desired_revision(instance)
         container = self.machine.inspect(instance)
         state = self.reconcile_session(instance, state, container)
+        if state and state.get('restore_receipt_id') and (
+                state.get('restore_certified') is not True
+                or state.get('restore_target') != {'volume_id': self.machine.deployment['data_volume_id'],
+                                                  'filesystem_uuid': self.machine.deployment['data_filesystem_uuid']}):
+            raise OperationError('restored data is pending same-receipt certification; retry restore before starting')
+        if state and state.get('restore_receipt_id'):
+            verify_restore_control_directories(self.root / 'instances' / instance)
         if not state and (container["exists"] or (self.root / "instances" / instance / "data").exists()):
             raise OperationError("untracked instance data; investigate or restore before operating")
         if state and state["revision"] != revision and not updating:
@@ -234,19 +243,29 @@ class Manager:
         return path.exists() and json.loads(path.read_text())["boot_id"] == self.machine.boot_id()
 
     def execute(self, action, instance=None, *, operation=None, edition=None, player=None):
-        if action not in ("host-drain", "host-status") and (
+        if action not in ("host-drain", "host-drain-private", "host-status") and (
                 not instance or not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", instance) or instance not in self.instances):
             raise OperationError("an explicit configured instance ID is required")
         with self.machine.lock():
             self.machine.verify_storage()
-            if action in ("host-drain", "host-status"):
-                if action == "host-drain":
+            if action in ("host-drain", "host-drain-private", "host-status"):
+                if action in ("host-drain", "host-drain-private"):
                     write_json(self.root / "host-drain.json", {"boot_id": self.machine.boot_id()})
                     self.machine.verify_inventory()
                     for configured in self.instances:
                         self.stop(configured)
                 result = {"draining": self.draining(), "instances": {
                     configured: self.status(configured) for configured in self.instances}}
+                if action == 'host-drain-private':
+                    recovery = {}
+                    for configured in self.instances:
+                        state = self.state(configured)
+                        if (not state or state.get('phase') != 'stopped' or state.get('backup') != 'complete'
+                                or result['instances'][configured]['application'] != 'stopped'):
+                            raise OperationError('private drain requires a completed final-session recovery point for every instance')
+                        recovery[configured] = {'session': state['session'], 'manifest_sha256': state['revision'],
+                                                'recovery_point': state['recovery_point']}
+                    return {**result, 'boot_id': self.machine.boot_id(), 'recovery': recovery}
                 # The drain response is completion evidence with a fixed shape; only status reports usage.
                 return {**result, "storage": self.machine.storage_usage()} if action == "host-status" else result
             if action == "start":
@@ -368,6 +387,14 @@ def private_json(path):
     if not isinstance(value, dict):
         raise OperationError("operator configuration must be a JSON object")
     return value
+
+
+def verify_restore_control_directories(target):
+    for directory in (Path(target), Path(target) / 'runtime'):
+        info = directory.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise OperationError('restore control directories must remain operator-owned private mode 0700')
 
 
 def verify_retained_paths(root: Path) -> None:
@@ -643,7 +670,7 @@ class LinuxMachine:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    parser.add_argument("action", choices=("start", "stop", "backup", "status", "update", "host-status", "host-drain", "allowlist"))
+    parser.add_argument("action", choices=("start", "stop", "backup", "status", "update", "host-status", "host-drain", "host-drain-private", "allowlist"))
     parser.add_argument("instance", nargs="?")
     parser.add_argument("operation", nargs="?", choices=("add", "remove"))
     parser.add_argument("--edition", choices=("java", "bedrock"))
