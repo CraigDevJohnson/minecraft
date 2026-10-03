@@ -57,6 +57,22 @@ run "temporary_host_has_guarded_storage_and_public_address" {
   }
 }
 
+run "small_measured_restore_plans_minimum_disks" {
+  command = plan
+  variables {
+    restore_archive_size_bytes             = 209715200
+    restore_uncompressed_size_bytes        = 314572800
+    max_recovery_backup_archive_size_bytes = 209715200
+    recovery_data_volume_size_gib          = 2
+    recovery_root_volume_size_gib          = 21
+  }
+
+  assert {
+    condition     = aws_ebs_volume.recovery.size == 2 && aws_instance.recovery.root_block_device[0].volume_size == 21
+    error_message = "A small measured restore must plan with the calculated minimum 2 GiB data disk and 21 GiB root disk."
+  }
+}
+
 run "recovery_credentials_carry_the_host_permissions_boundary" {
   command = plan
 
@@ -192,6 +208,18 @@ run "reject_insufficient_restore_staging_capacity" {
     recovery_data_volume_size_gib = 52
   }
   expect_failures = [aws_ebs_volume.recovery]
+}
+
+run "reject_recovery_data_disk_below_the_floor" {
+  command = plan
+  variables {
+    restore_archive_size_bytes             = 209715200
+    restore_uncompressed_size_bytes        = 314572800
+    max_recovery_backup_archive_size_bytes = 209715200
+    recovery_data_volume_size_gib          = 1
+    recovery_root_volume_size_gib          = 21
+  }
+  expect_failures = [var.recovery_data_volume_size_gib]
 }
 
 run "reject_root_disk_too_small_for_backup_workspace" {

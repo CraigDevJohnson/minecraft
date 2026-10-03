@@ -176,7 +176,7 @@ archive, uncompressed, maximum_backup = (int(value) for value in sys.argv[1:])
 total = archive + uncompressed
 required_bytes = (total * 11 + 9) // 10
 gib = 1 << 30
-data_gib = max(40, (required_bytes + gib - 1) // gib)
+data_gib = max(2, (required_bytes + gib - 1) // gib)
 root_gib = 20 + (22 * maximum_backup + 10 * gib - 1) // (10 * gib)
 print(f"Minimum recovery data volume GiB: {data_gib}")
 print(f"Minimum recovery root volume GiB: {root_gib}")
@@ -267,7 +267,7 @@ Stop if any command fails or is denied. In the newest section, require an empty 
 
 Through SSM, run the host-side check from infrastructure operations on the recovery host and retain its command ID and private output. Any evidence of prior storage or runtime use is a stop. Transfer the deployment handoffs and install the runtime only after initialization below. Immediately before zero-fill, rerun the provenance block and the host-side check together and require the same single attachment with an identical `AttachTime`; if more than 10 minutes pass before zero-fill starts, rerun both again.
 
-The recovery disk can exceed 40 GiB, so compute its zero-fill and zero-check bounds from its size. Session Manager ends an interactive session after 20 idle minutes by default, so run both as transient systemd units, as below, or through Run Command with `executionTimeout` above the combined bounds of the commands in that invocation. Then, through SSM, zero-fill and initialize that exact disk:
+The recovery disk is sized from the marker, so compute its zero-fill and zero-check bounds from that size. Session Manager ends an interactive session after 20 idle minutes by default, so run both as transient systemd units, as below, or through Run Command with `executionTimeout` above the combined bounds of the commands in that invocation. Then, through SSM, zero-fill and initialize that exact disk:
 
 ```sh
 # Set both from the reviewed recovery-deployment.json, the volume the provenance block passed.
