@@ -144,7 +144,8 @@ def restore(machine, source_deployment, instance, recovery_point, store, *, rece
                         'receipt_id': receipt['receipt_id'], 'resumed': True}
             if receipt is not None:
                 capacity = os.statvfs(machine.root)
-                if capacity.f_frsize * capacity.f_bavail < receipt['required_capacity_bytes']:
+                remaining_bytes = receipt['required_capacity_bytes'] - receipt['archive']['size_bytes']
+                if capacity.f_frsize * capacity.f_bavail < remaining_bytes:
                     raise BackupError('restore target has insufficient available capacity for the selected receipt')
             staged = workspace / "instance"
             extract_recovery(metadata, archive, staged)

@@ -323,6 +323,31 @@ class RecoveryReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(backup.BackupError, 'bootstrap'):
             self.restore(receipt)
 
+    def test_restore_accepts_exact_remaining_capacity_after_archive_download(self):
+        receipt = self.receipt()
+        remaining = receipt['required_capacity_bytes'] - receipt['archive']['size_bytes']
+        def capacity_after_download(path):
+            archives = list(self.fixture.target_root.glob('.minecraft-restore-*/recovery.tar.gz'))
+            self.assertEqual(len(archives), 1)
+            self.assertEqual(archives[0].stat().st_size, receipt['archive']['size_bytes'])
+            return type('Capacity', (), {'f_frsize': 1, 'f_bavail': remaining})()
+        with mock.patch.object(restore.os, 'statvfs', side_effect=capacity_after_download):
+            self.assertEqual(self.restore(receipt)['status'], 'restored')
+        for name, content in self.fixture.checkpoints.items():
+            self.assertEqual((self.fixture.target_root / 'instances/survival' / name).read_bytes(), content)
+
+    def test_one_byte_below_remaining_capacity_preserves_target_and_backup(self):
+        receipt = self.receipt()
+        remaining = receipt['required_capacity_bytes'] - receipt['archive']['size_bytes'] - 1
+        checkpoint = self.fixture.target_root / 'existing-volume-checkpoint'
+        checkpoint.write_bytes(b'preserve this unrelated volume data')
+        backup_before = dict(self.store.objects)
+        with mock.patch.object(restore.os, 'statvfs', return_value=type('Capacity', (), {'f_frsize': 1, 'f_bavail': remaining})()), self.assertRaisesRegex(backup.BackupError, 'capacity'):
+            self.restore(receipt)
+        self.assertEqual(list(self.fixture.target_root.iterdir()), [checkpoint])
+        self.assertEqual(checkpoint.read_bytes(), b'preserve this unrelated volume data')
+        self.assertEqual(self.store.objects, backup_before)
+
 
 if __name__ == '__main__':
     unittest.main()
