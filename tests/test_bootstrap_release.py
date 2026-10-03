@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import tarfile
 import tempfile
+import shutil
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,25 @@ import minecraft_bootstrap_release as release
 
 
 class BootstrapReleaseTests(unittest.TestCase):
+    def test_installed_runtime_attestation_rejects_drift_and_untrusted_content(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            installed=root/'installed'; launchers=root/'launchers'; services=root/'services'
+            self.assertEqual(release.verify_installed_release(ROOT,installed,launcher_dir=launchers,service_dir=services,require_root=False),'missing')
+            for folder in ('scripts','runtime','bin'):(installed/folder).mkdir(parents=True,mode=0o755)
+            launchers.mkdir(); services.mkdir()
+            for name in ('minecraft_instance.py','minecraft_content.py','minecraft_access.py','minecraft_backup.py','minecraft_backup_store.py','minecraft_restore.py'):
+                shutil.copy2(ROOT/'scripts'/name,installed/'scripts'/name)
+            for name in release.RUNTIME:shutil.copy2(ROOT/'runtime'/name,installed/'runtime'/name)
+            for name in ('minecraft-instance','minecraft-backup','minecraft-restore'):
+                content=('#!/usr/bin/env bash\nset -euo pipefail\nexec /usr/bin/python3 -B /opt/minecraft/scripts/'+name.replace('-','_')+'.py "$@"\n')
+                for target in (installed/'bin'/name,launchers/name):target.write_text(content); target.chmod(0o755)
+            shutil.copy2(ROOT/'runtime/minecraft@.service',services/'minecraft@.service')
+            self.assertEqual(release.verify_installed_release(ROOT,installed,launcher_dir=launchers,service_dir=services,require_root=False),'installed')
+            (installed/'scripts/minecraft_backup.py').write_text('unreviewed installed release')
+            with self.assertRaises(release.ReleaseError):release.verify_installed_release(ROOT,installed,launcher_dir=launchers,service_dir=services,require_root=False)
+
+
     def test_rendered_session_bootstrap_fits_ec2_user_data_limit(self):
         bootstrap = (ROOT / 'scripts/host-bootstrap.sh.tftpl').read_text()
         bootstrap = bootstrap.replace('${storage_script_base64}', base64.b64encode((ROOT / 'scripts/minecraft_storage.py').read_bytes()).decode())

@@ -109,12 +109,46 @@ def stage_release(payload: bytes, digest: str, destination: Path, *, require_roo
         raise ReleaseError('bootstrap release could not be staged') from exc
 
 
+def verify_installed_release(release: Path, installed=Path('/opt/minecraft'), *, launcher_dir=Path('/usr/local/sbin'), service_dir=Path('/etc/systemd/system'), require_root=True) -> str:
+    """Attest actual installed public code/config before binding a recovery receipt."""
+    if not installed.exists():
+        return 'missing'
+    owner = 0 if require_root else os.geteuid()
+    scripts = ('minecraft_instance.py', 'minecraft_content.py', 'minecraft_access.py', 'minecraft_backup.py', 'minecraft_backup_store.py', 'minecraft_restore.py')
+    expected = {f'scripts/{name}': (release / 'scripts' / name).read_bytes() for name in scripts}
+    expected.update({f'runtime/{name}': (release / 'runtime' / name).read_bytes() for name in RUNTIME})
+    for name in ('minecraft-instance', 'minecraft-backup', 'minecraft-restore'):
+        expected['bin/' + name] = ('#!/usr/bin/env bash\nset -euo pipefail\nexec /usr/bin/python3 -B /opt/minecraft/scripts/'
+                                  + name.replace('-', '_') + '.py "$@"\n').encode()
+    try:
+        for path in [installed, *installed.rglob('*')]:
+            info = path.lstat()
+            if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)) or info.st_uid != owner or stat.S_IMODE(info.st_mode) & 0o022:
+                raise ReleaseError('installed runtime contains an untrusted path')
+        actual = {str(path.relative_to(installed)): path for path in installed.rglob('*') if not path.is_dir()}
+        if set(actual) != set(expected) or any(actual[name].read_bytes() != content for name, content in expected.items()):
+            raise ReleaseError('installed runtime differs from the pinned bootstrap release')
+        for name in ('minecraft-instance', 'minecraft-backup', 'minecraft-restore'):
+            path = launcher_dir / name
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != owner or stat.S_IMODE(info.st_mode) & 0o022 or path.read_bytes() != expected['bin/' + name]:
+                raise ReleaseError('installed runtime launcher differs from the pinned release')
+        service = service_dir / 'minecraft@.service'
+        info = service.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != owner or stat.S_IMODE(info.st_mode) & 0o022 or service.read_bytes() != expected['runtime/minecraft@.service']:
+            raise ReleaseError('installed runtime service differs from the pinned release')
+        return 'installed'
+    except OSError as exc:
+        raise ReleaseError('cannot attest installed runtime against its pinned release') from exc
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='action', required=True)
     package = commands.add_parser('package')
     package.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
     package.add_argument('--output', type=Path, required=True)
+    verify = commands.add_parser('verify')
+    verify.add_argument('--sha256', required=True)
     stage = commands.add_parser('stage')
     stage.add_argument('--bucket', required=True)
     stage.add_argument('--sha256', required=True)
@@ -125,6 +159,15 @@ def main(argv=None) -> int:
             payload, digest = build_release(args.root)
             args.output.write_bytes(payload)
             print(json.dumps({'sha256': digest, 'key': release_key(digest)}))
+        elif args.action == 'verify':
+            release_key(args.sha256)
+            parent = Path('/opt/minecraft-bootstrap')
+            staged = parent / args.sha256
+            payload, actual = build_release(staged)
+            if actual != args.sha256:
+                raise ReleaseError('staged bootstrap release does not match its pinned digest')
+            stage_release(payload, args.sha256, parent)
+            print(json.dumps({'runtime': verify_installed_release(staged), 'bootstrap_sha256': args.sha256}))
         else:
             key = release_key(args.sha256)
             if not re.fullmatch(r'[a-z]{2}(?:-[a-z]+)+-[0-9]+', args.region):

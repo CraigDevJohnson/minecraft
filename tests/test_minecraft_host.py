@@ -1060,3 +1060,61 @@ class TemporaryOperatorCredentialsTests(unittest.TestCase):
         with mock.patch.object(minecraft_host.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(response), '')) as run:
             with self.assertRaises(minecraft_host.HostError): client.run('ec2', 'stop-instances', timeout=30)
         self.assertEqual(run.call_count, 1)
+
+    def test_pinned_launcher_is_used_for_source_refresh_and_evidence_with_python_isolation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary).resolve() / 'aws'
+            path.write_bytes(b'reviewed-launcher'); path.chmod(0o755)
+            info = path.stat()
+            role = 'arn:aws:iam::123456789012:role/minecraft-operator'
+            client = minecraft_host.AWSCLI('us-west-2', 'workloads-admin', role,
+                    executable=str(path), executable_sha256=__import__('hashlib').sha256(path.read_bytes()).hexdigest(),
+                    executable_identity={'device':info.st_dev,'inode':info.st_ino})
+            response = {'Credentials':{'AccessKeyId':'PRIVATE_ACCESS','SecretAccessKey':'PRIVATE_SECRET','SessionToken':'PRIVATE_SESSION'},
+                        'AssumedRoleUser':{'Arn':'arn:aws:sts::123456789012:assumed-role/minecraft-operator/minecraft-host'}}
+            replies = [subprocess.CompletedProcess([],0,json.dumps(response),''), subprocess.CompletedProcess([],0,'{}','')] * 2
+            with mock.patch.dict(os.environ, {'PYTHONPATH':'/unreviewed/modules','PYTHONHOME':'/unreviewed/python'}), \
+                    mock.patch.object(minecraft_host.subprocess,'run',side_effect=replies) as run:
+                client.run('ec2','describe-instances',timeout=30)
+                client.credentials_deadline = 0
+                client.run('ssm','describe-instance-information',timeout=30)
+            self.assertEqual(run.call_count,4)
+            for call in run.call_args_list:
+                self.assertEqual(call.args[0][0],str(path))
+                self.assertNotIn('PYTHONPATH',call.kwargs['env']); self.assertNotIn('PYTHONHOME',call.kwargs['env'])
+            path.write_bytes(b'replaced-launcher')
+            with mock.patch.object(minecraft_host.subprocess,'run') as run:
+                with self.assertRaises(minecraft_host.HostError):client.run('ec2','describe-instances',timeout=30)
+                run.assert_not_called()
+
+    def test_launcher_replacement_during_assume_role_blocks_outer_evidence_call(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path=Path(temporary).resolve()/'aws'; path.write_bytes(b'reviewed'); path.chmod(0o755)
+            info=path.stat()
+            client=minecraft_host.AWSCLI('us-west-2','workloads-admin','arn:aws:iam::123456789012:role/minecraft-operator',
+                    executable=str(path),executable_sha256=__import__('hashlib').sha256(path.read_bytes()).hexdigest(),
+                    executable_identity={'device':info.st_dev,'inode':info.st_ino})
+            def assume(*args,**kwargs):
+                path.write_bytes(b'replaced-during-role-assumption')
+                return subprocess.CompletedProcess([],0,json.dumps({'Credentials':{'AccessKeyId':'PRIVATE_ACCESS','SecretAccessKey':'PRIVATE_SECRET','SessionToken':'PRIVATE_SESSION'},
+                        'AssumedRoleUser':{'Arn':'arn:aws:sts::123456789012:assumed-role/minecraft-operator/minecraft-host'}}),'')
+            with mock.patch.object(minecraft_host.subprocess,'run',side_effect=assume) as run:
+                with self.assertRaises(minecraft_host.HostError):client.run('ec2','describe-instances',timeout=30)
+                self.assertEqual(run.call_count,1)
+
+    def test_fifo_launcher_is_rejected_promptly_before_any_aws_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path=Path(temporary).resolve()/'aws'; os.mkfifo(path)
+            script="""import sys
+from unittest import mock
+sys.path.insert(0,sys.argv[1])
+import minecraft_host as host
+client=host.AWSCLI('us-west-2',executable=sys.argv[2],executable_sha256='0'*64,executable_identity={'device':0,'inode':0})
+with mock.patch.object(host.subprocess,'run') as run:
+    try: client.run('ec2','describe-instances',timeout=1)
+    except host.HostError: pass
+    else: raise AssertionError('FIFO accepted')
+    run.assert_not_called()
+"""
+            result=subprocess.run([sys.executable,'-c',script,str(ROOT/'scripts'),str(path)],capture_output=True,text=True,timeout=3)
+            self.assertEqual(result.returncode,0,result.stderr)

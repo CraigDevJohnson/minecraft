@@ -18,13 +18,14 @@ import time
 import uuid
 from pathlib import Path
 
-from minecraft_host import HostError, HostSession
+from minecraft_host import HostError, HostSession, verified_executable
 from minecraft_private_transfer import TransferError, build_bundle, private_file, send_bundle
 
 HOST_STOP_FIELDS = frozenset(('instance_state', 'public_ip', 'public_dns', 'associate_public_ip_address'))
 SESSION_ADDRESSES = frozenset(('aws_instance.host[0]', 'aws_volume_attachment.data[0]'))
 SHA256 = re.compile('[0-9a-f]{64}')
-POLICY_FIELDS = frozenset(('schema_version', 'workstation', 'aws_profile', 'infra_root', 'variables_file', 'variables_sha256',
+POLICY_FIELDS = frozenset(('schema_version', 'workstation', 'aws_profile', 'aws_cli_path', 'aws_cli_sha256', 'aws_cli_file_identity',
+                          'session_plugin_path', 'session_plugin_sha256', 'session_plugin_file_identity', 'infra_root', 'variables_file', 'variables_sha256',
                           'source_sha256', 'backend', 'backend_sha256', 'tofu_sha256', 'tofu_file_identity', 'private_inputs_sha256', 'bootstrap_sha256', 'operator_file', 'secret_file', 'journal_dir'))
 
 
@@ -145,7 +146,7 @@ def tool_identity(root, policy):
     try:
         if any(value.is_symlink() for value in [path, *path.parents]):
             raise HostError('reviewed OpenTofu executable must have no symlinked path component')
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(descriptor, 'rb') as stream:
             info = os.fstat(stream.fileno())
             if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.geteuid())
@@ -165,13 +166,21 @@ def private_inputs_digest(policy):
     return hashlib.sha256(private_file(Path(policy['operator_file'])) + b'\0' + private_file(Path(policy['secret_file']))).hexdigest()
 
 
+def execution_tools(policy):
+    aws = verified_executable(policy['aws_cli_path'], policy['aws_cli_sha256'], policy['aws_cli_file_identity'])
+    plugin = verified_executable(policy['session_plugin_path'], policy['session_plugin_sha256'], policy['session_plugin_file_identity'])
+    if Path(plugin).name != 'session-manager-plugin':
+        raise HostError('reviewed Session Manager plugin has an invalid executable name')
+    return aws, plugin
+
+
 def load_policy(path: Path, expected_sha256: str, deployment: dict) -> dict:
     try:
         data = private_file(path)
         if not SHA256.fullmatch(expected_sha256 or '') or hashlib.sha256(data).hexdigest() != expected_sha256:
             raise HostError('lifecycle policy does not match its reviewed SHA-256')
         policy = json.loads(data)
-        if set(policy) != POLICY_FIELDS or policy['schema_version'] != 2:
+        if set(policy) != POLICY_FIELDS or policy['schema_version'] != 3:
             raise HostError('lifecycle policy schema is invalid')
         if not isinstance(policy['aws_profile'], str) or not re.fullmatch('[A-Za-z0-9_-]{1,64}', policy['aws_profile']):
             raise HostError('lifecycle AWS profile must be explicit and valid')
@@ -204,6 +213,7 @@ def load_policy(path: Path, expected_sha256: str, deployment: dict) -> dict:
         if backend_digest(root, policy) != policy['backend_sha256']:
             raise HostError('initialized backend security configuration differs from reviewed policy')
         tool_identity(root, policy)
+        execution_tools(policy)
         if private_inputs_digest(policy) != policy['private_inputs_sha256']:
             raise HostError('private operator inputs differ from reviewed policy')
         build_bundle(deployment, Path(policy['operator_file']), Path(policy['secret_file']))
@@ -278,16 +288,31 @@ def verify_resumed_sessions(journal: dict, current: dict) -> None:
                 raise HostError('partially created session does not match its pinned saved plan')
 
 
-def validate_plan(plan: dict, *, present: bool, state: dict, deployment: dict, stopped_host=False) -> None:
+def validate_plan(plan: dict, *, present: bool, state: dict, deployment: dict, stopped_host=False,
+                  removal_started=False) -> None:
     if not isinstance(plan, dict) or plan.get('errored') or plan.get('applyable') is False:
         raise HostError('session plan is invalid or cannot be applied')
     inventory = resources(state)
+    drift_seen = set()
     for drift in plan.get('resource_drift', []):
         change = drift.get('change', {})
         if change.get('actions') == ['no-op']:
             continue
         address = drift.get('address')
         before, after = change.get('before'), change.get('after')
+        if address in drift_seen:
+            raise HostError('session plan repeats resource drift')
+        drift_seen.add(address)
+        if (not present and stopped_host is True and removal_started is True
+                and address in SESSION_ADDRESSES and change.get('actions') == ['delete']
+                and isinstance(before, dict) and before == inventory.get(address) and after is None):
+            if (address == 'aws_instance.host[0]' and before.get('id') != deployment['host_id']
+                    or address == 'aws_volume_attachment.data[0]' and
+                    (before.get('volume_id') != deployment['data_volume_id']
+                     or before.get('instance_id') != deployment['host_id'])):
+                raise HostError('deleted session drift differs from the recorded source identity')
+            del inventory[address]
+            continue
         if (present or not stopped_host or address != 'aws_instance.host[0]' or change.get('actions') != ['update']
                 or before != inventory.get(address) or not isinstance(after, dict)
                 or after.get('instance_state') != 'stopped'
@@ -358,6 +383,7 @@ class TofuCLI:
         if (metadata.st_dev, metadata.st_ino) != self.root_identity or str(root) != self.policy['infra_root']:
             raise HostError('lifecycle infrastructure directory identity changed before execution')
         tool_identity(root, self.policy)
+        execution_tools(self.policy)
         if backend_digest(root, self.policy) != self.policy['backend_sha256']:
             raise HostError('backend security configuration changed before infrastructure execution')
         if private_inputs_digest(self.policy) != self.policy['private_inputs_sha256']:
@@ -371,8 +397,18 @@ class TofuCLI:
                      'AWS_ROLE_ARN', 'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_ROLE_SESSION_NAME'):
             environment.pop(name, None)
         try:
-            result = subprocess.run([str(self.binary), f'-chdir={self.root}', *arguments], capture_output=True,
-                                    text=True, timeout=timeout, env=environment)
+            with tempfile.TemporaryDirectory(prefix='minecraft-trusted-tofu-') as temporary:
+                directory = Path(temporary)
+                configuration = directory / 'trusted.tfrc'
+                configuration.write_bytes(b'')
+                configuration.chmod(0o600)
+                for name in ('config', 'data'):
+                    (directory / name).mkdir(mode=0o700)
+                environment.update(TF_CLI_CONFIG_FILE=str(configuration), TERRAFORM_CONFIG=str(configuration),
+                                   XDG_CONFIG_HOME=str(directory / 'config'), XDG_CONFIG_DIRS=str(directory / 'config'),
+                                   XDG_DATA_HOME=str(directory / 'data'), XDG_DATA_DIRS=str(directory / 'data'))
+                result = subprocess.run([str(self.binary), f'-chdir={self.root}', *arguments], capture_output=True,
+                                        text=True, timeout=timeout, env=environment)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise HostError('infrastructure command interrupted; resume the same lifecycle operation') from exc
         if result.returncode:
@@ -432,6 +468,7 @@ class OnDemandSession:
             raise HostError('active AWS account does not match the reviewed deployment account')
 
     def binding(self):
+        execution_tools(self.policy)
         variables = hashlib.sha256(private_file(Path(self.policy['variables_file']))).hexdigest()
         source = source_digest(Path(self.policy['infra_root']).parent)
         if variables != self.policy['variables_sha256'] or source != self.policy['source_sha256']:
@@ -526,7 +563,9 @@ class OnDemandSession:
             return
         path = self.directory / (journal['operation_id'] + '.tfplan')
         plan = self.tofu.plan(path, present)
-        validate_plan(plan, present=present, state=current, deployment=journal['source_deployment'], stopped_host=journal.get('host_stop_requested', False))
+        validate_plan(plan, present=present, state=current, deployment=journal['source_deployment'],
+                      stopped_host=journal.get('host_stop_requested', False),
+                      removal_started=journal.get('removal_started', False))
         # The workstation lock does not serialize another Terraform client; compare state
         # again and let the saved-plan/backend lock reject a race after this check.
         if self.tofu.state() != current:
@@ -534,7 +573,9 @@ class OnDemandSession:
         if self.binding() != journal['binding']:
             raise HostError('reviewed lifecycle inputs changed while planning; apply forbidden')
         plan_digest = digest_file(path)
-        self.record(journal, 'applying', planned_state=current, plan_sha256=plan_digest, planned_changes=[value for value in plan.get('resource_changes', []) if value.get('address') in SESSION_ADDRESSES])
+        self.record(journal, 'applying', planned_state=current, plan_sha256=plan_digest,
+                    removal_started=not present,
+                    planned_changes=[value for value in plan.get('resource_changes', []) if value.get('address') in SESSION_ADDRESSES])
         if digest_file(path) != plan_digest:
             raise HostError('saved infrastructure plan changed before apply')
         self.tofu.apply(path)
@@ -613,8 +654,11 @@ class OnDemandSession:
             local.bind(('127.0.0.1', 0))
             port = local.getsockname()[1]
         environment = {key: value for key, value in self.aws.environment().items() if not key.startswith('TF_')}
+        _, plugin = execution_tools(self.policy)
+        environment['PATH'] = str(Path(plugin).parent) + os.pathsep + str(Path(self.policy['infra_root']).parent / '.tools/bin') + os.pathsep + environment.get('PATH', os.defpath)
+        aws_path = self.aws.command_path()
         try:
-            process = subprocess.Popen(['aws', '--region', self.deployment['region'], '--no-cli-pager', '--no-cli-auto-prompt',
+            process = subprocess.Popen([aws_path, '--region', self.deployment['region'], '--no-cli-pager', '--no-cli-auto-prompt',
                                         'ssm', 'start-session', '--target', self.deployment['host_id'],
                                         '--document-name', 'AWS-StartPortForwardingSession', '--parameters',
                                         json.dumps({'portNumber': ['19140'], 'localPortNumber': [str(port)]})],
@@ -677,6 +721,17 @@ class OnDemandSession:
         if observed != {'private_inputs': 'verified'}:
             raise HostError('installed private inputs lack reviewed verification; explicit reconfiguration required')
 
+    def attest_runtime(self, session):
+        digest = self.policy['bootstrap_sha256']
+        loader_digest = digest_file(Path(self.policy['infra_root']).parent / 'scripts/minecraft_bootstrap_release.py')
+        # The verifier itself must be trusted before it inspects installed launchers.
+        session.execute_shell(f'test "$(sha256sum /usr/local/sbin/minecraft-bootstrap | cut -d\' \' -f1)" = {loader_digest} && '
+                              f'/usr/bin/python3 -B /usr/local/sbin/minecraft-bootstrap stage --region {self.deployment["region"]} '
+                              f'--bucket {self.deployment["backup_bucket_name"]} --sha256 {digest}', 'runtime-verifier-release')
+        observed = session.execute_shell(f'/usr/bin/python3 -B /usr/local/sbin/minecraft-bootstrap verify --sha256 {digest}', 'runtime-attestation')
+        if observed != {'runtime': 'installed', 'bootstrap_sha256': digest}:
+            raise HostError('installed runtime differs from the pinned public release')
+
     def start(self, instance: str):
         with operation_lock(self.directory):
             journal = self.journal('start', instance)
@@ -694,6 +749,7 @@ class OnDemandSession:
                 if probe.get('runtime') not in ('installed', 'missing'):
                     raise HostError('existing host runtime installation probe is invalid')
                 if probe['runtime'] == 'installed':
+                    self.attest_runtime(existing)
                     self.verify_private_inputs(existing)
                 self.record(journal, 'runtime-installed' if probe['runtime'] == 'installed' else 'configured-host')
             if journal['phase'] in ('begun', 'applying', 'applied'):
@@ -726,6 +782,7 @@ class OnDemandSession:
             if self.binding() != journal['binding']:
                 raise HostError('private lifecycle inputs changed before game start')
             self.verify_private_inputs(session)
+            self.attest_runtime(session)
             # Preserve a separate phase before the game command: an interrupted start
             # resumes the normal idempotent instance command without reinstalling files.
             try:
@@ -737,6 +794,24 @@ class OnDemandSession:
             return {**result, 'start_to_ready_seconds': None if elapsed is None else round(elapsed, 3), 'startup_target_seconds': 180,
                     'controller_ready_within_target': None if elapsed is None else elapsed <= 180 and session.dns_error is None,
                     'startup_target_met': None if elapsed is None or elapsed <= 180 and session.dns_error is None else False, 'host_recreated': journal['source_deployment'].get('host_id') is None}
+
+    def removal_host_state(self, journal, session):
+        if journal.get('removal_started') is not True or journal.get('host_stop_requested') is not True:
+            return session.host_state()
+        host_id = journal['source_deployment']['host_id']
+        response = self.aws.run('ec2', 'describe-instances', '--filters',
+                                json.dumps([{'Name': 'instance-id', 'Values': [host_id]}]), timeout=30)
+        reservations = response.get('Reservations')
+        if not isinstance(reservations, list) or any(not isinstance(row, dict) or not isinstance(row.get('Instances'), list) for row in reservations):
+            raise HostError('interrupted removal has invalid independent host evidence')
+        nodes = [node for row in reservations for node in row['Instances']]
+        if nodes and (len(nodes) != 1 or not isinstance(nodes[0], dict)
+                      or nodes[0].get('InstanceId') != host_id):
+            raise HostError('interrupted removal has mismatched independent host evidence')
+        if not nodes or nodes[0].get('State', {}).get('Name') == 'terminated':
+            session.state, session.address = 'stopped', None
+            return 'absent' if not nodes else 'terminated'
+        return session.host_state()
 
     def verify_removal(self, journal):
         source = journal['source_deployment']
@@ -776,6 +851,7 @@ class OnDemandSession:
                 if session.host_state() != 'running':
                     raise HostError('on-demand stop requires a running host for verified drain')
                 session.wait_ssm()
+                self.attest_runtime(session)
                 self.verify_private_inputs(session)
                 response = session.remote('host-drain')
                 instances = session.instance_statuses(response)
@@ -785,11 +861,12 @@ class OnDemandSession:
                 self.record(journal, 'drained', drain=response, backup='complete' if any(value['backup'] == 'complete' for value in instances.values()) else 'not-required')
             if journal['phase'] in ('drained', 'stopping-host', 'host-stopped', 'applying') and 'aws_instance.host[0]' in resources(self.tofu.state()):
                 session = self.running_session()
-                state = session.host_state()
+                state = self.removal_host_state(journal, session)
                 if state == 'running':
                     # Historical output alone does not authorize deletion. Refresh the
                     # drain before requesting the idempotent graceful EC2 stop.
                     session.wait_ssm()
+                    self.attest_runtime(session)
                     self.verify_private_inputs(session)
                     fresh = session.remote('host-drain')
                     instances = session.instance_statuses(fresh)
@@ -802,6 +879,8 @@ class OnDemandSession:
                     session.wait_host('stopped', 'stopping', previous='running')
                 elif state == 'stopping' and journal.get('host_stop_requested'):
                     session.wait_host('stopped', 'stopping')
+                elif state in ('absent', 'terminated') and journal.get('removal_started') is True and journal.get('host_stop_requested') is True:
+                    pass
                 elif state != 'stopped' or not journal.get('host_stop_requested'):
                     raise HostError('source host lacks independently verified graceful stop evidence')
                 session.sync_dns()  # EC2 has already released this address; park it promptly.
