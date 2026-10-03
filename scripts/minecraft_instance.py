@@ -123,7 +123,7 @@ class Manager:
 
     def state(self, instance):
         path = self.state_path(instance)
-        return json.loads(path.read_text()) if path.exists() else None
+        return private_json(path) if path.exists() or path.is_symlink() else None
 
     @staticmethod
     def execution(container):
