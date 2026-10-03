@@ -37,6 +37,17 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
             with self.subTest(resource=name):
                 self.assertRegex(body, r"lifecycle\s*\{\s*prevent_destroy\s*=\s*true\s*\}")
 
+    def test_retained_data_disk_size_is_an_explicit_private_input(self):
+        # A default would let an existing deployment silently plan a smaller disk. EBS cannot
+        # shrink: the provider plans a smaller size as an in-place update that AWS then rejects.
+        self.assertRegex(resource_blocks(INFRA)["aws_ebs_volume.data"], r"(?m)^\s*size\s*=\s*var\.data_volume_size_gib$")
+        variable = re.search(
+            r'^variable "data_volume_size_gib" \{\n(.*?)^\}', (INFRA / "variables.tf").read_text(), re.M | re.S)
+        self.assertIsNotNone(variable, "data_volume_size_gib is not declared")
+        self.assertRegex(variable.group(1), r"(?m)^\s*type\s*=\s*number$")
+        self.assertRegex(variable.group(1), r"(?m)^\s*nullable\s*=\s*false$")
+        self.assertNotRegex(variable.group(1), r"(?m)^\s*default\s*=")
+
     def test_auto_assigned_public_ip_does_not_force_host_replacement(self):
         # EC2 releases an auto-assigned address when the host stops, and the provider then
         # reads associate_public_ip_address=false. Without ignore_changes every plan taken

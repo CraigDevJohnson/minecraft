@@ -9,6 +9,7 @@ variables {
   ami_id                        = "ami-0123456789abcdef0"
   ami_owner_account_id          = "099720109477"
   data_filesystem_uuid          = "12345678-1234-4234-8234-123456789abc"
+  data_volume_size_gib          = 5
   backup_bucket_name            = "minecraft-test-example-backups"
   budget_notification_email     = "operator@example.invalid"
   host_permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-host-boundary"
@@ -20,8 +21,8 @@ run "retained_encrypted_data_and_replaceable_root" {
   command = plan
 
   assert {
-    condition     = aws_ebs_volume.data.encrypted && aws_ebs_volume.data.type == "gp3" && aws_ebs_volume.data.size == 40
-    error_message = "The retained data disk must be encrypted 40 GiB gp3."
+    condition     = aws_ebs_volume.data.encrypted && aws_ebs_volume.data.type == "gp3" && aws_ebs_volume.data.size == 5
+    error_message = "The retained data disk must be encrypted gp3 at the configured 5 GiB."
   }
 
   assert {
@@ -32,6 +33,17 @@ run "retained_encrypted_data_and_replaceable_root" {
   assert {
     condition     = aws_volume_attachment.data.force_detach == false && aws_volume_attachment.data.skip_destroy == false
     error_message = "Normal host replacement must use an orderly detach of the independent retained disk."
+  }
+}
+
+run "retained_data_disk_size_follows_the_private_input" {
+  command = plan
+  variables {
+    data_volume_size_gib = 8
+  }
+  assert {
+    condition     = aws_ebs_volume.data.size == 8 && aws_instance.host.root_block_device[0].volume_size == 20
+    error_message = "The retained data disk must take its size from data_volume_size_gib and leave the root disk at 20 GiB."
   }
 }
 
@@ -204,6 +216,30 @@ run "reject_ambiguous_filesystem_identity" {
     data_filesystem_uuid = "auto"
   }
   expect_failures = [var.data_filesystem_uuid]
+}
+
+run "reject_a_data_disk_too_small_to_restore_onto" {
+  command = plan
+  variables {
+    data_volume_size_gib = 1
+  }
+  expect_failures = [var.data_volume_size_gib]
+}
+
+run "reject_a_fractional_data_disk_size" {
+  command = plan
+  variables {
+    data_volume_size_gib = 2.5
+  }
+  expect_failures = [var.data_volume_size_gib]
+}
+
+run "reject_a_data_disk_larger_than_backups_can_protect" {
+  command = plan
+  variables {
+    data_volume_size_gib = 129
+  }
+  expect_failures = [var.data_volume_size_gib]
 }
 
 run "reject_a_public_hostname_given_as_a_url" {

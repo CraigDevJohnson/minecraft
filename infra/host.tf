@@ -73,7 +73,7 @@ resource "aws_ebs_volume" "data" {
   availability_zone = var.availability_zone
   encrypted         = true
   type              = "gp3"
-  size              = 40
+  size              = var.data_volume_size_gib
   tags              = { Name = "${var.resource_prefix}-data", Purpose = "retained-instance-data" }
   lifecycle {
     prevent_destroy = true

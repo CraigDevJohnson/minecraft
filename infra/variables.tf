@@ -93,6 +93,16 @@ variable "data_filesystem_uuid" {
   }
 }
 
+variable "data_volume_size_gib" {
+  description = "Retained data disk size in GiB. EBS grows online but never shrinks: only ever increase this for an existing disk (docs/operations/data-disk-capacity.md). Recommended start: 5."
+  type        = number
+  nullable    = false
+  validation {
+    condition     = var.data_volume_size_gib >= 2 && var.data_volume_size_gib <= 128 && floor(var.data_volume_size_gib) == var.data_volume_size_gib
+    error_message = "data_volume_size_gib must be a whole number of GiB from 2 through 128."
+  }
+}
+
 variable "backup_bucket_name" {
   description = "Globally unique private backup bucket name, separate from the state bucket."
   type        = string
