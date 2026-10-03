@@ -1030,12 +1030,16 @@ class TemporaryOperatorCredentialsTests(unittest.TestCase):
         replies = [subprocess.CompletedProcess([], 0, json.dumps(payload), ''), subprocess.CompletedProcess([], 0, '{}', ''),
                    subprocess.CompletedProcess([], 0, '{}', '')]
         client = minecraft_host.AWSCLI('us-west-2', 'workloads-admin', role)
-        with mock.patch.dict(os.environ, {minecraft_host.CLOUDFLARE_TOKEN: 'PRIVATE_CLOUDFLARE'}), \
+        with mock.patch.dict(os.environ, {minecraft_host.CLOUDFLARE_TOKEN: 'PRIVATE_CLOUDFLARE',
+                                        'AWS_ACCESS_KEY_ID': 'AMBIENT_ACCESS', 'AWS_SECRET_ACCESS_KEY': 'AMBIENT_SECRET',
+                                        'AWS_SESSION_TOKEN': 'AMBIENT_SESSION', 'AWS_SECURITY_TOKEN': 'AMBIENT_LEGACY'}), \
                 mock.patch.object(minecraft_host.subprocess, 'run', side_effect=replies) as run:
             client.run('ec2', 'describe-instances', timeout=30)
             client.run('ssm', 'describe-instance-information', timeout=30)
         self.assertIn('--profile', run.call_args_list[0].args[0])
         self.assertIn('assume-role', run.call_args_list[0].args[0])
+        for name in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_SECURITY_TOKEN'):
+            self.assertNotIn(name, run.call_args_list[0].kwargs['env'])
         for call in run.call_args_list[1:]:
             self.assertNotIn('--profile', call.args[0])
             self.assertEqual(call.kwargs['env']['AWS_SECRET_ACCESS_KEY'], 'PRIVATE_SECRET')

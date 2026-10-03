@@ -429,6 +429,30 @@ class OnDemandTests(unittest.TestCase):
         self.assertEqual(output['host'], 'absent')
         self.assertEqual(session.dns, {'dns': 'failed'})
         self.assertEqual(json.loads(session.journal_path.read_text())['phase'], 'complete')
+    def test_dns_repair_refuses_stale_handoffs_in_both_directions_and_partial_session(self):
+        for declared, actual in ((False, True), (True, False)):
+            with self.subTest(declared=declared), tempfile.TemporaryDirectory() as child:
+                self.policy['journal_dir'] = str(Path(child) / 'journal')
+                session = self.session(declared)
+                self.tofu.current = state(actual)
+                with self.assertRaises(host.HostError): session.repair_dns()
+                self.assertEqual(FakeSession.instances, [])
+        session = self.session(False)
+        self.tofu.current = state(True)
+        self.tofu.current['resources'] = [value for value in self.tofu.current['resources'] if value['type'] != 'aws_volume_attachment']
+        with self.assertRaises(host.HostError): session.repair_dns()
+        self.assertEqual(FakeSession.instances, [])
+
+    def test_dns_repair_refuses_incomplete_journal_even_if_handoff_matches_current_state(self):
+        session = self.session(False)
+        with lifecycle.operation_lock(session.directory):
+            journal = session.journal('start', 'survival')
+        with self.assertRaises(host.HostError): session.repair_dns()
+        self.assertEqual(FakeSession.instances, [])
+        session.record(journal, 'complete')
+        self.assertEqual(session.repair_dns(), {'host': 'absent'})
+        self.assertEqual(session.dns, {'dns': 'parked'})
+
     def test_stale_handoff_refuses_status(self):
         session = self.session()
         self.tofu.current = state(False)

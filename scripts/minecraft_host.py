@@ -57,6 +57,9 @@ class AWSCLI:
 
     def environment(self) -> dict:
         environment = {key: value for key, value in os.environ.items() if key != CLOUDFLARE_TOKEN}
+        if self.profile is not None:
+            for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN"):
+                environment.pop(name, None)
         if self.role_arn is not None:
             if self.credentials is None or self.monotonic() >= self.credentials_deadline:
                 response = AWSCLI(self.region, self.profile).run("sts", "assume-role", "--role-arn", self.role_arn,
