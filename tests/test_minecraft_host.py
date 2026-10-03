@@ -1034,13 +1034,16 @@ class TemporaryOperatorCredentialsTests(unittest.TestCase):
                                         'AWS_ACCESS_KEY_ID': 'AMBIENT_ACCESS', 'AWS_SECRET_ACCESS_KEY': 'AMBIENT_SECRET',
                                         'AWS_SESSION_TOKEN': 'AMBIENT_SESSION', 'AWS_SECURITY_TOKEN': 'AMBIENT_LEGACY',
                                         'AWS_CONFIG_FILE': '/unreviewed/config', 'AWS_SHARED_CREDENTIALS_FILE': '/unreviewed/credentials',
+                                        'AWS_ROLE_ARN':'arn:aws:iam::123456789012:role/unreviewed', 'AWS_WEB_IDENTITY_TOKEN_FILE':'/unreviewed/token', 'AWS_ROLE_SESSION_NAME':'unreviewed',
+                                        'AWS_CA_BUNDLE':'/unreviewed/ca', 'HTTP_PROXY':'http://unreviewed.invalid', 'HTTPS_PROXY':'http://unreviewed.invalid', 'ALL_PROXY':'http://unreviewed.invalid',
+                                        'http_proxy':'http://unreviewed.invalid', 'https_proxy':'http://unreviewed.invalid', 'all_proxy':'http://unreviewed.invalid',
                                         'AWS_ENDPOINT_URL': 'https://unreviewed.invalid', 'AWS_ENDPOINT_URL_STS': 'https://other.invalid'}), \
                 mock.patch.object(minecraft_host.subprocess, 'run', side_effect=replies) as run:
             client.run('ec2', 'describe-instances', timeout=30)
             client.run('ssm', 'describe-instance-information', timeout=30)
         self.assertIn('--profile', run.call_args_list[0].args[0])
         self.assertIn('assume-role', run.call_args_list[0].args[0])
-        for name in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_SECURITY_TOKEN', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE', 'AWS_ENDPOINT_URL', 'AWS_ENDPOINT_URL_STS'):
+        for name in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_SECURITY_TOKEN', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE', 'AWS_ROLE_ARN', 'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_ROLE_SESSION_NAME', 'AWS_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'AWS_ENDPOINT_URL', 'AWS_ENDPOINT_URL_STS'):
             self.assertNotIn(name, run.call_args_list[0].kwargs['env'])
         self.assertEqual(run.call_args_list[0].kwargs['env']['AWS_IGNORE_CONFIGURED_ENDPOINT_URLS'],'true')
         for call in run.call_args_list[1:]:

@@ -86,6 +86,13 @@ class OperatorRoleExampleTests(unittest.TestCase):
         self.permissions = statements("permissions")
         self.boundary = statements("host-boundary")
 
+    def test_sessions_allow_only_the_named_shell_and_private_forwarding_documents(self):
+        documents = {resource for statement in self.permissions if statement['Effect'] == 'Allow'
+                     and matches(statement['Action'], 'ssm:StartSession')
+                     for resource in as_list(statement['Resource']) if ':document/' in resource}
+        self.assertEqual(documents, {f'arn:aws:ssm:{REGION}:{ACCOUNT}:document/SSM-SessionManagerRunShell',
+                                     f'arn:aws:ssm:{REGION}::document/AWS-StartPortForwardingSession'})
+
     def test_examples_are_explicit_allow_or_deny_documents(self):
         for name, policy in [("permissions", self.permissions), ("host-boundary", self.boundary)]:
             for statement in policy:

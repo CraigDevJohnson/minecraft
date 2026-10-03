@@ -17,6 +17,7 @@ from pathlib import Path
 
 FILES = frozenset(('deployment.json', 'operator.json', 'rcon.secret'))
 OPTIONAL_FILES = frozenset(('recovery-receipt.json',))
+INPUT_CERTIFICATE = 'private-inputs.sha256'
 MAX_FILE = 1 << 20
 MAX_BUNDLE = 3 * MAX_FILE
 SHA256 = re.compile(r'[0-9a-f]{64}')
@@ -85,6 +86,8 @@ def validate_bundle(bundle: bytes, expected_digest: str) -> dict[str, bytes]:
 
 def receive_bundle(bundle: bytes, expected_digest: str, destination: Path, *, require_root=True) -> None:
     files = validate_bundle(bundle, expected_digest)
+    inputs = hashlib.sha256(files['operator.json'] + b'\0' + files['rcon.secret']).hexdigest()
+    files[INPUT_CERTIFICATE] = (inputs + '\n').encode()
     expected_owner = 0 if require_root else os.geteuid()
     if os.geteuid() != expected_owner:
         raise TransferError('private receiver requires the intended owner')
@@ -117,6 +120,22 @@ def receive_bundle(bundle: bytes, expected_digest: str, destination: Path, *, re
                 os.close(descriptor)
     except OSError as exc:
         raise TransferError('private file publication failed; retry the same bundle before starting') from exc
+
+
+def verify_installed_inputs(expected_digest: str, destination=Path('/etc/minecraft'), *, require_root=True) -> None:
+    expected_owner = 0 if require_root else os.geteuid()
+    if not SHA256.fullmatch(expected_digest) or os.geteuid() != expected_owner:
+        raise TransferError('private input verification requires the intended owner and digest')
+    try:
+        info = destination.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != expected_owner or stat.S_IMODE(info.st_mode) != 0o700:
+            raise TransferError('installed private directory is untrusted')
+        actual = hashlib.sha256(private_file(destination / 'operator.json') + b'\0' + private_file(destination / 'rcon.secret')).hexdigest()
+        certificate = private_file(destination / INPUT_CERTIFICATE)
+        if actual != expected_digest or certificate != (expected_digest + '\n').encode():
+            raise TransferError('installed private inputs differ from the reviewed policy; explicit reconfiguration required')
+    except OSError as exc:
+        raise TransferError('cannot verify installed private inputs') from exc
 
 
 def send_bundle(port: int, bundle: bytes) -> None:
@@ -175,14 +194,18 @@ def serve(expected_digest: str, port: int, timeout: int, destination=Path('/etc/
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['receive'])
+    parser.add_argument('action', choices=['receive', 'verify-inputs'])
     parser.add_argument('--sha256', required=True)
     parser.add_argument('--port', type=int, default=19140)
     parser.add_argument('--timeout', type=int, default=120)
     args = parser.parse_args(argv)
     try:
-        serve(args.sha256, args.port, args.timeout)
-        print('{"private_files":"installed"}')
+        if args.action == 'verify-inputs':
+            verify_installed_inputs(args.sha256)
+            print('{"private_inputs":"verified"}')
+        else:
+            serve(args.sha256, args.port, args.timeout)
+            print('{"private_files":"installed"}')
         return 0
     except TransferError as exc:
         print(json.dumps({'error': str(exc)}))
