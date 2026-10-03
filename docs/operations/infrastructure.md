@@ -84,15 +84,27 @@ Require all of:
 - an empty `Snapshot` and `Source` (a volume copy carries data without a snapshot), a `Created` time inside the recorded apply window, and exactly one current attachment, to the new host ID in the private outputs;
 - exactly one `CreateVolume`, inside the recorded apply window, whose `Username` equals that of the host's single `RunInstances` event;
 - no host write event that can replace its root disk or change its boot or user data, such as `CreateReplaceRootVolumeTask` or `ModifyInstanceAttribute`, and no `AttachVolume` or `DetachVolume` naming this volume other than the apply's own attachment; otherwise the host's logs or root disk may not cover first setup. Stops, starts, and other volumes' attachments do not by themselves disqualify the volume; the host-side check covers every boot;
-- at least one `AttachVolume`, each to that host ID, and the current `AttachTime` inside the recorded apply window and equal, to the second, to the `EventTime` of the apply's own `AttachVolume` (same `Username`), found in the volume or the host listing. A gp3 volume attaches to one instance at a time, so any detach and use elsewhere changes `AttachTime`, whatever CloudTrail indexed;
+- at least one `AttachVolume`, each to that host ID, and the current `AttachTime` inside the recorded apply window and equal, to the second, to `responseElements.attachTime` in the raw record of the apply's own `AttachVolume` (same `Username`), with matching response volume and instance IDs, found in the volume or host listing. CloudTrail's `eventTime` records request completion; the EC2 response's `attachTime` records attachment initiation, so those clocks can cross a second boundary. Do not replace this identity check with a time tolerance. A gp3 volume attaches to one instance at a time, so any detach and use elsewhere changes `AttachTime`, whatever CloudTrail indexed;
 - no other event whose `ReadOnly` is `false`, such as `DetachVolume`, `CreateSnapshot`, `CopyVolumes`, `ModifyVolume`, or `CreateTags`.
 
-The window is the newest `apply-start` and `apply-end` pair, recorded around that one apply; the host's `RunInstances` must fall inside the same pair; a failed or split apply has none. An apply without a recorded window needs a private bound that Craig accepts, such as the `LastModified` times of the state object versions written just before and by that apply. If an `AttachVolume` lists no instance, read only its target from that event. Keep the raw event private; it contains source IP addresses and ARNs:
+The window is the newest `apply-start` and `apply-end` pair, recorded around that one apply; the host's `RunInstances` must fall inside the same pair; a failed or split apply has none. An apply without a recorded window needs a private bound that Craig accepts, such as the `LastModified` times of the state object versions written just before and by that apply. If an `AttachVolume` lists no instance, read only its target from that event. Keep the raw event private; it contains source IP addresses and ARNs. Read `requestParameters.instanceId`, `responseElements.instanceId`, `responseElements.volumeId`, and `responseElements.attachTime` from it; CloudTrail can encode `attachTime` as Unix milliseconds, so divide numeric values by 1000 before converting to UTC and comparing to EC2's second-resolution timestamp:
 
 ```sh
 aws cloudtrail lookup-events \
   --lookup-attributes AttributeKey=EventId,AttributeValue="$event_id" \
-  --query 'Events[0].CloudTrailEvent' --output text | jq -er .requestParameters.instanceId || exit 1
+  --query 'Events[0].CloudTrailEvent' --output text |
+  jq -e '
+    {requestParameters: {instanceId: .requestParameters.instanceId},
+     responseElements: {instanceId: .responseElements.instanceId,
+                        volumeId: .responseElements.volumeId,
+                        attachTime: .responseElements.attachTime}}
+    | select(
+        (.requestParameters.instanceId | type == "string" and length > 0) and
+        (.responseElements.instanceId | type == "string" and length > 0) and
+        (.responseElements.volumeId | type == "string" and length > 0) and
+        (.responseElements.attachTime | type == "number" or (type == "string" and length > 0))
+      )
+  ' || exit 1
 ```
 
 A 2026-10-02 lookup of the first deployment's data volume showed a clean apply: exactly `CreateVolume` then `AttachVolume`, which listed both the volume and the instance. No `CreateTags` or KMS events were indexed under the volume. Both events and the host's `RunInstances` had the same `Username`, OpenTofu's generated `aws-go-sdk-<digits>` role session name, and all were visible within minutes. An attach and detach of a different volume to the host was indexed under the instance ID only. Attach and detach events are therefore not reliably indexed under a volume ID: the identical-`AttachTime` rule, not an absence of events, proves the volume was never reattached. In that lookup the data volume's `AttachTime` and its `AttachVolume` `EventTime` were both `03:11:30Z`. The operator's many `ssm:SendCommand` calls to the host were not indexed under the instance; its write events were only `RunInstances`, `AssociateAddress`, the attachments, and a later `StopInstances`. That `AssociateAddress` came from the Elastic IP the deployment used then. Hosts now take an auto-assigned address, so a later lookup shows no such event; it was never a disqualifying event, and the rules above are unchanged.
@@ -194,3 +206,5 @@ Reprice the exact region, instance/AMI, storage, public IPv4, AWS Budgets notifi
 `check` validates formatting, shell lint/syntax, Python syntax and behavioral tests, all three OpenTofu roots, and mocked plan assertions without a remote backend or AWS credentials. The bootstrap tests replace only the operating-system boundary; they do not format a real disk. Source-policy checks cover lifecycle safeguards that mocked plans do not expose. No check applies infrastructure or starts Minecraft.
 
 #7 must prove effective IAM, approved AMI prerequisites, backend locking/migration, actual plan/apply, attachment/device discovery, SSM, network reachability, AWS capacity and the budget recipient. #8 must follow the [live persistence and recovery rehearsal](live-recovery-rehearsal.md) to prove persistence, host replacement, and isolated recovery. #9 must prove family device compatibility. Green offline tests or PR CI prove none of these live outcomes.
+
+On 2026-10-03, an isolated recovery attachment had EC2 `AttachTime` `11:24:57Z`, raw `responseElements.attachTime` `11:24:57.873Z`, and CloudTrail request-completion `eventTime` `11:24:58Z`. Both request/response identities and the successful apply window matched, with no other volume write. This is why provenance compares the attachment response to the current attachment, rather than treating request completion as attachment initiation. [AttachVolume response semantics](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_AttachVolume.html) and [CloudTrail event semantics](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-record-contents.html) describe the distinct fields.
