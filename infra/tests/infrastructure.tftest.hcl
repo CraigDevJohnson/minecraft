@@ -1,4 +1,24 @@
-mock_provider "aws" {}
+mock_provider "aws" {
+  override_resource {
+    target = aws_iam_role.idle_stop
+    values = { arn = "arn:aws:iam::111122223333:role/minecraft-test-idle-stop" }
+  }
+
+  override_resource {
+    target = aws_sns_topic.idle_stop_alerts
+    values = { arn = "arn:aws:sns:us-west-2:111122223333:minecraft-test-idle-stop-alerts" }
+  }
+
+  override_resource {
+    target = aws_lambda_function.idle_stop
+    values = { arn = "arn:aws:lambda:us-west-2:111122223333:function:minecraft-test-idle-stop" }
+  }
+
+  override_resource {
+    target = aws_cloudwatch_event_rule.idle_stop
+    values = { arn = "arn:aws:events:us-west-2:111122223333:rule/minecraft-test-idle-stop" }
+  }
+}
 
 variables {
   account_id                    = "111122223333"
@@ -223,6 +243,104 @@ run "reject_ambiguous_filesystem_identity" {
   expect_failures = [var.data_filesystem_uuid]
 }
 
+run "idle_stop_is_absent_unless_configured" {
+  command = plan
+
+  assert {
+    condition     = length(aws_lambda_function.idle_stop) == 0 && length(aws_iam_role.idle_stop) == 0 && length(aws_cloudwatch_event_rule.idle_stop) == 0 && length(aws_sns_topic.idle_stop_alerts) == 0
+    error_message = "The idle stop must deploy nothing until its package is configured."
+  }
+}
+
+run "idle_stop_drains_and_stops_only_this_host" {
+  command = plan
+
+  variables {
+    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef" }
+  }
+
+  override_resource {
+    target = aws_instance.host
+    values = { id = "i-0123456789abcdef0" }
+  }
+
+  assert {
+    condition     = jsondecode(aws_iam_role.idle_stop[0].assume_role_policy).Statement == [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" } }]
+    error_message = "Only Lambda may assume the idle-stop role."
+  }
+
+  assert {
+    condition     = aws_iam_role.idle_stop[0].permissions_boundary == null
+    error_message = "No boundary is applied unless one is configured."
+  }
+
+  assert {
+    condition = toset([for statement in jsondecode(aws_iam_role_policy.idle_stop[0].policy).Statement : jsonencode(statement)]) == toset([
+      jsonencode({ Sid = "ObserveHost", Effect = "Allow", Action = ["ec2:DescribeInstances"], Resource = "*" }),
+      jsonencode({ Sid = "StopOnlyThisHost", Effect = "Allow", Action = ["ec2:StopInstances"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0123456789abcdef0"] }),
+      jsonencode({ Sid = "DrainOnlyThisHostWithShellDocument", Effect = "Allow", Action = ["ssm:SendCommand"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0123456789abcdef0", "arn:aws:ssm:us-west-2::document/AWS-RunShellScript"] }),
+      jsonencode({ Sid = "FollowDrain", Effect = "Allow", Action = ["ssm:GetCommandInvocation"], Resource = "*" }),
+      jsonencode({ Sid = "OwnStateOnly", Effect = "Allow", Action = ["ssm:GetParameter", "ssm:PutParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/idle-stop/state"] }),
+      jsonencode({ Sid = "ReadOnlyCloudflareToken", Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = ["arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef"] }),
+      jsonencode({ Sid = "OwnLogsOnly", Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = ["arn:aws:logs:us-west-2:111122223333:log-group:/aws/lambda/minecraft-test-idle-stop:*"] }),
+    ])
+    error_message = "The idle stop may stop and drain only this host, and touch only its own state and logs."
+  }
+
+  assert {
+    condition     = aws_lambda_function.idle_stop[0].environment[0].variables == tomap({ HOST_ID = "i-0123456789abcdef0", STATE_PARAMETER = "/minecraft-test/idle-stop/state", PUBLIC_HOSTNAME = "mc.example.com", CLOUDFLARE_ZONE_ID = "0123456789abcdef0123456789abcdef", CLOUDFLARE_TOKEN_SECRET_ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef", IDLE_MINUTES = "30", INSTANCES = "survival" })
+    error_message = "The function must target this host, its own state, the game endpoint and the configured instances, with a 30-minute default."
+  }
+
+  assert {
+    condition     = aws_lambda_function.idle_stop[0].architectures == tolist(["arm64"]) && aws_lambda_function.idle_stop[0].runtime == "provided.al2023" && aws_lambda_function.idle_stop[0].timeout == 60 && aws_lambda_function.idle_stop[0].reserved_concurrent_executions == 1
+    error_message = "The function must run the Go ARM64 bootstrap with a bounded timeout and serialized invocations."
+  }
+
+  assert {
+    condition     = aws_cloudwatch_event_rule.idle_stop[0].schedule_expression == "rate(5 minutes)" && aws_lambda_permission.idle_stop[0].principal == "events.amazonaws.com"
+    error_message = "Only the five-minute schedule may invoke the idle check."
+  }
+
+  assert {
+    condition     = aws_cloudwatch_metric_alarm.idle_stop_errors[0].metric_name == "Errors" && aws_cloudwatch_metric_alarm.idle_stop_errors[0].treat_missing_data == "notBreaching" && aws_sns_topic_subscription.idle_stop_alerts[0].protocol == "email" && aws_sns_topic_subscription.idle_stop_alerts[0].endpoint == "operator@example.invalid"
+    error_message = "A failing or blocked idle stop must email the private budget recipient."
+  }
+
+  assert {
+    condition     = aws_ssm_parameter.idle_stop_state[0].type == "String" && aws_cloudwatch_log_group.idle_stop[0].retention_in_days == 14
+    error_message = "State must be a plain parameter and logs must expire."
+  }
+}
+
+run "reject_idle_stop_threshold_out_of_range" {
+  command = plan
+  variables {
+    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef", idle_minutes = 5 }
+  }
+  expect_failures = [var.idle_stop]
+}
+
+run "idle_stop_role_takes_a_configured_boundary" {
+  command = plan
+  variables {
+    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/idle-stop-boundary" }
+  }
+
+  assert {
+    condition     = aws_iam_role.idle_stop[0].permissions_boundary == "arn:aws:iam::111122223333:policy/idle-stop-boundary"
+    error_message = "A configured boundary must cap the idle-stop role."
+  }
+}
+
+run "reject_idle_stop_boundary_in_another_account" {
+  command = plan
+  variables {
+    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef", permissions_boundary_arn = "arn:aws:iam::444455556666:policy/idle-stop-boundary" }
+  }
+  expect_failures = [var.idle_stop]
+}
+
 run "reject_a_data_disk_too_small_to_restore_onto" {
   command = plan
   variables {
@@ -293,4 +411,37 @@ run "reject_a_malformed_cloudflare_zone_id" {
     cloudflare_zone_id = "0123456789ABCDEF0123456789ABCDEF"
   }
   expect_failures = [var.cloudflare_zone_id]
+}
+
+run "reject_idle_stop_for_multiple_game_instances" {
+  command = plan
+  variables {
+    instance_ids = ["survival", "creative"]
+    idle_stop    = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef" }
+  }
+  expect_failures = [var.idle_stop]
+}
+
+run "reject_idle_stop_secret_in_another_account" {
+  command = plan
+  variables {
+    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:444455556666:secret:cloudflare-token-abcdef" }
+  }
+  expect_failures = [var.idle_stop]
+}
+
+run "reject_idle_stop_secret_in_another_region" {
+  command = plan
+  variables {
+    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:cloudflare-token-abcdef" }
+  }
+  expect_failures = [var.idle_stop]
+}
+
+run "reject_wildcard_idle_stop_secret_permissions" {
+  command = plan
+  variables {
+    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:*" }
+  }
+  expect_failures = [var.idle_stop]
 }

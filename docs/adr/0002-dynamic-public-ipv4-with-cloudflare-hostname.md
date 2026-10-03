@@ -6,7 +6,7 @@ The host runs only during play, but its Elastic IP billed all month: about $3.65
 
 Give the host an auto-assigned address and no Elastic IP. Players use one endpoint: a single Cloudflare A record, DNS only, TTL 60, supplied as a private deployment input. The operator command (`scripts/minecraft_host.py`) points the record at the host after a start and parks it on `192.0.2.1` after a stop. AWS can assign a released address to another customer, so the name must not keep pointing at one. A DNS failure never blocks the game start, the drain, or the EC2 stop.
 
-The update runs on the operator computer. That needs no IAM, permissions-boundary, or AWS resource change, shows a failure to the person starting the server, and keeps the token off the internet-facing host. A Cloudflare token cannot be scoped to one record, so it stays in the operator's password manager and is set for one command.
+The ordinary start/stop update runs on the operator computer. The optional [idle-stop function](../operations/idle-stop.md) also parks the record after its automatic stop. It retrieves a separate administrator-owned token secret at runtime, with access scoped to that secret; it is disabled by default and requires a reviewed enablement plan. That needs no IAM, permissions-boundary, or AWS resource change, shows a failure to the person starting the server, and keeps the token off the internet-facing host. A Cloudflare token cannot be scoped to one record, so it stays in the operator's password manager and is set for one command.
 
 Rejected:
 
@@ -17,7 +17,7 @@ Rejected:
 
 Consequences:
 
-- A start or stop outside the operator command leaves the record stale or unparked until `dns`, `start`, or `stop` next runs. If such paths become routine (console, scheduled, or idle stops), move the same update and park logic into an EC2 state-change Lambda.
+- A start or stop outside the operator command or enabled idle-stop function leaves the record stale or unparked until `dns`, `start`, or `stop` next runs. If console or other scheduled paths become routine, move the same update and park logic into an EC2 state-change Lambda.
 - Clients can reach the old address briefly after a start. Nothing may pin the raw address; use the hostname everywhere.
 - The recovery rehearsal deployment has no hostname, so it can never take over the family record.
 

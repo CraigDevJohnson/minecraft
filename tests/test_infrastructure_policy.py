@@ -109,10 +109,14 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
 
     def test_host_cannot_gain_static_credentials_or_extra_policies(self):
         blocks = resource_blocks(INFRA)
+        role_policies = {name: body for name, body in blocks.items() if name.startswith("aws_iam_role_policy.")}
         self.assertEqual(
-            {name for name in blocks if name.startswith("aws_iam_role_policy.")},
+            {name for name, body in role_policies.items() if re.search(r"\brole\s*=\s*aws_iam_role\.host\.", body)},
             {"aws_iam_role_policy.ssm", "aws_iam_role_policy.backups"},
         )
+        # The only other inline policy belongs to the separate idle-stop function role, never the host.
+        self.assertEqual(set(role_policies), {"aws_iam_role_policy.ssm", "aws_iam_role_policy.backups", "aws_iam_role_policy.idle_stop"})
+        self.assertRegex(role_policies["aws_iam_role_policy.idle_stop"], r"\brole\s*=\s*aws_iam_role\.idle_stop\[0\]\.id\b")
         self.assertFalse(
             any(name.startswith(("aws_iam_access_key.", "aws_iam_role_policy_attachment.", "aws_iam_policy_attachment.")) for name in blocks)
         )
