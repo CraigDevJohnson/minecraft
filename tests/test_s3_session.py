@@ -182,13 +182,15 @@ class S3SessionTests(unittest.TestCase):
                 S3Remote.instances = []
 
     def test_invalid_local_private_bundle_never_creates_cold_target_or_journal(self):
-        session = self.create(False)
-        self.operator.write_text('invalid operator JSON')
-        self.policy['private_inputs_sha256'] = base.private_inputs_digest(self.policy)
-        with self.assertRaises(host.HostError): session.start('survival')
-        self.assertEqual(self.tofu.applies, 0)
-        self.assertEqual(self.tofu.plans, [])
-        self.assertFalse(session.journal_path.exists())
+        for operator in ('invalid operator JSON', '\ufeff{}'):
+            with self.subTest(operator=operator):
+                session = self.create(False)
+                self.operator.write_text(operator)
+                self.policy['private_inputs_sha256'] = base.private_inputs_digest(self.policy)
+                with self.assertRaises(host.HostError): session.start('survival')
+                self.assertEqual(self.tofu.applies, 0)
+                self.assertEqual(self.tofu.plans, [])
+                self.assertFalse(session.journal_path.exists())
 
     def test_conflicting_live_retention_policy_refuses_final_deletion(self):
         session = self.create(True)

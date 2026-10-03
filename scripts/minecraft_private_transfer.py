@@ -73,9 +73,9 @@ def validate_bundle(bundle: bytes, expected_digest: str) -> dict[str, bytes]:
         files = {name: content.encode('utf-8') for name, content in value['files'].items()}
         if any(not content or len(content) > MAX_FILE for content in files.values()):
             raise ValueError
-        if not isinstance(json.loads(files['deployment.json']), dict) or not isinstance(json.loads(files['operator.json']), dict):
+        if not isinstance(json.loads(files['deployment.json'].decode('utf-8')), dict) or not isinstance(json.loads(files['operator.json'].decode('utf-8')), dict):
             raise ValueError
-        if 'recovery-receipt.json' in files and not isinstance(json.loads(files['recovery-receipt.json']), dict):
+        if 'recovery-receipt.json' in files and not isinstance(json.loads(files['recovery-receipt.json'].decode('utf-8')), dict):
             raise ValueError
         if not re.fullmatch(rb'[A-Za-z0-9_-]{16,128}\n?', files['rcon.secret']):
             raise ValueError

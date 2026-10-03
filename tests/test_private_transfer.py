@@ -74,12 +74,13 @@ class PrivateTransferTests(unittest.TestCase):
         cases = [(self.bundle, '0' * 64), (b'{}', hashlib.sha256(b'{}').hexdigest()),
                  (b'x' * (transfer.MAX_BUNDLE + 1), '0' * 64)]
         value = json.loads(self.bundle)
-        for mutation in ('extra', 'missing', 'bad-secret', 'not-json'):
+        for mutation in ('extra', 'missing', 'bad-secret', 'not-json', 'bom-json'):
             changed = json.loads(self.bundle)
             if mutation == 'extra': changed['files']['../attack'] = 'x'
             if mutation == 'missing': del changed['files']['operator.json']
             if mutation == 'bad-secret': changed['files']['rcon.secret'] = 'invalid secret'
             if mutation == 'not-json': changed['files']['operator.json'] = 'invalid'
+            if mutation == 'bom-json': changed['files']['operator.json'] = '\ufeff{}'
             payload = json.dumps(changed).encode()
             cases.append((payload, hashlib.sha256(payload).hexdigest()))
         for payload, digest in cases:
