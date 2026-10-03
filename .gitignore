@@ -48,6 +48,9 @@ __pycache__/
 operator-config/
 secrets/
 
+# Private family player list kept in the repository root
+/users.json
+
 # Minecraft server runtime data and secrets
 **/instances/*/data/
 **/world/
