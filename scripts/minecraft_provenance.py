@@ -269,6 +269,7 @@ def verify_fresh_volume(aws, deployment, journal, *, timeout=1800):
         raise HostError('fresh-volume inspection is using another AWS account')
     wallclock = getattr(aws, 'utcnow', lambda: dt.datetime.now(dt.timezone.utc))
     original = None
+    observed_at = None
     while aws.monotonic() < deadline:
         volume, _ = inventory(aws, deployment, start, end, deadline)
         attachment = volume['Attachments'][0]
@@ -276,7 +277,10 @@ def verify_fresh_volume(aws, deployment, journal, *, timeout=1800):
         if original is not None and binding != original:
             raise HostError('fresh-volume attachment changed during its provenance wait')
         original = binding
-        remaining = WAIT_SECONDS - (wallclock()-moment(attachment['AttachTime'])).total_seconds()
+        if observed_at is None:
+            # Process-local observation never credits wall-clock age or a prior attempt.
+            observed_at = aws.monotonic()
+        remaining = WAIT_SECONDS - (aws.monotonic() - observed_at)
         if remaining > 0:
             aws.sleep(min(30, remaining, max(0, deadline-aws.monotonic())))
             continue
@@ -302,5 +306,7 @@ def verify_fresh_volume(aws, deployment, journal, *, timeout=1800):
                 'volume_id': deployment['data_volume_id'], 'host_id': deployment['host_id'],
                 'filesystem_uuid': deployment['data_filesystem_uuid'], 'attach_time': attachment['AttachTime'],
                 'provenance_expires_at_utc': (wallclock() + dt.timedelta(minutes=10)).isoformat(),
-                'mandatory_wait_seconds': WAIT_SECONDS, 'host_first_setup': checked}
+                'mandatory_wait_seconds': WAIT_SECONDS,
+                'mandatory_wait_elapsed_seconds': aws.monotonic() - observed_at,
+                'host_first_setup': checked}
     raise HostError('fresh-volume provenance remains incomplete; no initialization is authorized')
