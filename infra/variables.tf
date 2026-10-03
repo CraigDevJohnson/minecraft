@@ -112,6 +112,24 @@ variable "instance_ids" {
   }
 }
 
+variable "public_hostname" {
+  description = "Private DNS hostname that players use. The operator command points its existing Cloudflare A record at the running host and parks it while the host is stopped."
+  type        = string
+  validation {
+    condition     = length(var.public_hostname) <= 253 && can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.public_hostname))
+    error_message = "public_hostname must be a lowercase DNS hostname of at most 253 characters with at least one dot and no scheme, port, or trailing dot."
+  }
+}
+
+variable "cloudflare_zone_id" {
+  description = "Cloudflare zone ID of the zone that holds public_hostname. The API token never belongs in OpenTofu inputs or state."
+  type        = string
+  validation {
+    condition     = can(regex("^[0-9a-f]{32}$", var.cloudflare_zone_id))
+    error_message = "cloudflare_zone_id must be a 32-character lowercase hexadecimal zone ID."
+  }
+}
+
 variable "monthly_budget_usd" {
   description = "Monthly account cost notification threshold in USD; a budget is not a spending cap."
   type        = number

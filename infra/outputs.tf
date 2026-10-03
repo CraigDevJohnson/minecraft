@@ -11,8 +11,8 @@ output "deployment" {
     security_group_id    = aws_security_group.host.id
     host_id              = aws_instance.host.id
     host_role_arn        = aws_iam_role.host.arn
-    elastic_ip           = aws_eip.host.public_ip
-    elastic_ip_id        = aws_eip.host.id
+    public_hostname      = var.public_hostname
+    cloudflare_zone_id   = var.cloudflare_zone_id
     data_volume_id       = aws_ebs_volume.data.id
     data_filesystem_uuid = var.data_filesystem_uuid
     backup_bucket_name   = aws_s3_bucket.backups.bucket

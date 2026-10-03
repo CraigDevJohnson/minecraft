@@ -28,7 +28,7 @@ resource "aws_instance" "host" {
   availability_zone           = var.availability_zone
   subnet_id                   = aws_subnet.public.id
   vpc_security_group_ids      = [aws_security_group.host.id]
-  associate_public_ip_address = false
+  associate_public_ip_address = true
   iam_instance_profile        = aws_iam_instance_profile.host.name
   monitoring                  = false
   user_data_replace_on_change = true
@@ -55,13 +55,17 @@ resource "aws_instance" "host" {
 
   tags = { Name = "${var.resource_prefix}-host", Purpose = "replaceable-host" }
   lifecycle {
-    # EC2 reports a public IPv4 association once the separate Elastic IP is attached.
+    # EC2 releases the auto-assigned address when the host stops, and the provider then
+    # reads false: without this, any plan taken while the host is stopped replaces it.
     ignore_changes = [associate_public_ip_address]
   }
   depends_on = [
     aws_iam_role_policy.ssm,
     aws_iam_role_policy.backups,
     aws_vpc_security_group_egress_rule.web,
+    # First boot installs packages and registers with SSM through the public route.
+    aws_route.internet,
+    aws_route_table_association.public,
   ]
 }
 

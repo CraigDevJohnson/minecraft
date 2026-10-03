@@ -11,15 +11,13 @@ class RecoveryInfrastructurePolicyTests(unittest.TestCase):
     def source(self, name):
         return (RECOVERY / name).read_text()
 
-    def test_recovery_root_owns_only_temporary_compute_storage_and_endpoint(self):
+    def test_recovery_root_owns_only_temporary_compute_and_storage(self):
         resources = "\n".join(path.read_text() for path in RECOVERY.glob("*.tf"))
         resource_types = set(re.findall(r'resource\s+"([^"]+)"', resources))
         self.assertEqual(
             resource_types,
             {
                 "aws_ebs_volume",
-                "aws_eip",
-                "aws_eip_association",
                 "aws_iam_instance_profile",
                 "aws_iam_role",
                 "aws_iam_role_policy",
@@ -37,6 +35,13 @@ class RecoveryInfrastructurePolicyTests(unittest.TestCase):
         )
         self.assertNotIn('resource "aws_vpc"', resources)
         self.assertNotIn('resource "aws_subnet"', resources)
+
+    def test_recovery_root_cannot_name_the_family_hostname(self):
+        # Without these fields the operator CLI makes no DNS call, so a rehearsal host
+        # can never take over the record that family devices use.
+        resources = "\n".join(path.read_text() for path in RECOVERY.glob("*.tf"))
+        for field in ("public_hostname", "cloudflare_zone_id"):
+            self.assertNotIn(field, resources)
 
     def test_source_backup_access_is_read_only_and_instance_scoped(self):
         iam = self.source("iam.tf")

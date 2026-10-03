@@ -17,3 +17,8 @@ budget_notification_email = "operator@example.invalid"
 # Administrator-created boundary policy, named outside the resource prefix and
 # created before the operator role is used.
 host_permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-host-boundary"
+
+# Hostname that players use and the ID of its Cloudflare zone. The A record must
+# already exist. The Cloudflare API token never belongs in this file.
+public_hostname    = "mc.example.com"
+cloudflare_zone_id = "0123456789abcdef0123456789abcdef"

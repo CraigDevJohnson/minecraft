@@ -23,7 +23,7 @@ variables {
   host_permissions_boundary_arn          = "arn:aws:iam::111122223333:policy/minecraft-host-boundary"
 }
 
-run "temporary_host_has_guarded_storage_and_endpoint" {
+run "temporary_host_has_guarded_storage_and_public_address" {
   command = plan
 
   assert {
@@ -42,8 +42,8 @@ run "temporary_host_has_guarded_storage_and_endpoint" {
   }
 
   assert {
-    condition     = aws_instance.recovery.metadata_options[0].http_tokens == "required" && aws_instance.recovery.metadata_options[0].http_put_response_hop_limit == 1 && !aws_instance.recovery.associate_public_ip_address && aws_eip.recovery.domain == "vpc"
-    error_message = "The recovery host must require IMDSv2 and use its explicit temporary EIP."
+    condition     = aws_instance.recovery.metadata_options[0].http_tokens == "required" && aws_instance.recovery.metadata_options[0].http_put_response_hop_limit == 1 && aws_instance.recovery.associate_public_ip_address
+    error_message = "The recovery host must require IMDSv2 and take its own public IPv4 address at launch."
   }
 
   assert {
@@ -124,8 +124,13 @@ run "private_outputs_identify_target_and_cleanup_boundary" {
   }
 
   assert {
-    condition     = output.cleanup_inventory.purpose == "recovery-rehearsal" && output.cleanup_inventory.host_id == aws_instance.recovery.id && output.cleanup_inventory.data_volume_id == aws_ebs_volume.recovery.id && output.cleanup_inventory.elastic_ip_id == aws_eip.recovery.id && output.cleanup_inventory.security_group_id == aws_security_group.recovery.id && output.cleanup_inventory.backup_bucket_name == "minecraft-family-recovery-backups"
+    condition     = output.cleanup_inventory.purpose == "recovery-rehearsal" && output.cleanup_inventory.host_id == aws_instance.recovery.id && output.cleanup_inventory.data_volume_id == aws_ebs_volume.recovery.id && output.cleanup_inventory.security_group_id == aws_security_group.recovery.id && output.cleanup_inventory.backup_bucket_name == "minecraft-family-recovery-backups" && !contains(keys(output.cleanup_inventory), "elastic_ip_id")
     error_message = "Cleanup output must enumerate only temporary recovery resources."
+  }
+
+  assert {
+    condition     = length(setintersection(keys(output.deployment), ["public_hostname", "cloudflare_zone_id", "elastic_ip", "elastic_ip_id"])) == 0
+    error_message = "The recovery deployment must carry no hostname, so the operator command can never point the family record at a rehearsal host."
   }
 }
 

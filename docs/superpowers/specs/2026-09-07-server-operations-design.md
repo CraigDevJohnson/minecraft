@@ -23,7 +23,7 @@ Long-term independent creative, experimental, and guided instances follow [ADR 0
 ## Architecture
 
 - OpenTofu provisions AWS infrastructure. Initial region `us-west-2` and `m7g.large` (2 vCPU, 8 GiB ARM64) are deployment defaults to confirm in the live plan.
-- One public subnet, Internet gateway, Elastic IP, Java TCP 25565, Bedrock UDP 19132. Administration uses Systems Manager; RCON stays local to the host.
+- One public subnet, Internet gateway, a stable DNS hostname over a public IPv4 address that changes on each host start ([ADR 0002](../../adr/0002-dynamic-public-ipv4-with-cloudflare-hostname.md)), Java TCP 25565, Bedrock UDP 19132. Administration uses Systems Manager; RCON stays local to the host.
 - A 20 GiB root disk is replaceable. A separate encrypted 40 GiB gp3 disk retains instance data across compute replacement. Verify its filesystem identity before starting Minecraft; a missing mount must never silently become a new world on the root disk.
 - Docker Compose owns the Paper/Geyser/Floodgate runtime. Pin compatible AMI, image digest, Java, server/plugin builds and content when implementing that runtime.
 - Private, encrypted, versioned S3 storage holds backups. A separate versioned state bucket uses locking. Host credentials are temporary and scoped; operator configuration and credentials stay outside Git.
@@ -37,7 +37,7 @@ The retained disk is mounted at `/srv/minecraft`. Runtime data lives at `/srv/mi
 
 Instance operations accept an explicit ID: start, stop, status, backup, restore, update. Host lifecycle is separate: stopping one instance does not authorize stopping other instances or the host. Host stop waits until every running instance completes its safe stop/backup sequence. Serialize conflicting operations and enforce one writer per data directory.
 
-Infrastructure supplies resource IDs, region, EIP, data-volume/filesystem identity and bucket names through private deployment output. Instance configuration supplies game ports, memory, runtime/content manifest and data paths. Do not expose player identifiers, acceptance flags, secrets or deployment state in public logs.
+Infrastructure supplies resource IDs, region, the public hostname, data-volume/filesystem identity and bucket names through private deployment output. Instance configuration supplies game ports, memory, runtime/content manifest and data paths. Do not expose player identifiers, acceptance flags, secrets or deployment state in public logs.
 
 ## Lifecycle and backup
 
