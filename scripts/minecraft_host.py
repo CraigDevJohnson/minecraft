@@ -45,15 +45,42 @@ class InvocationNotVisible(HostError):
 
 
 class AWSCLI:
-    def __init__(self, region: str):
+    def __init__(self, region: str, profile: str | None = None, role_arn: str | None = None):
         self.region = region
+        self.profile = profile
+        self.role_arn = role_arn
+        self.credentials = None
+        self.credentials_deadline = 0
 
     monotonic = staticmethod(time.monotonic)
     sleep = staticmethod(time.sleep)
 
+    def environment(self) -> dict:
+        environment = {key: value for key, value in os.environ.items() if key != CLOUDFLARE_TOKEN}
+        if self.role_arn is not None:
+            if self.credentials is None or self.monotonic() >= self.credentials_deadline:
+                response = AWSCLI(self.region, self.profile).run("sts", "assume-role", "--role-arn", self.role_arn,
+                         "--role-session-name", "minecraft-host", "--duration-seconds", "3600", timeout=30)
+                credentials = response.get("Credentials")
+                role_name = self.role_arn.rsplit("/", 1)[-1]
+                account = self.role_arn.split(":")[4]
+                expected = f"arn:aws:sts::{account}:assumed-role/{role_name}/minecraft-host"
+                if (not isinstance(credentials, dict) or response.get("AssumedRoleUser", {}).get("Arn") != expected
+                        or any(not isinstance(credentials.get(name), str) or not credentials[name] for name in ("AccessKeyId", "SecretAccessKey", "SessionToken"))):
+                    raise HostError("STS did not confirm the reviewed temporary operator role")
+                self.credentials = {"AWS_ACCESS_KEY_ID": credentials["AccessKeyId"], "AWS_SECRET_ACCESS_KEY": credentials["SecretAccessKey"],
+                                    "AWS_SESSION_TOKEN": credentials["SessionToken"]}
+                self.credentials_deadline = self.monotonic() + 3000
+            for name in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SECURITY_TOKEN"):
+                environment.pop(name, None)
+            environment.update(self.credentials)
+        return environment
+
     def run(self, service: str, operation: str, *arguments: str, timeout: float) -> dict:
         command = ["aws", "--region", self.region, "--output", "json", "--no-cli-pager", "--no-cli-auto-prompt", service, operation, *arguments]
-        environment = {key: value for key, value in os.environ.items() if key != CLOUDFLARE_TOKEN}
+        if self.profile is not None and self.role_arn is None:
+            command[1:1] = ["--profile", self.profile]
+        environment = self.environment()
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False, env=environment)
         except FileNotFoundError as exc:
@@ -134,8 +161,19 @@ def load_deployment(path: Path) -> dict:
     account_id, host_id, region, instances = (deployment.get(key) for key in ("account_id", "host_id", "region", "instances"))
     if not isinstance(account_id, str) or not re.fullmatch(r"[0-9]{12}", account_id):
         raise HostError("deployment account_id must be a 12-digit AWS account ID")
-    if not isinstance(host_id, str) or not re.fullmatch(r"i-(?:[a-f0-9]{8}|[a-f0-9]{17})", host_id):
+    lifecycle = deployment.get("lifecycle_mode", "retained-host")
+    if lifecycle not in ("retained-host", "on-demand-host"):
+        raise HostError("deployment lifecycle mode is invalid")
+    absent = lifecycle == "on-demand-host" and deployment.get("schema_version") == 2 and deployment.get("session_present") is False and host_id is None
+    if not absent and (not isinstance(host_id, str) or not re.fullmatch(r"i-(?:[a-f0-9]{8}|[a-f0-9]{17})", host_id)):
         raise HostError("deployment host_id is invalid")
+    if lifecycle == "on-demand-host":
+        if deployment.get("schema_version") != 2 or type(deployment.get("session_present")) is not bool or bool(host_id) != deployment["session_present"]:
+            raise HostError("deployment has an invalid on-demand session handoff")
+        for key, expression in (("data_volume_id", r"vol-[0-9a-f]{17}"), ("data_filesystem_uuid", r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"),
+                                ("bootstrap_sha256", r"[0-9a-f]{64}"), ("backup_bucket_name", r"[a-z][a-z0-9-]{1,61}[a-z0-9]")):
+            if not isinstance(deployment.get(key), str) or not re.fullmatch(expression, deployment[key]):
+                raise HostError("deployment on-demand identity is invalid")
     if not isinstance(region, str) or not re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-[0-9]+", region):
         raise HostError("deployment region is invalid")
     if not isinstance(instances, dict) or not instances or any(not INSTANCE_ID.fullmatch(key) or not isinstance(value, dict) for key, value in instances.items()):
@@ -286,6 +324,9 @@ class HostSession:
 
     def remote(self, action: str, instance=None) -> dict:
         command = REMOTE_COMMAND + " " + action + (" " + instance if instance else "")
+        return self.execute_shell(command, action)
+
+    def execute_shell(self, command: str, action: str) -> dict:
         response = self.call("ssm", "send-command", "--instance-ids", self.deployment["host_id"], "--document-name", "AWS-RunShellScript", "--timeout-seconds", "60", "--parameters", json.dumps({"commands": [command], "executionTimeout": [str(REMOTE_TIMEOUT)]}))
         metadata = response.get("Command")
         command_id = metadata.get("CommandId") if isinstance(metadata, dict) else None
@@ -378,6 +419,8 @@ class HostSession:
 def main(argv=None, *, aws=None, cloudflare=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--deployment", type=Path, required=True)
+    parser.add_argument("--lifecycle", type=Path, help="private reviewed on-demand controller policy")
+    parser.add_argument("--policy-sha256", help="SHA-256 of the approved recurring lifecycle policy")
     subparsers = parser.add_subparsers(dest="action", required=True)
     start = subparsers.add_parser("start", help="start host if necessary and a named instance")
     start.add_argument("--instance", required=True)
@@ -392,7 +435,14 @@ def main(argv=None, *, aws=None, cloudflare=None) -> int:
             raise HostError("instance is invalid or not configured in the deployment")
         if args.action == "dns" and deployment.get("public_hostname") is None:
             raise HostError("deployment has no public_hostname; it has no DNS record to manage")
-        session = HostSession(deployment, aws or AWSCLI(deployment["region"]), cloudflare or CloudflareAPI())
+        if deployment.get("lifecycle_mode") == "on-demand-host":
+            if args.lifecycle is None:
+                raise HostError("on-demand mode requires a reviewed lifecycle policy")
+            from minecraft_on_demand import OnDemandSession, load_policy
+            policy = load_policy(args.lifecycle, args.policy_sha256, deployment)
+            session = OnDemandSession(deployment, aws or AWSCLI(deployment["region"], policy["aws_profile"], deployment["operator_role_arn"]), cloudflare or CloudflareAPI(), policy, args.deployment)
+        else:
+            session = HostSession(deployment, aws or AWSCLI(deployment["region"]), cloudflare or CloudflareAPI())
         session.verify_account()
         if args.action == "start":
             output = session.start(args.instance)
@@ -407,10 +457,11 @@ def main(argv=None, *, aws=None, cloudflare=None) -> int:
             output["error"] = session.dns_error
         print(json.dumps(output, sort_keys=True))
         return 1 if session.dns_error else 0
-    except HostError as exc:
+    except Exception as exc:
+        reason = str(exc) if isinstance(exc, HostError) else "lifecycle command failed; preserve its private journal and inspect the failed phase"
         observed = session.observed if session else {"application": "unknown", "backup": "unverified"}
         dns = session.dns if session else {}
-        print(json.dumps({"host": session.state if session else "unknown", **observed, **dns, "error": str(exc)}, sort_keys=True))
+        print(json.dumps({"host": session.state if session else "unknown", **observed, **dns, "error": reason}, sort_keys=True))
         return 1
 
 

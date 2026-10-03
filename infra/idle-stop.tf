@@ -1,7 +1,7 @@
 locals {
   idle_stop_count          = var.idle_stop == null ? 0 : 1
   idle_stop_name           = "${var.resource_prefix}-idle-stop"
-  idle_stop_host_arn       = "arn:aws:ec2:${var.region}:${var.account_id}:instance/${aws_instance.host.id}"
+  idle_stop_host_arn       = "arn:aws:ec2:${var.region}:${var.account_id}:instance/${try(aws_instance.host[0].id, "absent")}"
   idle_stop_state_name     = "/${var.resource_prefix}/idle-stop/state"
   idle_stop_state_arn      = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${local.idle_stop_state_name}"
   idle_stop_log_group_name = "/aws/lambda/${local.idle_stop_name}"
@@ -107,7 +107,7 @@ resource "aws_lambda_function" "idle_stop" {
   reserved_concurrent_executions = 1
   environment {
     variables = {
-      HOST_ID                     = aws_instance.host.id
+      HOST_ID                     = try(aws_instance.host[0].id, "absent")
       STATE_PARAMETER             = aws_ssm_parameter.idle_stop_state[0].name
       PUBLIC_HOSTNAME             = var.public_hostname
       CLOUDFLARE_ZONE_ID          = var.cloudflare_zone_id

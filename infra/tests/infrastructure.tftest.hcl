@@ -1,5 +1,10 @@
 mock_provider "aws" {
   override_resource {
+    target = aws_ebs_volume.data
+    values = { id = "vol-0123456789abcdef0" }
+  }
+
+  override_resource {
     target = aws_iam_role.idle_stop
     values = { arn = "arn:aws:iam::111122223333:role/minecraft-test-idle-stop" }
   }
@@ -46,12 +51,12 @@ run "retained_encrypted_data_and_replaceable_root" {
   }
 
   assert {
-    condition     = aws_instance.host.root_block_device[0].encrypted && aws_instance.host.root_block_device[0].volume_size == 20 && aws_instance.host.root_block_device[0].delete_on_termination
+    condition     = aws_instance.host[0].root_block_device[0].encrypted && aws_instance.host[0].root_block_device[0].volume_size == 20 && aws_instance.host[0].root_block_device[0].delete_on_termination
     error_message = "The replaceable root disk must be encrypted 20 GiB and deleted on host termination."
   }
 
   assert {
-    condition     = aws_volume_attachment.data.force_detach == false && aws_volume_attachment.data.skip_destroy == false
+    condition     = aws_volume_attachment.data[0].force_detach == false && aws_volume_attachment.data[0].skip_destroy == false
     error_message = "Normal host replacement must use an orderly detach of the independent retained disk."
   }
 }
@@ -62,7 +67,7 @@ run "retained_data_disk_size_follows_the_private_input" {
     data_volume_size_gib = 8
   }
   assert {
-    condition     = aws_ebs_volume.data.size == 8 && aws_instance.host.root_block_device[0].volume_size == 20
+    condition     = aws_ebs_volume.data.size == 8 && aws_instance.host[0].root_block_device[0].volume_size == 20
     error_message = "The retained data disk must take its size from data_volume_size_gib and leave the root disk at 20 GiB."
   }
 }
@@ -139,12 +144,12 @@ run "game_only_ingress_and_ssm_only_administration" {
   }
 
   assert {
-    condition     = aws_instance.host.metadata_options[0].http_tokens == "required" && aws_instance.host.metadata_options[0].http_put_response_hop_limit == 1 && aws_instance.host.metadata_options[0].instance_metadata_tags == "disabled"
+    condition     = aws_instance.host[0].metadata_options[0].http_tokens == "required" && aws_instance.host[0].metadata_options[0].http_put_response_hop_limit == 1 && aws_instance.host[0].metadata_options[0].instance_metadata_tags == "disabled"
     error_message = "Host credentials must require IMDSv2 and must not be exposed through an extra container-network hop."
   }
 
   assert {
-    condition     = !aws_subnet.public.map_public_ip_on_launch && aws_instance.host.associate_public_ip_address && aws_route.internet.destination_cidr_block == "0.0.0.0/0"
+    condition     = !aws_subnet.public.map_public_ip_on_launch && aws_instance.host[0].associate_public_ip_address && aws_route.internet.destination_cidr_block == "0.0.0.0/0"
     error_message = "Only the host may take a public IPv4 address, assigned at launch and on each start, with a public internet route."
   }
 }
@@ -444,4 +449,56 @@ run "reject_wildcard_idle_stop_secret_permissions" {
     idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:*" }
   }
   expect_failures = [var.idle_stop]
+}
+
+run "on_demand_off_preserves_protected_infrastructure" {
+  command = plan
+  variables {
+    lifecycle_mode   = "on-demand-host"
+    session_present  = false
+    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+  assert {
+    condition     = length(aws_instance.host) == 0 && length(aws_volume_attachment.data) == 0 && aws_ebs_volume.data.size == 5 && aws_ebs_volume.data.encrypted
+    error_message = "Off-state removes only session host/attachment and retains the encrypted protected disk."
+  }
+  assert {
+    condition     = output.deployment.schema_version == 2 && output.deployment.lifecycle_mode == "on-demand-host" && output.deployment.session_present == false && output.deployment.host_id == null
+    error_message = "Absent session requires an explicit versioned off-state deployment handoff."
+  }
+  assert {
+    condition     = length(aws_iam_role_policy.bootstrap) == 1 && jsondecode(aws_iam_role_policy.bootstrap[0].policy).Statement[0].Action == ["s3:GetObject"] && jsondecode(aws_iam_role_policy.bootstrap[0].policy).Statement[0].Resource == ["arn:aws:s3:::minecraft-test-example-backups/bootstrap/releases/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/*"]
+    error_message = "Host runtime release permission must be read-only and pinned to one immutable digest prefix."
+  }
+}
+
+run "existing_mode_cannot_remove_host" {
+  command = plan
+  variables { session_present = false }
+  expect_failures = [var.session_present]
+}
+
+run "on_demand_rejects_fixed_host_idle_stop" {
+  command = plan
+  variables {
+    lifecycle_mode   = "on-demand-host"
+    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    idle_stop = {
+      package_path                = "tests/fixtures/idle-stop.placeholder"
+      cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:example/test-123456"
+    }
+  }
+  expect_failures = [var.lifecycle_mode]
+}
+
+run "default_bootstrap_bytes_remain_identical" {
+  command = plan
+  assert {
+    condition = aws_instance.host[0].user_data_base64 == base64gzip(templatefile("${path.module}/../scripts/host-bootstrap.sh.tftpl", {
+      storage_script_base64 = filebase64("${path.module}/../scripts/minecraft_storage.py")
+      data_volume_id        = aws_ebs_volume.data.id
+      data_filesystem_uuid  = var.data_filesystem_uuid
+    }))
+    error_message = "Retained-host defaults must preserve exact existing bootstrap bytes and avoid an unintended host replacement."
+  }
 }

@@ -22,7 +22,18 @@ data "aws_ami" "host" {
   }
 }
 
+moved {
+  from = aws_instance.host
+  to   = aws_instance.host[0]
+}
+
+moved {
+  from = aws_volume_attachment.data
+  to   = aws_volume_attachment.data[0]
+}
+
 resource "aws_instance" "host" {
+  count                       = var.session_present ? 1 : 0
   ami                         = data.aws_ami.host.id
   instance_type               = "m7g.large"
   availability_zone           = var.availability_zone
@@ -32,11 +43,14 @@ resource "aws_instance" "host" {
   iam_instance_profile        = aws_iam_instance_profile.host.name
   monitoring                  = false
   user_data_replace_on_change = true
-  user_data_base64 = base64gzip(templatefile("${path.module}/../scripts/host-bootstrap.sh.tftpl", {
+  user_data_base64 = base64gzip(join("", [templatefile("${path.module}/../scripts/host-bootstrap.sh.tftpl", {
     storage_script_base64 = filebase64("${path.module}/../scripts/minecraft_storage.py")
     data_volume_id        = aws_ebs_volume.data.id
     data_filesystem_uuid  = var.data_filesystem_uuid
-  }))
+    }), var.lifecycle_mode == "retained-host" ? "" : templatefile("${path.module}/../scripts/on-demand-bootstrap.sh.tftpl", {
+    cli_installer_base64  = filebase64("${path.module}/../scripts/install_aws_cli.sh")
+    release_script_base64 = filebase64("${path.module}/../scripts/minecraft_bootstrap_release.py")
+  })]))
 
   root_block_device {
     encrypted             = true
@@ -62,6 +76,7 @@ resource "aws_instance" "host" {
   depends_on = [
     aws_iam_role_policy.ssm,
     aws_iam_role_policy.backups,
+    aws_iam_role_policy.bootstrap,
     aws_vpc_security_group_egress_rule.web,
     # First boot installs packages and registers with SSM through the public route.
     aws_route.internet,
@@ -81,9 +96,10 @@ resource "aws_ebs_volume" "data" {
 }
 
 resource "aws_volume_attachment" "data" {
+  count        = var.session_present ? 1 : 0
   device_name  = "/dev/sdf"
   volume_id    = aws_ebs_volume.data.id
-  instance_id  = aws_instance.host.id
+  instance_id  = aws_instance.host[0].id
   force_detach = false
   skip_destroy = false
 }

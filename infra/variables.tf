@@ -186,3 +186,37 @@ variable "idle_stop" {
     error_message = "idle_stop.permissions_boundary_arn must name a managed policy in the target account."
   }
 }
+
+variable "lifecycle_mode" {
+  description = "Opt-in session host removal. Retained-host preserves existing stop/start operation. Activation requires a reviewed recurring policy and initial migration."
+  type        = string
+  default     = "retained-host"
+  validation {
+    condition     = contains(["retained-host", "on-demand-host"], var.lifecycle_mode)
+    error_message = "lifecycle_mode must be retained-host or on-demand-host."
+  }
+  validation {
+    condition     = var.lifecycle_mode == "retained-host" || var.idle_stop == null
+    error_message = "On-demand host mode is incompatible with idle_stop's fixed host identity."
+  }
+}
+
+variable "session_present" {
+  description = "Session host and attachment presence; protected data/network/IAM/backups/state remain retained."
+  type        = bool
+  default     = true
+  validation {
+    condition     = var.session_present || var.lifecycle_mode == "on-demand-host"
+    error_message = "Only opt-in on-demand mode permits an absent session host."
+  }
+}
+
+variable "bootstrap_sha256" {
+  description = "Pinned immutable runtime archive SHA-256 under bootstrap/releases/<digest>/runtime.tar.gz in the private backup bucket. Never contains credentials."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.lifecycle_mode == "retained-host" || try(can(regex("^[0-9a-f]{64}$", var.bootstrap_sha256)), false)
+    error_message = "On-demand mode requires a pinned bootstrap archive SHA-256."
+  }
+}

@@ -209,18 +209,18 @@ Then, in the private tfvars, set `data_volume_size_gib` to the new size and `dat
 "$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" state rm aws_ebs_volume.data
 ```
 
-Make the saved plan. `-replace=aws_instance.host` is mandatory. The new volume's ID is unknown at plan time, so without it the provider plans the host as an in-place update: the old host, launched without an auto-assigned address, would lose its Elastic IP and its reach. An in-place host change is a stop. The flag also makes this apply create the host, which the first-setup zero-fill rule requires:
+Make the saved plan. `-replace='aws_instance.host[0]'` is mandatory. The new volume's ID is unknown at plan time, so without it the provider plans the host as an in-place update: the old host, launched without an auto-assigned address, would lose its Elastic IP and its reach. An in-place host change is a stop. The flag also makes this apply create the host, which the first-setup zero-fill rule requires:
 
 ```sh
 "$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" plan \
-  -var-file="$private_dir/infrastructure.tfvars" -replace=aws_instance.host \
+  -var-file="$private_dir/infrastructure.tfvars" -replace='aws_instance.host[0]' \
   -out="$private_dir/disk-replacement.tfplan" || exit 1
 "$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" show -no-color \
   "$private_dir/disk-replacement.tfplan" >"$private_dir/disk-replacement-plan.txt" || exit 1
 shasum -a 256 "$private_dir/disk-replacement.tfplan" >"$private_dir/disk-replacement.tfplan.sha256"
 grep -n "$old_volume_id" "$private_dir/disk-replacement-plan.txt"
 "$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" show -json "$private_dir/disk-replacement.tfplan" |
-  jq -e '[.resource_changes[] | select(.address == "aws_instance.host")] | length == 1
+  jq -e '[.resource_changes[] | select(.address == "aws_instance.host[0]")] | length == 1
     and .[0].change.actions == ["delete","create"]
     and .[0].change.after.associate_public_ip_address == true
     and .[0].change.after.root_block_device[0].volume_size == 20' || exit 1
@@ -231,8 +231,8 @@ The text plan hides attributes that do not change, including the public-address 
 The plan must show exactly:
 
 - `aws_ebs_volume.data` created: encrypted gp3 at the new size;
-- `aws_instance.host` replaced, never updated in place. The JSON check above proves its auto-assigned address and 20 GiB root disk;
-- `aws_volume_attachment.data` replaced. Its prior `volume_id` is the old volume, and `grep` must find the old ID nowhere else;
+- `aws_instance.host[0]` replaced, never updated in place. The JSON check above proves its auto-assigned address and 20 GiB root disk;
+- `aws_volume_attachment.data[0]` replaced. Its prior `volume_id` is the old volume, and `grep` must find the old ID nowhere else;
 - for a deployment whose state still holds the Elastic IP, `aws_eip_association.host` and `aws_eip.host` destroyed.
 
 Anything else is a stop: an S3, IAM, network, or budget change, any other destroy, or any resource that creates, updates, or destroys the old volume. If Craig does not approve the plan, [re-import the old volume](#roll-back) at once.

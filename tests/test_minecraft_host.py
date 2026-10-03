@@ -1021,3 +1021,32 @@ class HostDNSTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TemporaryOperatorCredentialsTests(unittest.TestCase):
+    def test_available_profile_assumes_reviewed_role_in_memory_and_never_forwards_token(self):
+        role = 'arn:aws:iam::123456789012:role/minecraft-operator'
+        payload = {'Credentials': {'AccessKeyId': 'PRIVATE_ACCESS', 'SecretAccessKey': 'PRIVATE_SECRET', 'SessionToken': 'PRIVATE_SESSION'},
+                   'AssumedRoleUser': {'Arn': 'arn:aws:sts::123456789012:assumed-role/minecraft-operator/minecraft-host'}}
+        replies = [subprocess.CompletedProcess([], 0, json.dumps(payload), ''), subprocess.CompletedProcess([], 0, '{}', ''),
+                   subprocess.CompletedProcess([], 0, '{}', '')]
+        client = minecraft_host.AWSCLI('us-west-2', 'workloads-admin', role)
+        with mock.patch.dict(os.environ, {minecraft_host.CLOUDFLARE_TOKEN: 'PRIVATE_CLOUDFLARE'}), \
+                mock.patch.object(minecraft_host.subprocess, 'run', side_effect=replies) as run:
+            client.run('ec2', 'describe-instances', timeout=30)
+            client.run('ssm', 'describe-instance-information', timeout=30)
+        self.assertIn('--profile', run.call_args_list[0].args[0])
+        self.assertIn('assume-role', run.call_args_list[0].args[0])
+        for call in run.call_args_list[1:]:
+            self.assertNotIn('--profile', call.args[0])
+            self.assertEqual(call.kwargs['env']['AWS_SECRET_ACCESS_KEY'], 'PRIVATE_SECRET')
+            self.assertNotIn(minecraft_host.CLOUDFLARE_TOKEN, call.kwargs['env'])
+            self.assertNotIn('PRIVATE_SECRET', json.dumps(call.args))
+        self.assertEqual(sum('assume-role' in call.args[0] for call in run.call_args_list), 1)
+
+    def test_wrong_assumed_role_blocks_operational_call(self):
+        response = {'Credentials': {'AccessKeyId': 'PRIVATE_ACCESS', 'SecretAccessKey': 'PRIVATE_SECRET', 'SessionToken': 'PRIVATE_SESSION'},
+                    'AssumedRoleUser': {'Arn': 'arn:aws:sts::123456789012:assumed-role/wrong-role/minecraft-host'}}
+        client = minecraft_host.AWSCLI('us-west-2', 'workloads-admin', 'arn:aws:iam::123456789012:role/minecraft-operator')
+        with mock.patch.object(minecraft_host.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(response), '')) as run:
+            with self.assertRaises(minecraft_host.HostError): client.run('ec2', 'stop-instances', timeout=30)
+        self.assertEqual(run.call_count, 1)

@@ -110,7 +110,7 @@ Drain and stop the source host again, with the token set as above. Create a save
 ```sh
 "$repo_dir/.tools/bin/tofu" -chdir="$source_dir/infra" plan \
   -var-file="$source_dir/deployment.tfvars" \
-  -replace=aws_instance.host \
+  -replace='aws_instance.host[0]' \
   -out="$evidence_dir/host-replacement.tfplan"
 "$repo_dir/.tools/bin/tofu" -chdir="$source_dir/infra" show -no-color \
   "$evidence_dir/host-replacement.tfplan" \
