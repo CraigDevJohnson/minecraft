@@ -376,9 +376,11 @@ def publish_recovery_receipt(store, receipt, workspace, *, previous_selection=No
     return verified
 
 
-def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, store=None):
+def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, store=None, protect=False, timeout=3000):
     """Publish exact final-session receipts and durable private selection before disk deletion."""
     from minecraft_instance import private_json, write_json
+    if type(timeout) is not int or not 0 < timeout <= 3000:
+        raise BackupError('receipt verification timeout must be between 1 and 3000 seconds per instance')
     journal_dir = Path(journal_dir)
     if (not journal_dir.is_dir() or journal_dir.is_symlink() or journal_dir.stat().st_uid != os.geteuid()
             or stat.S_IMODE(journal_dir.stat().st_mode) != 0o700):
@@ -388,12 +390,15 @@ def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, sto
             or drain.get('draining') is not True or set(drain.get('instances', {})) != set(instances)
             or set(drain.get('recovery', {})) != set(instances)):
         raise BackupError('complete private drain evidence is required for every configured instance')
-    store = store or S3Store(deployment['backup_bucket_name'], region=deployment.get('region'))
+    supplied_store = store
     result = {}
     with tempfile.TemporaryDirectory(prefix='.minecraft-receipts-', dir=journal_dir) as temporary:
         workspace = Path(temporary)
         for instance in sorted(instances):
             check_instance(instance)
+            store = (supplied_store.for_operation(timeout=timeout) if supplied_store is not None and hasattr(supplied_store, 'for_operation')
+                     else supplied_store if supplied_store is not None
+                     else S3Store(deployment['backup_bucket_name'], region=deployment.get('region'), timeout=timeout))
             if (set(drain['recovery'][instance]) != {'session', 'manifest_sha256', 'recovery_point'}
                     or drain['instances'][instance].get('instance') != instance
                     or drain['instances'][instance].get('application') != 'stopped'
@@ -427,6 +432,9 @@ def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, sto
                 selection = publish_recovery_receipt(store, receipt, workspace, previous_selection=selection)
             write_json(journal_dir / f"receipt-{receipt['receipt_id']}.json", receipt)
             write_json(local_path, selection)
+            if protect:
+                from minecraft_retention import protect_current_selection
+                protect_current_selection(store, instance, workspace, expected_selection=selection)
             result[instance] = {'receipt_id': receipt['receipt_id'], 'selection': selection, 'receipt': receipt}
     return result
 
@@ -584,7 +592,9 @@ def catalog(store, instance, workspace):
     return points, invalid
 
 
-def prune(store, instance, workspace):
+def prune(store, instance, workspace, *, lifecycle_mode='retained-host'):
+    if lifecycle_mode == 's3-only':
+        raise BackupError('S3-only retention requires the operator receipt and retirement journal')
     points, invalid = catalog(store, instance, workspace)
     failed = 0
     removed = 0
@@ -697,7 +707,8 @@ def main(argv=None):
                 machine.verify_storage()
                 store = S3Store(machine.deployment['backup_bucket_name'], timeout=machine.backup_timeout)
                 function = status if args.action == 'status' else prune
-                result = function(store, args.instance, Path(directory))
+                result = (function(store, args.instance, Path(directory), lifecycle_mode=machine.deployment.get('lifecycle_mode', 'retained-host'))
+                          if args.action == 'prune' else function(store, args.instance, Path(directory)))
         print(json.dumps(result, sort_keys=True))
         return 0
     except (BackupError, OperationError, ValueError, OSError, KeyError, TypeError):

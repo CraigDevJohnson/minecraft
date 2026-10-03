@@ -348,6 +348,70 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.assertEqual(checkpoint.read_bytes(), b'preserve this unrelated volume data')
         self.assertEqual(self.store.objects, backup_before)
 
+    def test_resume_rejects_changed_normalized_owner_group_or_modes_without_repair(self):
+        for changed in ('file-mode', 'directory-mode', 'owner', 'group'):
+            with self.subTest(changed=changed):
+                self.setUp()
+                receipt = self.receipt()
+                self.restore(receipt)
+                target = self.fixture.target_root / 'instances/survival'
+                checkpoint = target / 'data/world/level.dat'
+                if changed == 'file-mode':
+                    checkpoint.chmod(0o640)
+                elif changed == 'directory-mode':
+                    (target / 'data/world').chmod(0o755)
+                else:
+                    original = self.fixture.machine.restore_metadata
+                    def changed_metadata(path):
+                        info = original(path)
+                        if path == checkpoint:
+                            setattr(info, 'st_uid' if changed == 'owner' else 'st_gid', 2000)
+                        return info
+                    self.fixture.machine.restore_metadata = changed_metadata
+                before = {str(path.relative_to(target)): (path.lstat().st_mode, path.read_bytes())
+                          for path in target.rglob('*') if path.is_file()}
+                with self.assertRaisesRegex(backup.BackupError, 'ownership or permissions'):
+                    self.restore(receipt, resume=True)
+                after = {str(path.relative_to(target)): (path.lstat().st_mode, path.read_bytes())
+                         for path in target.rglob('*') if path.is_file()}
+                self.assertEqual(before, after)
+
+    def test_receipt_default_store_uses_explicit_bounded_budget_and_invalid_budget_fails_before_io(self):
+        with mock.patch.object(backup, 'S3Store', return_value=self.store) as factory:
+            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, timeout=3000)
+        factory.assert_called_once_with('source-backups', region='us-west-2', timeout=3000)
+        for timeout in (0, 3001, True, '3000'):
+            with self.subTest(timeout=timeout), mock.patch.object(backup, 'S3Store') as factory, self.assertRaises(backup.BackupError):
+                backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, timeout=timeout)
+            factory.assert_not_called()
+
+    def test_injected_store_begins_a_fresh_configured_verification_operation(self):
+        factory = mock.Mock(return_value=self.store)
+        self.store.for_operation = factory
+        backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store, timeout=2500)
+        backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store, timeout=2500)
+        self.assertEqual(factory.call_args_list, [mock.call(timeout=2500), mock.call(timeout=2500)])
+
+    def test_multiple_instances_do_not_share_one_receipt_verification_deadline(self):
+        metadata = copy.deepcopy(self.fixture.metadata)
+        metadata['instance'] = 'creative'
+        metadata['definition']['id'] = 'creative'
+        metadata['definition_sha256'] = backup.manifest_digest(metadata['definition'])
+        metadata['recovery_point'] = backup.point_identity('creative', metadata['session'], metadata['manifest_sha256'])
+        metadata['archive']['key'] = f"instances/creative/objects/{metadata['recovery_point']}/data.tar.gz"
+        self.store.put(metadata['archive']['key'], self.store.objects[self.fixture.archive_key])
+        self.store.put(backup.marker_key('creative', metadata['recovery_point']), backup.encoded(metadata))
+        source = copy.deepcopy(self.source)
+        source['instances']['creative'] = metadata['definition']
+        drain = self.drain()
+        drain['instances']['creative'] = {'instance': 'creative', 'application': 'stopped', 'backup': 'complete'}
+        drain['recovery']['creative'] = {field: metadata[field] for field in ('session', 'manifest_sha256', 'recovery_point')}
+        factory = mock.Mock(return_value=self.store)
+        self.store.for_operation = factory
+        result = backup.verify_stop_receipt(source, drain, self.journal, self.bootstrap, store=self.store, timeout=3000)
+        self.assertEqual(set(result), {'survival', 'creative'})
+        self.assertEqual(factory.call_args_list, [mock.call(timeout=3000), mock.call(timeout=3000)])
+
 
 if __name__ == '__main__':
     unittest.main()

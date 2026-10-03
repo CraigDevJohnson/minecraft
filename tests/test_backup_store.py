@@ -92,6 +92,22 @@ class BackupStoreTests(unittest.TestCase):
             with self.subTest(profile=profile), self.assertRaises(backup_store.BackupError):
                 backup_store.S3Store('family-backups', profile=profile)
 
+    def test_temporary_operator_environment_is_requested_for_each_call_without_profile(self):
+        environment = dict(os.environ, AWS_ACCESS_KEY_ID='fixture-temporary-key')
+        provider = mock.Mock(return_value=environment)
+        self.store = backup_store.S3Store('family-backups', environment_provider=provider)
+        self.steps({'operation': 'put-object'}, {'operation': 'delete-object'})
+        self.store.upload('instances/survival/one', self.source)
+        self.store.delete('instances/survival/old')
+        self.assertEqual(provider.call_count, 2)
+        self.assertTrue(all('--profile' not in call['args'] for call in self.calls()))
+        with self.assertRaises(backup_store.BackupError):
+            backup_store.S3Store('family-backups', profile='source-admin', environment_provider=provider)
+        self.store = backup_store.S3Store('family-backups', environment_provider=mock.Mock(side_effect=ValueError('fixture-secret')))
+        with self.assertRaises(backup_store.BackupError) as caught:
+            self.store.delete('instances/survival/old')
+        self.assertNotIn('fixture-secret', str(caught.exception))
+
     def test_download_checks_head_size_and_pins_etag_before_fetching_bytes(self):
         self.steps(
             {"operation": "head-object", "response": {"ContentLength": 3, "ETag": '\"revision-one\"'}},
@@ -233,6 +249,47 @@ class BackupStoreTests(unittest.TestCase):
         args = self.calls()[0]["args"]
         self.assertEqual(args[args.index("--key") + 1], "survival/old/archive.tar.gz")
 
+    def test_version_inventory_preserves_exact_ids_and_paginates_both_markers(self):
+        key = 'instances/survival/completed/point.json'
+        self.steps({'operation': 'list-object-versions', 'response': {'IsTruncated': True,
+            'Versions': [{'Key': key, 'VersionId': 'one', 'IsLatest': True, 'LastModified': '2026-10-03T12:00:00Z'}],
+            'NextKeyMarker': key, 'NextVersionIdMarker': 'one'}},
+            {'operation': 'list-object-versions', 'response': {'IsTruncated': False,
+             'DeleteMarkers': [{'Key': key, 'VersionId': 'older-delete', 'IsLatest': False, 'LastModified': '2026-10-02T12:00:00Z'}]}})
+        result = self.store.list_versions('instances/survival/')
+        self.assertEqual([item['version_id'] for item in result], ['one', 'older-delete'])
+        self.assertTrue(result[1]['delete_marker'])
+        args = self.calls()[1]['args']
+        self.assertEqual(args[args.index('--key-marker') + 1], key)
+        self.assertEqual(args[args.index('--version-id-marker') + 1], 'one')
+
+    def test_incomplete_duplicate_or_foreign_version_inventory_is_rejected(self):
+        item = {'Key': 'instances/survival/objects/one', 'VersionId': 'one', 'IsLatest': True, 'LastModified': '2026-10-03T12:00:00Z'}
+        for page in ({'IsTruncated': True}, {'IsTruncated': False, 'Versions': [item, item]},
+                     {'IsTruncated': False, 'Versions': [{**item, 'Key': 'instances/other/one'}]},
+                     {'IsTruncated': False, 'Versions': [{**item, 'VersionId': 'null'}]}):
+            self.steps({'operation': 'list-object-versions', 'response': page})
+            with self.assertRaises(backup_store.BackupError):
+                self.store.list_versions('instances/survival/')
+
+    def test_retention_changes_exact_version_and_requires_readback(self):
+        self.steps({'operation': 'get-object-tagging', 'response': {'VersionId': 'one', 'TagSet': []}},
+                   {'operation': 'put-object-tagging', 'response': {'VersionId': 'one'}},
+                   {'operation': 'get-object-tagging', 'response': {'VersionId': 'one', 'TagSet': [{'Key': 'minecraft-retention', 'Value': 'keep'}]}})
+        self.store.set_retention('instances/survival/objects/one', 'one', 'keep')
+        for call in self.calls():
+            args = call['args']
+            self.assertEqual(args[args.index('--version-id') + 1], 'one')
+        self.steps({'operation': 'get-object-tagging', 'response': {'VersionId': 'one', 'TagSet': [{'Key': 'foreign-owner', 'Value': 'keep'}]}})
+        with self.assertRaises(backup_store.BackupError):
+            self.store.set_retention('instances/survival/objects/one', 'one', 'retired')
+        self.assertEqual(len(self.calls()), 1)
+        self.steps({'operation': 'get-object-tagging', 'response': {'VersionId': 'one', 'TagSet': []}},
+                   {'operation': 'put-object-tagging', 'response': {'VersionId': 'one'}},
+                   {'operation': 'get-object-tagging', 'response': {'VersionId': 'one', 'TagSet': []}})
+        with self.assertRaisesRegex(backup_store.BackupError, 'readback'):
+            self.store.set_retention('instances/survival/objects/one', 'one', 'keep')
+
     def test_large_upload_uses_checksum_parts_and_conditional_completion(self):
         self.source.write_bytes(b"abcabc")
         checksum = "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0="
@@ -345,6 +402,41 @@ class BackupStoreTests(unittest.TestCase):
         for timeout in (0, -1, 3001, True, "900"):
             with self.subTest(timeout=timeout), self.assertRaises(backup_store.BackupError):
                 backup_store.S3Store("family-backups", timeout=timeout)
+
+    def test_new_operation_preserves_temporary_provider_and_gets_fresh_deadline(self):
+        provider = mock.Mock(return_value=dict(os.environ))
+        with mock.patch.object(backup_store.time, 'monotonic', side_effect=[10, 1000]):
+            initial = backup_store.S3Store('family-backups', region='us-west-2', environment_provider=provider, timeout=900)
+            later = initial.for_operation(timeout=3000)
+        self.assertEqual(initial.deadline, 910)
+        self.assertEqual(later.deadline, 4000)
+        self.assertIs(later.environment_provider, provider)
+        self.assertIsNone(later.profile)
+
+    def test_archive_transfer_can_exceed_metadata_deadline_within_operation_budget(self):
+        def elapsed_transfer():
+            try:
+                calls = json.loads(self.state.read_text())['calls']
+                return elapsed_after_start if any(call['args'][1] == 'get-object' for call in calls) else 0
+            except (OSError, ValueError):
+                return 0
+        for key, elapsed_after_start, succeeds in (('instances/survival/objects/point/data.tar.gz', 1000, True),
+                                                   ('instances/survival/completed/point.json', 1000, False),
+                                                   ('instances/survival/objects/point/data.tar.gz', 4000, False)):
+            with self.subTest(key=key):
+                self.steps({'operation': 'head-object', 'response': {'ContentLength': 3, 'ETag': 'one'}},
+                           {'operation': 'get-object', 'download': 'abc', 'sleep': 0.05, 'response': {'ContentLength': 3}})
+                target = self.directory / 'long-transfer'
+                target.write_bytes(b'preserve')
+                with mock.patch.object(backup_store.time, 'monotonic', side_effect=elapsed_transfer):
+                    store = backup_store.S3Store('family-backups', timeout=3000)
+                    if succeeds:
+                        self.assertTrue(store.download(key, target, max_bytes=3))
+                        self.assertEqual(target.read_bytes(), b'abc')
+                    else:
+                        with self.assertRaisesRegex(backup_store.BackupError, 'timed out'):
+                            store.download(key, target, max_bytes=3)
+                        self.assertEqual(target.read_bytes(), b'preserve')
 
     def test_a_part_checksum_mismatch_aborts_before_publication(self):
         self.source.write_bytes(b"abcabc")
