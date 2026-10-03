@@ -92,7 +92,19 @@ The window is the newest `apply-start` and `apply-end` pair, recorded around tha
 ```sh
 aws cloudtrail lookup-events \
   --lookup-attributes AttributeKey=EventId,AttributeValue="$event_id" \
-  --query 'Events[0].CloudTrailEvent' --output text | jq -er .requestParameters.instanceId || exit 1
+  --query 'Events[0].CloudTrailEvent' --output text |
+  jq -e '
+    {requestParameters: {instanceId: .requestParameters.instanceId},
+     responseElements: {instanceId: .responseElements.instanceId,
+                        volumeId: .responseElements.volumeId,
+                        attachTime: .responseElements.attachTime}}
+    | select(
+        (.requestParameters.instanceId | type == "string" and length > 0) and
+        (.responseElements.instanceId | type == "string" and length > 0) and
+        (.responseElements.volumeId | type == "string" and length > 0) and
+        (.responseElements.attachTime | type == "number" or (type == "string" and length > 0))
+      )
+  ' || exit 1
 ```
 
 A 2026-10-02 lookup of the first deployment's data volume showed a clean apply: exactly `CreateVolume` then `AttachVolume`, which listed both the volume and the instance. No `CreateTags` or KMS events were indexed under the volume. Both events and the host's `RunInstances` had the same `Username`, OpenTofu's generated `aws-go-sdk-<digits>` role session name, and all were visible within minutes. An attach and detach of a different volume to the host was indexed under the instance ID only. Attach and detach events are therefore not reliably indexed under a volume ID: the identical-`AttachTime` rule, not an absence of events, proves the volume was never reattached. In that lookup the data volume's `AttachTime` and its `AttachVolume` `EventTime` were both `03:11:30Z`. The operator's many `ssm:SendCommand` calls to the host were not indexed under the instance; its write events were only `RunInstances`, `AssociateAddress`, the attachments, and a later `StopInstances`. That `AssociateAddress` came from the Elastic IP the deployment used then. Hosts now take an auto-assigned address, so a later lookup shows no such event; it was never a disqualifying event, and the rules above are unchanged.
