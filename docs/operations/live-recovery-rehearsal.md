@@ -679,7 +679,7 @@ Historical status on 2026-09-18: no deployed run had been completed, and issue #
 
 ### Completed recovery proof, 2026-10-03
 
-[Issue #8](https://github.com/CraigDevJohnson/minecraft/issues/8) records completed retained-EBS stop/start and host replacement, isolated S3 restore and update, then fresh temporary host/root/data replacement and another guarded restore. Generation two restored the reviewed `62da016` runtime and selected source point. All 15 known checkpoint hashes, including 11 player files, matched. The final 233,153,696-byte temporary backup independently passed its archive checksum and all 249 file inventory entries.
+[Issue #8](https://github.com/CraigDevJohnson/minecraft/issues/8) records completed retained-EBS stop/start and host replacement, isolated S3 restore and update, then fresh temporary host/root/data replacement and another guarded restore. Generation two restored the reviewed `62da016` runtime and selected source point. All 15 known checkpoint hashes, including 11 player files, matched. A completed 233,153,696-byte temporary backup independently passed its archive checksum and all 249 file inventory entries.
 
 | Generation-two measurement | Actual result |
 | --- | --- |
