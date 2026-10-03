@@ -313,7 +313,7 @@ jq -e --arg volume "$(jq -er .data_volume_id "$deployment")" \
 
 ### Retire the old volume
 
-The old volume is deleted only through the [explicit destructive workflow](infrastructure.md#normal-replacement-and-explicit-destructive-workflow): after step 12 and one family session on the new disk, and with Craig's approval to delete that specific volume. Set `old_volume_id` from `deployment-before-shrink.json`. The state must name the new volume, and the old one must still be `available` at its old size, unattached, with its recorded tags:
+The old volume is deleted only through the [explicit destructive workflow](infrastructure.md#normal-replacement-and-explicit-destructive-workflow): after the checkpoint verification in step 11 and new-volume backup proof in step 12, and with Craig's approval to delete that specific volume. The earlier requirement for a family session was superseded by the [2026-10-03 owner acceptance](family-device-validation.md); the optional session in step 12 is not a retirement gate. Set `old_volume_id` from `deployment-before-shrink.json`. The state must name the new volume, and the old one must still be `available` at its old size, unattached, with its recorded tags:
 
 ```sh
 old_volume_id="$(jq -er .data_volume_id "$private_dir/deployment-before-shrink.json")" || exit 1
@@ -342,14 +342,14 @@ Keep `deployment-before-shrink.json` until no retained recovery point names the 
   ```
 
   A new plan must show no change to the volume. It can still replace the host, because the revision changed the bootstrap. Do not apply that without separate approval; the rollback does not need it.
-- **A failure after the apply, before the family plays on the new disk.**
+- **A failure after the apply, before new gameplay on the new disk.**
   1. Stop the host if it runs. If a session started, drain it with the `stop` command first. A host without an installed runtime cannot give drain evidence, so stop it directly with `aws ec2 stop-instances --instance-ids "$(jq -er .host_id "$deployment")"` and wait for `stopped`. Then run the `dns` command with the token, which parks the record.
   2. Run `tofu state rm 'aws_ebs_volume.data[0]'`, which drops the new volume from state, then the import above.
   3. Restore the old UUID and size in the private tfvars.
   4. Plan. Only the host and attachment replacements may appear, and the imported volume must show no change. Apply the saved plan that Craig approved.
   5. Cloud-init mounts the old filesystem without intervention. Never zero-fill it. Reinstall the runtime, restage the private configuration with the refreshed output, start with the token so the record follows the host, and verify the checkpoint.
   6. The abandoned new volume is unmanaged and holds only a copy of S3 data. Delete it with approval.
-- **After family play on the new disk,** going back to the old volume loses that play. After the old volume is retired, recovery is the normal S3 restore onto a new disk sized from the marker.
+- **After new gameplay on the new disk,** going back to the old volume loses those changes. After the old volume is retired, recovery is the normal S3 restore onto a new disk sized from the marker.
 
 ## Evidence
 
@@ -372,6 +372,6 @@ World command-storage checkpoints, allowlist and operator file hashes, the Flood
 
 Craig separately approved retiring the old disk. The [retirement record](https://github.com/CraigDevJohnson/minecraft/issues/22#issuecomment-5967740514) confirms it was detached, matched the recorded tags, and was absent after deletion. At that check, the stopped deployment retained only its 20 GiB root disk, 5 GiB data disk, and S3 storage. Preserve the old source deployment record while any retained recovery point still names the old filesystem.
 
-The linked summaries do not report separate zero-check or runtime-install durations, or a measured pre-migration disk-use percentage. Those timings are not inferred from the total downtime. This family migration is partial evidence for #8; the isolated rehearsal, failed-backup visibility, and isolated update recovery remain open. Real family-device and player-inventory validation remains on #9.
+The linked summaries do not report separate zero-check or runtime-install durations, or a measured pre-migration disk-use percentage. Those timings are not inferred from the total downtime. This family migration is partial evidence for #8; the isolated rehearsal, failed-backup visibility, and isolated update recovery remain open. Craig resolved the console and family testing requirements on 2026-10-03; see the [current acceptance record](family-device-validation.md). That decision does not add player-inventory or console proof to these migration summaries.
 
 No live grow has been recorded. Future replacements and grows should add their revision, phase times, total downtime, archive and extracted bytes, and disk use before and after here, without private identifiers.
