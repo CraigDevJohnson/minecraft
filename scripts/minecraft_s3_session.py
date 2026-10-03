@@ -85,7 +85,8 @@ def scan_fresh_marker_versions(store, instances, volume_id, workspace):
     from minecraft_backup import MAX_METADATA_BYTES, read_json, validate_metadata
     count = 0
     for instance in sorted(instances):
-        prefix = f'instances/{instance}/completed/'
+        prefix = f'instances/{instance}/'
+        completed = prefix + 'completed/'
         rows = store.list_versions(prefix)
         if not isinstance(rows, list) or len(rows) > 10000:
             raise HostError('fresh-volume backup marker version inventory is incomplete or excessive')
@@ -93,9 +94,13 @@ def scan_fresh_marker_versions(store, instances, volume_id, workspace):
         for row in rows:
             try:
                 key, version = row['key'], row['version_id']
-                if not re.fullmatch(re.escape(prefix) + r'[0-9a-f]{64}\.json', key) or not isinstance(version, str) or not version or type(row['delete_marker']) is not bool or (key, version) in seen:
+                if not isinstance(key, str) or not key.startswith(prefix) or not isinstance(version, str) or not version or type(row['delete_marker']) is not bool or (key, version) in seen:
                     raise ValueError
                 seen.add((key, version))
+                if not key.startswith(completed):
+                    continue
+                if not re.fullmatch(re.escape(completed) + r'[0-9a-f]{64}\.json', key):
+                    raise ValueError
                 if row['delete_marker']:
                     continue
                 path = Path(workspace) / 'marker-version.json'
