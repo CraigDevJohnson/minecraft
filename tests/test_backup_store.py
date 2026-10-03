@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -107,6 +108,65 @@ class BackupStoreTests(unittest.TestCase):
         with self.assertRaises(backup_store.BackupError) as caught:
             self.store.delete('instances/survival/old')
         self.assertNotIn('fixture-secret', str(caught.exception))
+
+    def test_reviewed_absolute_executable_is_used_after_environment_refresh_for_each_command(self):
+        pinned = self.directory / 'reviewed-aws'
+        pinned.write_bytes((self.directory / 'aws').read_bytes())
+        pinned.chmod(0o700)
+        (self.directory / 'aws').write_text(f'#!{sys.executable}\nraise SystemExit(99)\n')
+        order = []
+        def environment():
+            order.append('environment')
+            return dict(os.environ)
+        def executable():
+            order.append('executable')
+            return str(pinned)
+        self.store = backup_store.S3Store('family-backups', environment_provider=environment, executable_provider=executable)
+        self.steps({'operation': 'put-object'}, {'operation': 'delete-object'})
+        self.store.upload('instances/survival/one', self.source)
+        self.store.delete('instances/survival/old')
+        self.assertEqual(order, ['environment', 'executable', 'environment', 'executable'])
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_rejected_or_relative_executable_never_spawns_an_aws_process(self):
+        self.steps({'operation': 'delete-object'})
+        providers = [mock.Mock(side_effect=ValueError('fixture-secret')), lambda: 'aws', lambda: None]
+        for provider in providers:
+            with self.subTest(provider=provider), mock.patch.object(backup_store.subprocess, 'Popen') as spawn:
+                self.store = backup_store.S3Store('family-backups', executable_provider=provider)
+                with self.assertRaisesRegex(backup_store.BackupError, 'executable') as caught:
+                    self.store.delete('instances/survival/old')
+                self.assertNotIn('fixture-secret', str(caught.exception))
+                spawn.assert_not_called()
+        self.assertEqual(self.calls(), [])
+        with self.assertRaises(backup_store.BackupError):
+            backup_store.S3Store('family-backups', executable_provider='aws')
+
+    def test_credential_refresh_replacing_pinned_executable_is_rechecked_before_outer_s3_command(self):
+        pinned = self.directory / 'aws'
+        original = hashlib.sha256(pinned.read_bytes()).hexdigest()
+        executed = self.directory / 'replaced-executable-ran'
+        order = []
+        def environment():
+            order.append('environment')
+            replacement = self.directory / 'replacement'
+            replacement.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nPath({str(executed)!r}).touch()\n')
+            replacement.chmod(0o700)
+            replacement.replace(pinned)
+            return dict(os.environ)
+        def executable():
+            order.append('executable')
+            if hashlib.sha256(pinned.read_bytes()).hexdigest() != original:
+                raise ValueError('pinned executable changed during credential refresh')
+            return str(pinned)
+        self.steps({'operation': 'delete-object'})
+        self.store = backup_store.S3Store('family-backups', environment_provider=environment, executable_provider=executable)
+        with mock.patch.object(backup_store.subprocess, 'Popen') as spawn, self.assertRaisesRegex(backup_store.BackupError, 'changed'):
+            self.store.delete('instances/survival/old')
+        spawn.assert_not_called()
+        self.assertEqual(order, ['environment', 'executable'])
+        self.assertFalse(executed.exists())
+        self.assertEqual(self.calls(), [])
 
     def test_download_checks_head_size_and_pins_etag_before_fetching_bytes(self):
         self.steps(
@@ -431,12 +491,15 @@ class BackupStoreTests(unittest.TestCase):
 
     def test_new_operation_preserves_temporary_provider_and_gets_fresh_deadline(self):
         provider = mock.Mock(return_value=dict(os.environ))
+        executable = mock.Mock(return_value=str(self.directory / 'aws'))
         with mock.patch.object(backup_store.time, 'monotonic', side_effect=[10, 1000]):
-            initial = backup_store.S3Store('family-backups', region='us-west-2', environment_provider=provider, timeout=900)
+            initial = backup_store.S3Store('family-backups', region='us-west-2', environment_provider=provider,
+                                          executable_provider=executable, timeout=900)
             later = initial.for_operation(timeout=3000)
         self.assertEqual(initial.deadline, 910)
         self.assertEqual(later.deadline, 4000)
         self.assertIs(later.environment_provider, provider)
+        self.assertIs(later.executable_provider, executable)
         self.assertIsNone(later.profile)
 
     def test_archive_transfer_can_exceed_metadata_deadline_within_operation_budget(self):

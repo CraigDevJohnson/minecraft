@@ -39,7 +39,7 @@ def valid_version(version):
 
 class S3Store:
     def __init__(self, bucket: str, region: str | None = None, *, timeout: int = 900, profile: str | None = None,
-                 environment_provider=None):
+                 environment_provider=None, executable_provider=None):
         if type(timeout) is not int or not 0 < timeout <= 3000:
             raise BackupError("backup operation timeout must be between 1 and 3000 seconds")
         self.bucket = bucket
@@ -50,11 +50,14 @@ class S3Store:
         if environment_provider is not None and (not callable(environment_provider) or profile is not None):
             raise BackupError('temporary operator credentials require a provider without an explicit profile')
         self.environment_provider = environment_provider
+        if executable_provider is not None and not callable(executable_provider):
+            raise BackupError('AWS executable requires a verified path provider')
+        self.executable_provider = executable_provider
         self.deadline = time.monotonic() + timeout
 
     def for_operation(self, *, timeout: int):
         return S3Store(self.bucket, self.region, timeout=timeout, profile=self.profile,
-                       environment_provider=self.environment_provider)
+                       environment_provider=self.environment_provider, executable_provider=self.executable_provider)
 
     def check_deadline(self):
         if time.monotonic() >= self.deadline:
@@ -86,6 +89,15 @@ class S3Store:
         process = None
         output = {"stdout": bytearray(), "stderr": bytearray()}
         try:
+            if self.executable_provider:
+                try:
+                    command[0] = self.executable_provider()
+                    if not isinstance(command[0], str) or not os.path.isabs(command[0]) or '\x00' in command[0]:
+                        raise ValueError()
+                except Exception as error:
+                    raise BackupError('reviewed AWS executable is unavailable or changed') from error
+                if time.monotonic() >= deadline:
+                    raise BackupError('S3 command timed out before execution')
             process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        env=environment)

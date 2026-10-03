@@ -74,6 +74,8 @@ Receipt verification accepts an explicit `timeout` of 1 to 3000 seconds, default
 
 `verify_stop_receipt` requires a `fresh_drain` callback that retrieves current host state directly, such as a fresh private-drain SSM call targeting the reviewed deployment host. The saved and newly retrieved boot/session/point snapshots must match before and after verification. A cached response is insufficient deletion evidence. Missing authoritative selection is checked against immutable receipt keys and current-key version/delete-marker history; it cannot silently become a new sequence-1 authority. An interrupted first publication can resume only its recorded private initialization intent and exact candidate, with no prior selector history.
 
+The workstation controller supplies `S3Store(environment_provider=aws.environment, executable_provider=aws.command_path)`. Each command refreshes the reviewed temporary credentials, then rechecks and uses the absolute AWS executable path immediately before execution. Both callbacks survive per-operation store clones. A changed or unavailable launcher blocks receipt/protection evidence; runtime stores retain their existing default CLI lookup.
+
 After the lifecycle controller creates and verifies a distinct target disk and filesystem, it transfers the selected private receipt with the existing private runtime configuration and invokes:
 
 ```sh
