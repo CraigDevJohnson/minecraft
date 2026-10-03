@@ -131,7 +131,7 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
         self.assertRegex(host, r"user_data_base64\s*=\s*base64gzip\(join\(")
         self.assertIn("../scripts/host-bootstrap.sh.tftpl", host)
         self.assertIn("../scripts/minecraft_storage.py", host)
-        self.assertRegex(host, r"data_volume_id\s*=\s*aws_ebs_volume.data.id\b")
+        self.assertRegex(host, r"data_volume_id\s*=\s*local.data_volume_id\b")
         self.assertRegex(host, r"data_filesystem_uuid\s*=\s*var.data_filesystem_uuid\b")
 
     def test_state_backends_require_encryption_and_native_locking(self):
@@ -144,10 +144,33 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
 
     def test_no_age_expiration_of_current_backups_or_state(self):
         backup_lifecycle = resource_blocks(INFRA)["aws_s3_bucket_lifecycle_configuration.backups"]
-        self.assertNotRegex(backup_lifecycle, r"(?<![a-z_])expiration\s*\{")
+        legacy = re.search(r'dynamic "rule" \{\n(.*?)\n  \}\n  dynamic "rule"', backup_lifecycle, re.S)
+        self.assertIsNotNone(legacy)
+        self.assertRegex(legacy.group(1), r'for_each\s*=\s*var\.lifecycle_mode == "s3-only" \? \[\] : \[1\]')
+        self.assertNotRegex(legacy.group(1), r"(?<![a-z_])expiration\s*\{")
         self.assertFalse(
             any(name.startswith("aws_s3_bucket_lifecycle_configuration.") for name in resource_blocks(INFRA / "state-bootstrap"))
         )
+
+    def test_s3_only_expiration_requires_retired_tag_and_cleanup_is_separate(self):
+        lifecycle = resource_blocks(INFRA)["aws_s3_bucket_lifecycle_configuration.backups"]
+        self.assertRegex(lifecycle, r'(?s)id\s*=\s*"retire-verified-\$\{rule.value\}".*?and\s*\{.*?prefix\s*=\s*"instances/\$\{rule.value\}/".*?tags\s*=\s*\{\s*minecraft-retention\s*=\s*"retired"\s*\}')
+        self.assertIn('"abort-incomplete-${rule.value}"', lifecycle)
+        self.assertIn('"remove-expired-markers-${rule.value}"', lifecycle)
+        self.assertEqual(len(re.findall(r'for_each\s*=\s*var\.lifecycle_mode == "s3-only" \? var\.instance_ids : \[\]', lifecycle)), 3)
+        self.assertNotRegex(lifecycle, r'(?<![a-z_])expiration\s*\{\s*days\s*=\s*0\b')
+
+    def test_s3_only_host_permission_boundary_supports_only_scoped_historical_reads(self):
+        import json
+        boundary = json.loads((ROOT / "docs/operations/operator-role/host-boundary.json.example").read_text())
+        historical = [statement for statement in boundary["Statement"] if "s3:GetObjectVersion" in statement["Action"]]
+        self.assertEqual(len(historical), 1)
+        self.assertEqual(historical[0]["Action"], ["s3:GetObjectVersion"])
+        self.assertEqual(historical[0]["Resource"], [
+            "arn:aws:s3:::example-prefix-*/instances/*/completed/*",
+            "arn:aws:s3:::example-prefix-*/instances/*/objects/*",
+            "arn:aws:s3:::example-prefix-*/instances/*/receipts/*",
+        ])
 
     def test_deployment_outputs_are_private(self):
         self.assertRegex(

@@ -192,8 +192,8 @@ variable "lifecycle_mode" {
   type        = string
   default     = "retained-host"
   validation {
-    condition     = contains(["retained-host", "on-demand-host"], var.lifecycle_mode)
-    error_message = "lifecycle_mode must be retained-host or on-demand-host."
+    condition     = contains(["retained-host", "on-demand-host", "s3-only"], var.lifecycle_mode)
+    error_message = "lifecycle_mode must be retained-host, on-demand-host, or s3-only."
   }
   validation {
     condition     = var.lifecycle_mode == "retained-host" || var.idle_stop == null
@@ -206,7 +206,7 @@ variable "session_present" {
   type        = bool
   default     = true
   validation {
-    condition     = var.session_present || var.lifecycle_mode == "on-demand-host"
+    condition     = var.session_present || var.lifecycle_mode == "on-demand-host" || (var.lifecycle_mode == "s3-only" && var.data_ownership == "session")
     error_message = "Only opt-in on-demand mode permits an absent session host."
   }
 }
@@ -218,5 +218,29 @@ variable "bootstrap_sha256" {
   validation {
     condition     = var.lifecycle_mode == "retained-host" || try(can(regex("^[0-9a-f]{64}$", var.bootstrap_sha256)), false)
     error_message = "On-demand mode requires a pinned bootstrap archive SHA-256."
+  }
+}
+
+variable "data_ownership" {
+  description = "Retained keeps existing data protected. Session requires the separately reviewed no-change ownership/protection migration before S3-only deletion authority."
+  type        = string
+  default     = "retained"
+  validation {
+    condition     = contains(["retained", "session"], var.data_ownership) && (var.data_ownership == "retained" || var.lifecycle_mode == "s3-only")
+    error_message = "Session data ownership is allowed only in s3-only mode after reviewed migration."
+  }
+}
+
+variable "recovery_receipt_ids" {
+  description = "Exact independently verified and durable current recovery selections. S3-only off-state requires one receipt for every configured instance; never catalog latest."
+  type        = map(string)
+  default     = {}
+  validation {
+    condition     = alltrue([for id in values(var.recovery_receipt_ids) : can(regex("^[0-9a-f]{64}$", id))])
+    error_message = "Each recovery receipt ID must be a lowercase SHA-256."
+  }
+  validation {
+    condition     = var.lifecycle_mode != "s3-only" || var.session_present || toset(keys(var.recovery_receipt_ids)) == var.instance_ids
+    error_message = "S3-only absent-data handoff requires a verified receipt for every configured instance."
   }
 }

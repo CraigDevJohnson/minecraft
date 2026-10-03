@@ -49,9 +49,8 @@ def canonical_infra_root(path: Path) -> Path:
 def source_digest(root: Path) -> str:
     root = canonical_infra_root(root / 'infra').parent
     paths = sorted(path for pattern in ('*.tf', '*.tf.json', '*.tofu', '*.tofu.json') for path in (root / 'infra').glob(pattern)) + [root / 'infra/.terraform.lock.hcl']
-    paths += [root / 'scripts' / name for name in ('host-bootstrap.sh.tftpl', 'on-demand-bootstrap.sh.tftpl',
-                                                  'minecraft_storage.py', 'install_aws_cli.sh',
-                                                  'minecraft_bootstrap_release.py', 'minecraft_private_transfer.py', 'minecraft_on_demand.py', 'minecraft_host.py')]
+    paths += [root / 'scripts' / name for name in ('host-bootstrap.sh.tftpl', 'on-demand-bootstrap.sh.tftpl', 'install_aws_cli.sh', 'install_runtime.sh')]
+    paths += sorted((root / 'scripts').glob('*.py'))
     digest = hashlib.sha256()
     for path in paths:
         if path.is_symlink() or path.name in ('override.tf', 'override.tf.json', 'override.tofu', 'override.tofu.json') or path.name.endswith(('_override.tf', '_override.tf.json', '_override.tofu', '_override.tofu.json')):
@@ -449,9 +448,14 @@ class TofuCLI:
         resources(state)
         return state
 
-    def plan(self, destination: Path, present: bool) -> dict:
+    def plan(self, destination: Path, present: bool, *, variables=None) -> dict:
+        arguments = []
+        for name, value in (variables or {}).items():
+            if name not in ("data_filesystem_uuid", "data_volume_size_gib", "recovery_receipt_ids"):
+                raise HostError("unapproved lifecycle variable override")
+            arguments.append(f"-var={name}={json.dumps(value, separators=(',', ':'))}")
         self.run('plan', '-input=false', '-lock-timeout=30s', '-no-color',
-                 f'-var-file={self.policy["variables_file"]}', f'-var=session_present={str(present).lower()}', f'-out={destination}')
+                 f'-var-file={self.policy["variables_file"]}', f'-var=session_present={str(present).lower()}', *arguments, f'-out={destination}')
         destination.chmod(0o600)
         return self.run('show', '-json', str(destination))
 

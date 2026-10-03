@@ -9,6 +9,7 @@ import sys
 import tarfile
 import tempfile
 import shutil
+import subprocess
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,27 @@ import minecraft_bootstrap_release as release
 
 
 class BootstrapReleaseTests(unittest.TestCase):
+    def test_packaged_cli_contract_matches_controller_options_and_source_bytes(self):
+        payload, digest = release.build_release(ROOT)
+        with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
+            for name in release.MEMBERS:
+                self.assertEqual(archive.extractfile(name).read(), (ROOT / name).read_bytes())
+        with tempfile.TemporaryDirectory() as temporary:
+            staged = release.stage_release(payload, digest, Path(temporary), require_root=False)
+            commands = (
+                (staged / 'scripts/minecraft_restore.py', [], ('--receipt', '--bootstrap-sha256', '--resume', '--timeout')),
+                (staged / 'scripts/minecraft_private_transfer.py', ['verify-inputs'], ('--sha256',)),
+                (ROOT / 'scripts/minecraft_bootstrap_release.py', ['stage'], ('--region', '--bucket', '--sha256')),
+                (ROOT / 'scripts/minecraft_bootstrap_release.py', ['verify'], ('--sha256',)),
+            )
+            for script, arguments, options in commands:
+                with self.subTest(script=script.name, arguments=arguments):
+                    result = subprocess.run([sys.executable, str(script), *arguments, '--help'],
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    for option in options:
+                        self.assertIn(option, result.stdout)
+
     def test_installed_runtime_attestation_rejects_drift_and_untrusted_content(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)
@@ -34,7 +56,6 @@ class BootstrapReleaseTests(unittest.TestCase):
             self.assertEqual(release.verify_installed_release(ROOT,installed,launcher_dir=launchers,service_dir=services,require_root=False),'installed')
             (installed/'scripts/minecraft_backup.py').write_text('unreviewed installed release')
             with self.assertRaises(release.ReleaseError):release.verify_installed_release(ROOT,installed,launcher_dir=launchers,service_dir=services,require_root=False)
-
 
     def test_rendered_session_bootstrap_fits_ec2_user_data_limit(self):
         bootstrap = (ROOT / 'scripts/host-bootstrap.sh.tftpl').read_text()

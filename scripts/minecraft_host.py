@@ -260,23 +260,32 @@ def load_deployment(path: Path) -> dict:
     account_id, host_id, region, instances = (deployment.get(key) for key in ("account_id", "host_id", "region", "instances"))
     if not isinstance(account_id, str) or not re.fullmatch(r"[0-9]{12}", account_id):
         raise HostError("deployment account_id must be a 12-digit AWS account ID")
+    if not isinstance(instances, dict) or not instances or any(not INSTANCE_ID.fullmatch(key) or not isinstance(value, dict) for key, value in instances.items()):
+        raise HostError("deployment instances must contain valid configured instance IDs")
     lifecycle = deployment.get("lifecycle_mode", "retained-host")
-    if lifecycle not in ("retained-host", "on-demand-host"):
+    if lifecycle not in ("retained-host", "on-demand-host", "s3-only"):
         raise HostError("deployment lifecycle mode is invalid")
-    absent = lifecycle == "on-demand-host" and deployment.get("schema_version") == 2 and deployment.get("session_present") is False and host_id is None
+    absent = lifecycle in ("on-demand-host", "s3-only") and deployment.get("schema_version") == 2 and deployment.get("session_present") is False and host_id is None
     if not absent and (not isinstance(host_id, str) or not re.fullmatch(r"i-(?:[a-f0-9]{8}|[a-f0-9]{17})", host_id)):
         raise HostError("deployment host_id is invalid")
-    if lifecycle == "on-demand-host":
+    if lifecycle in ("on-demand-host", "s3-only"):
         if deployment.get("schema_version") != 2 or type(deployment.get("session_present")) is not bool or bool(host_id) != deployment["session_present"]:
             raise HostError("deployment has an invalid on-demand session handoff")
         for key, expression in (("data_volume_id", r"vol-[0-9a-f]{17}"), ("data_filesystem_uuid", r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"),
                                 ("bootstrap_sha256", r"[0-9a-f]{64}"), ("backup_bucket_name", r"[a-z][a-z0-9-]{1,61}[a-z0-9]")):
+            absent_storage = lifecycle == "s3-only" and absent and key in ("data_volume_id", "data_filesystem_uuid")
+            if absent_storage and deployment.get(key) is None:
+                continue
             if not isinstance(deployment.get(key), str) or not re.fullmatch(expression, deployment[key]):
                 raise HostError("deployment on-demand identity is invalid")
+    if lifecycle == "s3-only":
+        ids = deployment.get("recovery_receipt_ids")
+        if deployment.get("data_ownership") not in ("retained", "session") or not isinstance(ids, dict) or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in ids.values()):
+            raise HostError("S3-only handoff has invalid data ownership or recovery selections")
+        if absent and (deployment["data_ownership"] != "session" or set(ids) != set(instances) or any(deployment.get(key) is not None for key in ("data_volume_id", "data_filesystem_uuid"))):
+            raise HostError("absent S3-only data requires complete verified recovery identities")
     if not isinstance(region, str) or not re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-[0-9]+", region):
         raise HostError("deployment region is invalid")
-    if not isinstance(instances, dict) or not instances or any(not INSTANCE_ID.fullmatch(key) or not isinstance(value, dict) for key, value in instances.items()):
-        raise HostError("deployment instances must contain valid configured instance IDs")
     hostname, zone_id = deployment.get("public_hostname"), deployment.get("cloudflare_zone_id")
     if hostname is not None or zone_id is not None:
         if not isinstance(hostname, str) or len(hostname) > 253 or not HOSTNAME.fullmatch(hostname):
@@ -536,15 +545,19 @@ def main(argv=None, *, aws=None, cloudflare=None) -> int:
             raise HostError("instance is invalid or not configured in the deployment")
         if args.action == "dns" and deployment.get("public_hostname") is None:
             raise HostError("deployment has no public_hostname; it has no DNS record to manage")
-        if deployment.get("lifecycle_mode") == "on-demand-host":
+        if deployment.get("lifecycle_mode") in ("on-demand-host", "s3-only"):
             if args.lifecycle is None:
                 raise HostError("on-demand mode requires a reviewed lifecycle policy")
             from minecraft_on_demand import OnDemandSession, load_policy
             policy = load_policy(args.lifecycle, args.policy_sha256, deployment)
+            session_type = OnDemandSession
+            if deployment["lifecycle_mode"] == "s3-only":
+                from minecraft_s3_session import S3Session
+                session_type = S3Session
             client = aws or AWSCLI(deployment["region"], policy["aws_profile"], deployment["operator_role_arn"],
                                    executable=policy['aws_cli_path'], executable_sha256=policy['aws_cli_sha256'],
                                    executable_identity=policy['aws_cli_file_identity'], source_identity=policy['aws_source_identity'])
-            session = OnDemandSession(deployment, client, cloudflare or CloudflareAPI(), policy, args.deployment, started_at=command_started_at, started_monotonic=command_started_monotonic)
+            session = session_type(deployment, client, cloudflare or CloudflareAPI(), policy, args.deployment, started_at=command_started_at, started_monotonic=command_started_monotonic)
         else:
             session = HostSession(deployment, aws or AWSCLI(deployment["region"]), cloudflare or CloudflareAPI())
         session.verify_account()

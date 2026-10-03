@@ -418,7 +418,7 @@ def publish_recovery_receipt(store, receipt, workspace, *, previous_selection=No
     return verified
 
 
-def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, store=None, timeout=3000, fresh_drain=None):
+def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, store=None, protect=False, timeout=3000, fresh_drain=None):
     """Publish exact final-session receipts and durable private selection before disk deletion."""
     from minecraft_instance import private_json, write_json
     if type(timeout) is not int or not 0 < timeout <= 3000:
@@ -508,6 +508,10 @@ def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, sto
             if intent and intent.get('status') == 'pending' and intent.get('receipt_id') == receipt['receipt_id']:
                 write_json(intent_path, {'schema_version': 1, 'status': 'complete', 'receipt_id': receipt['receipt_id']})
             write_json(local_path, selection)
+            check_budget(store)
+            if protect:
+                from minecraft_retention import protect_current_selection
+                protect_current_selection(store, instance, workspace, expected_selection=selection)
             check_budget(store)
             result[instance] = {'receipt_id': receipt['receipt_id'], 'selection': selection, 'receipt': receipt}
     if fresh_drain() != drain:
@@ -672,7 +676,9 @@ def catalog(store, instance, workspace):
     return points, invalid
 
 
-def prune(store, instance, workspace):
+def prune(store, instance, workspace, *, lifecycle_mode='retained-host'):
+    if lifecycle_mode == 's3-only':
+        raise BackupError('S3-only retention requires the operator receipt and retirement journal')
     points, invalid = catalog(store, instance, workspace)
     failed = 0
     removed = 0
@@ -785,7 +791,8 @@ def main(argv=None):
                 machine.verify_storage()
                 store = S3Store(machine.deployment['backup_bucket_name'], timeout=machine.backup_timeout)
                 function = status if args.action == 'status' else prune
-                result = function(store, args.instance, Path(directory))
+                result = (function(store, args.instance, Path(directory), lifecycle_mode=machine.deployment.get('lifecycle_mode', 'retained-host'))
+                          if args.action == 'prune' else function(store, args.instance, Path(directory)))
         print(json.dumps(result, sort_keys=True))
         return 0
     except (BackupError, OperationError, ValueError, OSError, KeyError, TypeError):

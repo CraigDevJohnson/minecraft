@@ -315,6 +315,8 @@ class OnDemandTests(unittest.TestCase):
         for ready in (False, True):
             with self.subTest(ready=ready):
                 session = self.session(True)
+                existing_path = '/usr/local/bin:/usr/bin:/bin'
+                self.aws.environment = lambda: {'PATH': existing_path}
                 received = []
                 servers = []
                 class Handler(http.server.BaseHTTPRequestHandler):
@@ -324,8 +326,10 @@ class OnDemandTests(unittest.TestCase):
                         self.send_header('Content-Length', '0')
                         self.end_headers()
                     def log_message(self, *args): pass
+                self_outer = self
                 class Process:
                     def __init__(self, args, **kwargs):
+                        self_outer.assertEqual(kwargs['env']['PATH'], str(Path(self_outer.policy['session_plugin_path']).parent) + os.pathsep + str(Path(self_outer.policy['infra_root']).parent / '.tools/bin') + os.pathsep + existing_path)
                         parameters = json.loads(args[args.index('--parameters') + 1])
                         port = int(parameters['localPortNumber'][0])
                         server = http.server.ThreadingHTTPServer(('127.0.0.1', port), Handler)
@@ -795,7 +799,7 @@ class PolicyBoundaryTests(unittest.TestCase):
             (checkout / 'infra').mkdir(parents=True)
             (checkout / 'scripts').mkdir()
             for name in ('host-bootstrap.sh.tftpl', 'on-demand-bootstrap.sh.tftpl', 'minecraft_storage.py', 'install_aws_cli.sh',
-                         'minecraft_bootstrap_release.py', 'minecraft_private_transfer.py', 'minecraft_on_demand.py', 'minecraft_host.py'):
+                         'minecraft_bootstrap_release.py', 'minecraft_private_transfer.py', 'minecraft_on_demand.py', 'minecraft_host.py', 'install_runtime.sh'):
                 (checkout / 'scripts' / name).write_text('fixture')
             (checkout / 'infra/.terraform.lock.hcl').write_text('fixture')
             self.mock_digest.stop()

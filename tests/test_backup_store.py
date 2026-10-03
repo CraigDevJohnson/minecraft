@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -91,6 +92,81 @@ class BackupStoreTests(unittest.TestCase):
         for profile in ('', '--debug', 'secret\nvalue', True):
             with self.subTest(profile=profile), self.assertRaises(backup_store.BackupError):
                 backup_store.S3Store('family-backups', profile=profile)
+
+    def test_temporary_operator_environment_is_requested_for_each_call_without_profile(self):
+        environment = dict(os.environ, AWS_ACCESS_KEY_ID='fixture-temporary-key')
+        provider = mock.Mock(return_value=environment)
+        self.store = backup_store.S3Store('family-backups', environment_provider=provider)
+        self.steps({'operation': 'put-object'}, {'operation': 'delete-object'})
+        self.store.upload('instances/survival/one', self.source)
+        self.store.delete('instances/survival/old')
+        self.assertEqual(provider.call_count, 2)
+        self.assertTrue(all('--profile' not in call['args'] for call in self.calls()))
+        with self.assertRaises(backup_store.BackupError):
+            backup_store.S3Store('family-backups', profile='source-admin', environment_provider=provider)
+        self.store = backup_store.S3Store('family-backups', environment_provider=mock.Mock(side_effect=ValueError('fixture-secret')))
+        with self.assertRaises(backup_store.BackupError) as caught:
+            self.store.delete('instances/survival/old')
+        self.assertNotIn('fixture-secret', str(caught.exception))
+
+    def test_reviewed_absolute_executable_is_used_after_environment_refresh_for_each_command(self):
+        pinned = self.directory / 'reviewed-aws'
+        pinned.write_bytes((self.directory / 'aws').read_bytes())
+        pinned.chmod(0o700)
+        (self.directory / 'aws').write_text(f'#!{sys.executable}\nraise SystemExit(99)\n')
+        order = []
+        def environment():
+            order.append('environment')
+            return dict(os.environ)
+        def executable():
+            order.append('executable')
+            return str(pinned)
+        self.store = backup_store.S3Store('family-backups', environment_provider=environment, executable_provider=executable)
+        self.steps({'operation': 'put-object'}, {'operation': 'delete-object'})
+        self.store.upload('instances/survival/one', self.source)
+        self.store.delete('instances/survival/old')
+        self.assertEqual(order, ['environment', 'executable', 'environment', 'executable'])
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_rejected_or_relative_executable_never_spawns_an_aws_process(self):
+        self.steps({'operation': 'delete-object'})
+        providers = [mock.Mock(side_effect=ValueError('fixture-secret')), lambda: 'aws', lambda: None]
+        for provider in providers:
+            with self.subTest(provider=provider), mock.patch.object(backup_store.subprocess, 'Popen') as spawn:
+                self.store = backup_store.S3Store('family-backups', executable_provider=provider)
+                with self.assertRaisesRegex(backup_store.BackupError, 'executable') as caught:
+                    self.store.delete('instances/survival/old')
+                self.assertNotIn('fixture-secret', str(caught.exception))
+                spawn.assert_not_called()
+        self.assertEqual(self.calls(), [])
+        with self.assertRaises(backup_store.BackupError):
+            backup_store.S3Store('family-backups', executable_provider='aws')
+
+    def test_credential_refresh_replacing_pinned_executable_is_rechecked_before_outer_s3_command(self):
+        pinned = self.directory / 'aws'
+        original = hashlib.sha256(pinned.read_bytes()).hexdigest()
+        executed = self.directory / 'replaced-executable-ran'
+        order = []
+        def environment():
+            order.append('environment')
+            replacement = self.directory / 'replacement'
+            replacement.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nPath({str(executed)!r}).touch()\n')
+            replacement.chmod(0o700)
+            replacement.replace(pinned)
+            return dict(os.environ)
+        def executable():
+            order.append('executable')
+            if hashlib.sha256(pinned.read_bytes()).hexdigest() != original:
+                raise ValueError('pinned executable changed during credential refresh')
+            return str(pinned)
+        self.steps({'operation': 'delete-object'})
+        self.store = backup_store.S3Store('family-backups', environment_provider=environment, executable_provider=executable)
+        with mock.patch.object(backup_store.subprocess, 'Popen') as spawn, self.assertRaisesRegex(backup_store.BackupError, 'changed'):
+            self.store.delete('instances/survival/old')
+        spawn.assert_not_called()
+        self.assertEqual(order, ['environment', 'executable'])
+        self.assertFalse(executed.exists())
+        self.assertEqual(self.calls(), [])
 
     def test_download_checks_head_size_and_pins_etag_before_fetching_bytes(self):
         self.steps(
@@ -249,6 +325,57 @@ class BackupStoreTests(unittest.TestCase):
         args = self.calls()[0]["args"]
         self.assertEqual(args[args.index("--key") + 1], "survival/old/archive.tar.gz")
 
+    def test_version_inventory_preserves_exact_ids_and_paginates_both_markers(self):
+        key = 'instances/survival/completed/point.json'
+        self.steps({'operation': 'list-object-versions', 'response': {'IsTruncated': True,
+            'Versions': [{'Key': key, 'VersionId': 'one', 'IsLatest': True, 'LastModified': '2026-10-03T12:00:00Z'}],
+            'NextKeyMarker': key, 'NextVersionIdMarker': 'one'}},
+            {'operation': 'list-object-versions', 'response': {'IsTruncated': False,
+             'DeleteMarkers': [{'Key': key, 'VersionId': 'older-delete', 'IsLatest': False, 'LastModified': '2026-10-02T12:00:00Z'}]}})
+        result = self.store.list_versions('instances/survival/')
+        self.assertEqual([item['version_id'] for item in result], ['one', 'older-delete'])
+        self.assertTrue(result[1]['delete_marker'])
+        args = self.calls()[1]['args']
+        self.assertEqual(args[args.index('--key-marker') + 1], key)
+        self.assertEqual(args[args.index('--version-id-marker') + 1], 'one')
+
+    def test_lifecycle_read_is_bounded_scoped_and_never_substitutes_missing_access(self):
+        self.steps({'operation': 'get-bucket-lifecycle-configuration', 'response': {'Rules': []}})
+        self.assertEqual(self.store.lifecycle_configuration(), {'Rules': []})
+        self.assertEqual(self.calls()[0]['args'][self.calls()[0]['args'].index('--bucket') + 1], 'family-backups')
+        self.steps({'operation': 'get-bucket-lifecycle-configuration', 'exit': 254,
+                    'error': 'An error occurred (AccessDenied) when calling the GetBucketLifecycleConfiguration operation: secret'})
+        with self.assertRaises(backup_store.BackupError) as caught:
+            self.store.lifecycle_configuration()
+        self.assertNotIn('secret', str(caught.exception))
+
+    def test_incomplete_duplicate_or_foreign_version_inventory_is_rejected(self):
+        item = {'Key': 'instances/survival/objects/one', 'VersionId': 'one', 'IsLatest': True, 'LastModified': '2026-10-03T12:00:00Z'}
+        for page in ({'IsTruncated': True}, {'IsTruncated': False, 'Versions': [item, item]},
+                     {'IsTruncated': False, 'Versions': [{**item, 'Key': 'instances/other/one'}]},
+                     {'IsTruncated': False, 'Versions': [{**item, 'VersionId': 'null'}]}):
+            self.steps({'operation': 'list-object-versions', 'response': page})
+            with self.assertRaises(backup_store.BackupError):
+                self.store.list_versions('instances/survival/')
+
+    def test_retention_changes_exact_version_and_requires_readback(self):
+        self.steps({'operation': 'get-object-tagging', 'response': {'VersionId': 'one', 'TagSet': []}},
+                   {'operation': 'put-object-tagging', 'response': {'VersionId': 'one'}},
+                   {'operation': 'get-object-tagging', 'response': {'VersionId': 'one', 'TagSet': [{'Key': 'minecraft-retention', 'Value': 'keep'}]}})
+        self.store.set_retention('instances/survival/objects/one', 'one', 'keep')
+        for call in self.calls():
+            args = call['args']
+            self.assertEqual(args[args.index('--version-id') + 1], 'one')
+        self.steps({'operation': 'get-object-tagging', 'response': {'VersionId': 'one', 'TagSet': [{'Key': 'foreign-owner', 'Value': 'keep'}]}})
+        with self.assertRaises(backup_store.BackupError):
+            self.store.set_retention('instances/survival/objects/one', 'one', 'retired')
+        self.assertEqual(len(self.calls()), 1)
+        self.steps({'operation': 'get-object-tagging', 'response': {'VersionId': 'one', 'TagSet': []}},
+                   {'operation': 'put-object-tagging', 'response': {'VersionId': 'one'}},
+                   {'operation': 'get-object-tagging', 'response': {'VersionId': 'one', 'TagSet': []}})
+        with self.assertRaisesRegex(backup_store.BackupError, 'readback'):
+            self.store.set_retention('instances/survival/objects/one', 'one', 'keep')
+
     def test_large_upload_uses_checksum_parts_and_conditional_completion(self):
         self.source.write_bytes(b"abcabc")
         checksum = "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0="
@@ -362,6 +489,19 @@ class BackupStoreTests(unittest.TestCase):
             with self.subTest(timeout=timeout), self.assertRaises(backup_store.BackupError):
                 backup_store.S3Store("family-backups", timeout=timeout)
 
+    def test_new_operation_preserves_temporary_provider_and_gets_fresh_deadline(self):
+        provider = mock.Mock(return_value=dict(os.environ))
+        executable = mock.Mock(return_value=str(self.directory / 'aws'))
+        with mock.patch.object(backup_store.time, 'monotonic', side_effect=[10, 1000]):
+            initial = backup_store.S3Store('family-backups', region='us-west-2', environment_provider=provider,
+                                          executable_provider=executable, timeout=900)
+            later = initial.for_operation(timeout=3000)
+        self.assertEqual(initial.deadline, 910)
+        self.assertEqual(later.deadline, 4000)
+        self.assertIs(later.environment_provider, provider)
+        self.assertIs(later.executable_provider, executable)
+        self.assertIsNone(later.profile)
+
     def test_new_operation_has_its_own_bounded_deadline_and_preserves_reviewed_profile(self):
         with mock.patch.object(backup_store.time, 'monotonic', side_effect=[10, 1000]):
             initial = backup_store.S3Store('family-backups', region='us-west-2', profile='workloads-admin', timeout=900)
@@ -383,8 +523,7 @@ class BackupStoreTests(unittest.TestCase):
                                                    ('instances/survival/objects/point/data.tar.gz', 4000, False)):
             with self.subTest(key=key):
                 self.steps({'operation': 'head-object', 'response': {'ContentLength': 3, 'ETag': 'one'}},
-                           {'operation': 'get-object', 'download': 'abc', 'sleep': 0.05,
-                            'response': {'ContentLength': 3}})
+                           {'operation': 'get-object', 'download': 'abc', 'sleep': 0.05, 'response': {'ContentLength': 3}})
                 target = self.directory / 'long-transfer'
                 target.write_bytes(b'preserve')
                 with mock.patch.object(backup_store.time, 'monotonic', side_effect=elapsed_transfer):

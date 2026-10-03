@@ -18,7 +18,7 @@ from pathlib import Path
 
 SCRIPTS = ('minecraft_instance.py', 'minecraft_content.py', 'minecraft_access.py', 'minecraft_backup.py',
            'minecraft_backup_store.py', 'minecraft_restore.py', 'check_runtime_install.py',
-           'install_runtime.sh', 'install_aws_cli.sh', 'minecraft_private_transfer.py')
+           'install_runtime.sh', 'install_aws_cli.sh', 'minecraft_private_transfer.py', 'minecraft_retention.py')
 RUNTIME = ('survival.json', 'content.json', 'operator.json.example', 'minecraft@.service')
 MEMBERS = frozenset([f'scripts/{name}' for name in SCRIPTS] + [f'runtime/{name}' for name in RUNTIME])
 MAX_RELEASE = 8 << 20
@@ -107,6 +107,7 @@ def stage_release(payload: bytes, digest: str, destination: Path, *, require_roo
         return target
     except OSError as exc:
         raise ReleaseError('bootstrap release could not be staged') from exc
+
 
 
 def verify_installed_release(release: Path, installed=Path('/opt/minecraft'), *, launcher_dir=Path('/usr/local/sbin'), service_dir=Path('/etc/systemd/system'), require_root=True) -> str:
