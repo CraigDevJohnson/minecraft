@@ -448,6 +448,22 @@ class S3SessionTests(unittest.TestCase):
         self.tofu.extra = {'address':'aws_s3_bucket.backups','change':{'actions':['delete']}}
         with self.assertRaises(host.HostError): session.stop()
         self.assertEqual(self.tofu.applies, 0)
+
+    def test_transport_rules_remain_protected_in_s3_only_session_plans(self):
+        session = self.create(True)
+        plan = self.tofu.plan(self.path.parent / 'transport-plan', False,
+                              variables={'recovery_receipt_ids': {'survival': RECEIPT_ID}})
+        journal = {'receipt_ids': {'survival': RECEIPT_ID}, 'receipts': RECEIPTS}
+        for address in ('aws_vpc_security_group_egress_rule.webrtc[0]',
+                        'aws_vpc_security_group_ingress_rule.game["signaling"]',
+                        'aws_vpc_security_group_ingress_rule.game["webrtc"]'):
+            selected = copy.deepcopy(plan)
+            selected['resource_changes'].append({'address': address, 'mode': 'managed', 'change': {'actions': ['no-op']}})
+            s3.validate_s3_plan(selected, present=False, state=self.tofu.current, deployment=session.deployment, journal=journal)
+            for actions in (['create'], ['update'], ['delete']):
+                selected['resource_changes'][-1]['change']['actions'] = actions
+                with self.subTest(address=address, actions=actions), self.assertRaises(host.HostError):
+                    s3.validate_s3_plan(selected, present=False, state=self.tofu.current, deployment=session.deployment, journal=journal)
     def test_retained_data_ownership_refuses_session_mutation(self):
         session = self.create(True); session.deployment['data_ownership'] = 'retained'
         with self.assertRaises(host.HostError): session.stop()

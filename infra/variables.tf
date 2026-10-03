@@ -122,6 +122,17 @@ variable "instance_ids" {
   }
 }
 
+variable "bedrock_transport" {
+  description = "Bedrock network transport matching the selected runtime. Both includes built-in signaling and WebRTC; raknet preserves legacy UDP only."
+  type        = string
+  default     = "both"
+  nullable    = false
+  validation {
+    condition     = contains(["both", "raknet"], var.bedrock_transport)
+    error_message = "bedrock_transport must be both or raknet."
+  }
+}
+
 variable "additional_game_ingress" {
   description = "Named game listeners for additional independent server instances on this host."
   type        = map(object({ protocol = string, port = number }))
