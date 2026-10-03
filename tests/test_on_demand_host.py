@@ -442,6 +442,38 @@ class OnDemandTests(unittest.TestCase):
         self.assertEqual(output['host'], 'absent')
         self.assertEqual(session.dns, {'dns': 'failed'})
         self.assertEqual(json.loads(session.journal_path.read_text())['phase'], 'complete')
+    def test_duplicate_start_cannot_use_an_edited_protected_handoff(self):
+        session=self.session(True)
+        session.deployment['public_hostname']='other.example.com'
+        with self.assertRaises(host.HostError):session.start('survival')
+        self.assertEqual(FakeSession.instances,[])
+
+    def test_changed_policy_security_pins_cannot_resume_an_operation(self):
+        session=self.session(False)
+        self.tofu.fail_apply_once=True
+        with self.assertRaises(host.HostError):session.start('survival')
+        self.policy['backend_sha256']='unreviewed-new-backend'
+        with self.assertRaises(host.HostError):session.start('survival')
+        self.assertEqual(self.tofu.applies,1)
+
+    def test_live_unknown_retained_attachment_blocks_partial_create_retry(self):
+        tofu=FakeTofu(False); tofu.partial_apply_once=True
+        session=self.session(False,tofu=tofu)
+        with self.assertRaises(host.HostError):session.start('survival')
+        self.aws.retained_available=False
+        with self.assertRaises(host.HostError):session.start('survival')
+        self.assertEqual(tofu.applies,1)
+
+    def test_clock_discontinuity_never_reports_zero_seconds_or_met_target(self):
+        session=self.session(True)
+        session.command_started_at=__import__('time').time()+1000
+        output=session.start('survival')
+        self.assertIsNone(output['start_to_ready_seconds'])
+        self.assertIsNone(output['controller_ready_within_target'])
+        self.assertIsNone(output['startup_target_met'])
+        journal=json.loads(session.journal_path.read_text())
+        self.assertTrue(journal['timing_unverified'])
+
     def test_full_handoff_fields_must_match_authoritative_output_before_dns_or_status(self):
         for present in (False, True):
             for key, value in (('public_hostname','other.example.com'), ('cloudflare_zone_id','f'*32), ('data_volume_id','vol-2123456789abcdef0')):
@@ -653,12 +685,14 @@ class PolicyBoundaryTests(unittest.TestCase):
         client = lifecycle.TofuCLI(policy)
         with mock.patch.dict(os.environ, {'TF_CLI_ARGS': '-destroy', 'TF_VAR_session_present': 'false', 'CLOUDFLARE_API_TOKEN': 'PRIVATE_TOKEN',
                                          'AWS_ACCESS_KEY_ID': 'PRIVATE_AWS_ACCESS', 'AWS_SECRET_ACCESS_KEY': 'PRIVATE_AWS_SECRET',
-                                         'AWS_CONFIG_FILE': '/unreviewed/config', 'AWS_SHARED_CREDENTIALS_FILE': '/unreviewed/credentials'}), \
+                                         'AWS_CONFIG_FILE': '/unreviewed/config', 'AWS_SHARED_CREDENTIALS_FILE': '/unreviewed/credentials',
+                                         'AWS_ENDPOINT_URL': 'https://unreviewed.invalid', 'AWS_ENDPOINT_URL_S3': 'https://other.invalid'}), \
                 mock.patch.object(lifecycle.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{}')) as run:
             client.run('state', 'pull')
         environment = run.call_args.kwargs['env']
-        for name in ('TF_CLI_ARGS', 'TF_VAR_session_present', 'CLOUDFLARE_API_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE'):
+        for name in ('TF_CLI_ARGS', 'TF_VAR_session_present', 'CLOUDFLARE_API_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE', 'AWS_ENDPOINT_URL', 'AWS_ENDPOINT_URL_S3'):
             self.assertNotIn(name, environment)
+        self.assertEqual(environment['AWS_IGNORE_CONFIGURED_ENDPOINT_URLS'],'true')
         self.assertEqual(environment['AWS_PROFILE'], 'workloads-admin')
     def test_removal_accepts_only_matching_launch_lookup_state_removal(self):
         current = state(True)

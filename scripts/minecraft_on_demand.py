@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import selectors
@@ -363,8 +364,8 @@ class TofuCLI:
         if digest_file(Path(self.policy['variables_file'])) != self.policy['variables_sha256'] or source_digest(self.root.parent) != self.policy['source_sha256']:
             raise HostError('reviewed lifecycle source or variables changed before infrastructure execution')
         environment = {key: value for key, value in os.environ.items()
-                       if not key.startswith(('TF_', 'TOFU_')) and key not in ('CLOUDFLARE_API_TOKEN', 'AWS_DEBUG')}
-        environment.update(TF_IN_AUTOMATION='true', TF_LOG='OFF', AWS_PROFILE=self.policy['aws_profile'])
+                       if not key.startswith(('TF_', 'TOFU_', 'AWS_ENDPOINT_URL')) and key not in ('CLOUDFLARE_API_TOKEN', 'AWS_DEBUG')}
+        environment.update(TF_IN_AUTOMATION='true', TF_LOG='OFF', AWS_PROFILE=self.policy['aws_profile'], AWS_IGNORE_CONFIGURED_ENDPOINT_URLS='true')
         for name in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_SECURITY_TOKEN', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE'):
             environment.pop(name, None)
         try:
@@ -400,7 +401,9 @@ class TofuCLI:
 
 
 class OnDemandSession:
-    def __init__(self, deployment: dict, aws, cloudflare, policy: dict, deployment_path: Path, *, tofu=None, transfer=None, started_at=None):
+    def __init__(self, deployment: dict, aws, cloudflare, policy: dict, deployment_path: Path, *, tofu=None, transfer=None, started_at=None, started_monotonic=None):
+        self.command_started_monotonic = time.monotonic() if started_monotonic is None else started_monotonic
+        self.resumed_operation = False
         self.command_started_at = time.time() if started_at is None else started_at
         self.deployment = deployment
         self.aws = aws
@@ -434,7 +437,10 @@ class OnDemandSession:
         private_digest = private_inputs_digest(self.policy)
         if private_digest != self.policy['private_inputs_sha256']:
             raise HostError('private operator inputs differ from the reviewed policy')
-        return {'account_id': self.deployment['account_id'], 'aws_profile': self.policy['aws_profile'], 'backend': self.policy['backend'],
+        protected_handoff = {key: value for key, value in self.deployment.items() if key not in ('host_id', 'session_present')}
+        return {'policy_sha256': hashlib.sha256(json.dumps(self.policy, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                'protected_handoff_sha256': hashlib.sha256(json.dumps(protected_handoff, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                'account_id': self.deployment['account_id'], 'aws_profile': self.policy['aws_profile'], 'backend': self.policy['backend'],
                 'variables_sha256': variables, 'source_sha256': source,
                 'bootstrap_sha256': self.policy['bootstrap_sha256'],
                 'private_inputs_sha256': private_digest,
@@ -458,9 +464,11 @@ class OnDemandSession:
                     raise HostError('another incomplete or changed lifecycle operation requires repair')
                 reconcile_state(previous['initial_state'], state)
                 verify_resumed_sessions(previous, state)
+                self.resumed_operation = True
                 return previous
         if self.journal_path.exists():
             save_private(self.directory / (previous['operation_id'] + '.json'), previous)
+        self.verify_handoff_inventory()
         inventory = resources(state)
         if self.deployment.get('host_id'):
             if (inventory.get('aws_instance.host[0]', {}).get('id') != self.deployment['host_id']
@@ -476,8 +484,24 @@ class OnDemandSession:
         return journal
 
     def record(self, journal: dict, phase: str, **values):
-        journal.update(phase=phase, **values)
+        observed_at = time.time()
+        prior = journal.get('last_observed_at', journal['started_at'])
+        if not math.isfinite(observed_at) or observed_at < prior or observed_at < journal['started_at']:
+            journal['timing_unverified'] = True
+        journal.update(phase=phase, last_observed_at=observed_at, **values)
         save_private(self.journal_path, journal)
+
+    def elapsed_time(self, journal):
+        now = time.time()
+        started = journal.get('started_at')
+        if (self.resumed_operation or journal.get('timing_unverified') or type(started) not in (int, float)
+                or not math.isfinite(started) or not math.isfinite(now) or started <= 0 or now < started
+                or now < journal.get('last_observed_at', started)):
+            return None
+        monotonic_elapsed = time.monotonic() - self.command_started_monotonic
+        if monotonic_elapsed < 0:
+            return None
+        return max(now - started, monotonic_elapsed)
 
     def apply_session(self, journal: dict, present: bool):
         current = self.tofu.state()
@@ -545,6 +569,14 @@ class OnDemandSession:
         volumes = self.aws.run('ec2', 'describe-volumes', '--filters', json.dumps(filters), timeout=30).get('Volumes')
         if not isinstance(volumes, list) or any(not isinstance(value, dict) or not isinstance(value.get('VolumeId'), str) for value in volumes) or {value['VolumeId'] for value in volumes} != recorded_roots:
             raise HostError('unrecorded or missing root disk after interrupted create; preserve resources for explicit repair')
+        # The attachment call may have succeeded while its state write was lost. Do
+        # not issue another AttachVolume without independently proving it is free.
+        if 'aws_volume_attachment.data[0]' not in inventory:
+            data = self.aws.run('ec2', 'describe-volumes', '--volume-ids', self.deployment['data_volume_id'], timeout=30).get('Volumes')
+            if (not isinstance(data, list) or len(data) != 1 or data[0].get('VolumeId') != self.deployment['data_volume_id']
+                    or data[0].get('State') != 'available' or data[0].get('Attachments') != [] or data[0].get('Encrypted') is not True):
+                raise HostError('retained disk attachment outcome is uncertain; preserve resources for explicit repair')
+
 
     def refresh_deployment(self, *, present: bool):
         candidate = self.tofu.deployment()
@@ -682,11 +714,11 @@ class OnDemandSession:
                 result = session.start(instance)
             finally:
                 self.adopt(session)
-            elapsed = max(0, time.time() - journal['started_at'])
+            elapsed = self.elapsed_time(journal)
             self.record(journal, 'complete', ready_seconds=elapsed)
-            return {**result, 'start_to_ready_seconds': round(elapsed, 3), 'startup_target_seconds': 180,
-                    'controller_ready_within_target': elapsed <= 180 and session.dns_error is None,
-                    'startup_target_met': None if elapsed <= 180 and session.dns_error is None else False, 'host_recreated': journal['source_deployment'].get('host_id') is None}
+            return {**result, 'start_to_ready_seconds': None if elapsed is None else round(elapsed, 3), 'startup_target_seconds': 180,
+                    'controller_ready_within_target': None if elapsed is None else elapsed <= 180 and session.dns_error is None,
+                    'startup_target_met': None if elapsed is None or elapsed <= 180 and session.dns_error is None else False, 'host_recreated': journal['source_deployment'].get('host_id') is None}
 
     def verify_removal(self, journal):
         source = journal['source_deployment']

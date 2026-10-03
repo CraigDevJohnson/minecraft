@@ -56,7 +56,8 @@ class AWSCLI:
     sleep = staticmethod(time.sleep)
 
     def environment(self) -> dict:
-        environment = {key: value for key, value in os.environ.items() if key != CLOUDFLARE_TOKEN}
+        environment = {key: value for key, value in os.environ.items() if key != CLOUDFLARE_TOKEN and not key.startswith("AWS_ENDPOINT_URL")}
+        environment["AWS_IGNORE_CONFIGURED_ENDPOINT_URLS"] = "true"
         if self.profile is not None:
             for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE"):
                 environment.pop(name, None)
@@ -421,6 +422,7 @@ class HostSession:
 
 def main(argv=None, *, aws=None, cloudflare=None) -> int:
     command_started_at = time.time()
+    command_started_monotonic = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--deployment", type=Path, required=True)
     parser.add_argument("--lifecycle", type=Path, help="private reviewed on-demand controller policy")
@@ -444,7 +446,7 @@ def main(argv=None, *, aws=None, cloudflare=None) -> int:
                 raise HostError("on-demand mode requires a reviewed lifecycle policy")
             from minecraft_on_demand import OnDemandSession, load_policy
             policy = load_policy(args.lifecycle, args.policy_sha256, deployment)
-            session = OnDemandSession(deployment, aws or AWSCLI(deployment["region"], policy["aws_profile"], deployment["operator_role_arn"]), cloudflare or CloudflareAPI(), policy, args.deployment, started_at=command_started_at)
+            session = OnDemandSession(deployment, aws or AWSCLI(deployment["region"], policy["aws_profile"], deployment["operator_role_arn"]), cloudflare or CloudflareAPI(), policy, args.deployment, started_at=command_started_at, started_monotonic=command_started_monotonic)
         else:
             session = HostSession(deployment, aws or AWSCLI(deployment["region"]), cloudflare or CloudflareAPI())
         session.verify_account()
