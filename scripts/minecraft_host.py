@@ -56,10 +56,13 @@ class AWSCLI:
     sleep = staticmethod(time.sleep)
 
     def environment(self) -> dict:
-        environment = {key: value for key, value in os.environ.items() if key != CLOUDFLARE_TOKEN and not key.startswith("AWS_ENDPOINT_URL")}
+        transport_overrides = {'AWS_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'}
+        environment = {key: value for key, value in os.environ.items()
+                       if key != CLOUDFLARE_TOKEN and key not in transport_overrides and not key.startswith("AWS_ENDPOINT_URL")}
         environment["AWS_IGNORE_CONFIGURED_ENDPOINT_URLS"] = "true"
         if self.profile is not None:
-            for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE"):
+            for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
+                         "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_SESSION_NAME"):
                 environment.pop(name, None)
         if self.role_arn is not None:
             if self.credentials is None or self.monotonic() >= self.credentials_deadline:

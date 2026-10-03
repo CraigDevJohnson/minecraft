@@ -206,6 +206,7 @@ def load_policy(path: Path, expected_sha256: str, deployment: dict) -> dict:
         tool_identity(root, policy)
         if private_inputs_digest(policy) != policy['private_inputs_sha256']:
             raise HostError('private operator inputs differ from reviewed policy')
+        build_bundle(deployment, Path(policy['operator_file']), Path(policy['secret_file']))
         if digest_file(Path(policy['variables_file'])) != policy['variables_sha256'] or source_digest(root.parent) != policy['source_sha256']:
             raise HostError('lifecycle infrastructure source or private variables changed')
         if not SHA256.fullmatch(policy['bootstrap_sha256']) or deployment.get('bootstrap_sha256') != policy['bootstrap_sha256']:
@@ -364,9 +365,10 @@ class TofuCLI:
         if digest_file(Path(self.policy['variables_file'])) != self.policy['variables_sha256'] or source_digest(self.root.parent) != self.policy['source_sha256']:
             raise HostError('reviewed lifecycle source or variables changed before infrastructure execution')
         environment = {key: value for key, value in os.environ.items()
-                       if not key.startswith(('TF_', 'TOFU_', 'AWS_ENDPOINT_URL')) and key not in ('CLOUDFLARE_API_TOKEN', 'AWS_DEBUG')}
+                       if not key.startswith(('TF_', 'TOFU_', 'AWS_ENDPOINT_URL')) and key not in ('CLOUDFLARE_API_TOKEN', 'AWS_DEBUG', 'AWS_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy')}
         environment.update(TF_IN_AUTOMATION='true', TF_LOG='OFF', AWS_PROFILE=self.policy['aws_profile'], AWS_IGNORE_CONFIGURED_ENDPOINT_URLS='true')
-        for name in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_SECURITY_TOKEN', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE'):
+        for name in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_SECURITY_TOKEN', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE',
+                     'AWS_ROLE_ARN', 'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_ROLE_SESSION_NAME'):
             environment.pop(name, None)
         try:
             result = subprocess.run([str(self.binary), f'-chdir={self.root}', *arguments], capture_output=True,
@@ -447,6 +449,11 @@ class OnDemandSession:
                 'data_volume_id': self.deployment['data_volume_id'], 'data_filesystem_uuid': self.deployment['data_filesystem_uuid']}
 
     def journal(self, action: str, instance=None):
+        # Deterministic local format errors must precede journal or resource creation.
+        try:
+            build_bundle(self.deployment, Path(self.policy['operator_file']), Path(self.policy['secret_file']))
+        except TransferError as exc:
+            raise HostError('reviewed private inputs fail transfer preflight') from exc
         state = self.tofu.state()
         if self.journal_path.exists():
             previous = json.loads(private_file(self.journal_path))
@@ -662,6 +669,14 @@ class OnDemandSession:
     def adopt(self, session):
         self.state, self.observed, self.dns, self.dns_error = session.state, session.observed, session.dns, session.dns_error
 
+    def verify_private_inputs(self, session):
+        digest = self.policy['bootstrap_sha256']
+        session.execute_shell(f'/usr/local/sbin/minecraft-bootstrap stage --region {self.deployment["region"]} --bucket {self.deployment["backup_bucket_name"]} --sha256 {digest}', 'private-verifier-release')
+        observed = session.execute_shell(f'/usr/bin/python3 -B /opt/minecraft-bootstrap/{digest}/scripts/minecraft_private_transfer.py '
+                                         f'verify-inputs --sha256 {self.policy["private_inputs_sha256"]}', 'private-input-verification')
+        if observed != {'private_inputs': 'verified'}:
+            raise HostError('installed private inputs lack reviewed verification; explicit reconfiguration required')
+
     def start(self, instance: str):
         with operation_lock(self.directory):
             journal = self.journal('start', instance)
@@ -678,6 +693,8 @@ class OnDemandSession:
                                                'printf \'{"runtime":"missing"}\\n\'; fi', 'runtime-probe')
                 if probe.get('runtime') not in ('installed', 'missing'):
                     raise HostError('existing host runtime installation probe is invalid')
+                if probe['runtime'] == 'installed':
+                    self.verify_private_inputs(existing)
                 self.record(journal, 'runtime-installed' if probe['runtime'] == 'installed' else 'configured-host')
             if journal['phase'] in ('begun', 'applying', 'applied'):
                 self.apply_session(journal, True)
@@ -708,6 +725,7 @@ class OnDemandSession:
                 self.record(journal, 'runtime-installed')
             if self.binding() != journal['binding']:
                 raise HostError('private lifecycle inputs changed before game start')
+            self.verify_private_inputs(session)
             # Preserve a separate phase before the game command: an interrupted start
             # resumes the normal idempotent instance command without reinstalling files.
             try:
@@ -758,6 +776,7 @@ class OnDemandSession:
                 if session.host_state() != 'running':
                     raise HostError('on-demand stop requires a running host for verified drain')
                 session.wait_ssm()
+                self.verify_private_inputs(session)
                 response = session.remote('host-drain')
                 instances = session.instance_statuses(response)
                 self.observed = {'instances': instances}
@@ -771,6 +790,7 @@ class OnDemandSession:
                     # Historical output alone does not authorize deletion. Refresh the
                     # drain before requesting the idempotent graceful EC2 stop.
                     session.wait_ssm()
+                    self.verify_private_inputs(session)
                     fresh = session.remote('host-drain')
                     instances = session.instance_statuses(fresh)
                     self.observed = {'instances': instances}

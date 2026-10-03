@@ -156,6 +156,7 @@ class FakeSession:
         self.commands.append((action, command))
         if action == self.failure: raise host.HostError('remote operation failed')
         if action == 'runtime-probe': return {'runtime': 'installed' if self.installed_runtime else 'missing'}
+        if action == 'private-input-verification': return {'private_inputs': 'verified'}
         return {}
     def remote(self, action):
         self.commands.append((action, ''))
@@ -219,7 +220,7 @@ class OnDemandTests(unittest.TestCase):
         session = self.session()
         output = session.stop()
         self.assertEqual(output, {'host': 'absent', 'root_disk': 'absent', 'data_disk': 'retained', 'backup': 'complete'})
-        self.assertEqual(FakeSession.instances[0].commands, [('host-drain', '')])
+        self.assertEqual([action for action,_ in FakeSession.instances[0].commands], ['private-verifier-release', 'private-input-verification', 'host-drain'])
         self.assertEqual(self.tofu.plans, [False])
         self.assertEqual(session.dns, {'dns': 'parked'})
         self.assertIsNone(json.loads(self.deployment_path.read_text())['host_id'])
@@ -343,7 +344,7 @@ class OnDemandTests(unittest.TestCase):
         self.assertEqual(self.tofu.plans, [True])
         self.assertEqual(output['ready'], True)
         commands = FakeSession.instances[0].commands
-        self.assertEqual([value[0] for value in commands], ['bootstrap-prerequisites', 'bootstrap-release', 'runtime-install', 'start'])
+        self.assertEqual([value[0] for value in commands], ['bootstrap-prerequisites', 'bootstrap-release', 'runtime-install', 'private-verifier-release', 'private-input-verification', 'start'])
         self.assertEqual(len(self.transfers), 1)
         self.assertNotIn(self.secret.read_text(), json.dumps(commands))
         self.assertNotIn(self.secret.read_text(), json.dumps(output))
@@ -358,15 +359,48 @@ class OnDemandTests(unittest.TestCase):
         self.assertEqual(self.tofu.applies, 0)
         self.assertEqual(len(self.transfers), 1)
         self.assertEqual([value[0] for value in FakeSession.instances[1].commands],
-                         ['bootstrap-prerequisites', 'bootstrap-release', 'runtime-install', 'start'])
+                         ['bootstrap-prerequisites', 'bootstrap-release', 'runtime-install', 'private-verifier-release', 'private-input-verification', 'start'])
 
     def test_duplicate_start_existing_host_does_not_reinstall_private_files(self):
         session = self.session(True)
         session.start('survival')
         self.assertEqual(self.tofu.applies, 0)
         self.assertEqual(self.transfers, [])
-        self.assertEqual(FakeSession.instances[0].commands, [('runtime-probe', mock.ANY)])
-        self.assertEqual(FakeSession.instances[1].commands, [('start', 'survival')])
+        self.assertEqual([action for action,_ in FakeSession.instances[0].commands], ['runtime-probe', 'private-verifier-release', 'private-input-verification'])
+        self.assertEqual([action for action,_ in FakeSession.instances[1].commands], ['private-verifier-release', 'private-input-verification', 'start'])
+
+    def test_changed_reviewed_inputs_require_reconfiguration_before_reusing_host(self):
+        session = self.session(True)
+        self.operator.write_text('{"backup_timeout":3000}')
+        self.policy['private_inputs_sha256'] = lifecycle.private_inputs_digest(self.policy)
+        original = FakeSession.execute_shell
+        def verify(remote, command, action):
+            if action == 'private-input-verification':
+                raise host.HostError('installed input certificate differs')
+            return original(remote, command, action)
+        with mock.patch.object(FakeSession, 'execute_shell', verify):
+            for action in ('start', 'stop'):
+                with tempfile.TemporaryDirectory() as child:
+                    self.policy['journal_dir'] = str(Path(child).resolve() / 'journal')
+                    session = self.session(True)
+                    with self.subTest(action=action), self.assertRaises(host.HostError):
+                        session.start('survival') if action == 'start' else session.stop()
+        self.assertEqual(self.tofu.applies, 0)
+        self.assertEqual(self.transfers, [])
+        self.assertFalse(any(action in ('start', 'host-drain', 'stop-instances') for remote in FakeSession.instances for action,_ in remote.commands))
+
+    def test_invalid_private_encoding_or_bundle_schema_precedes_journal_and_create(self):
+        for target, payload in ((self.operator,b'not JSON'), (self.operator,b'\xff'), (self.operator,b'[]'), (self.secret,b'invalid secret')):
+            saved = target.read_bytes()
+            target.write_bytes(payload)
+            self.policy['private_inputs_sha256'] = lifecycle.private_inputs_digest(self.policy)
+            session = self.session(False)
+            with self.subTest(payload=payload), self.assertRaises(host.HostError): session.start('survival')
+            self.assertEqual(self.tofu.applies, 0)
+            self.assertEqual(self.tofu.plans, [])
+            self.assertFalse(session.journal_path.exists())
+            target.write_bytes(saved)
+        self.policy['private_inputs_sha256'] = lifecycle.private_inputs_digest(self.policy)
     def test_interrupt_after_partial_create_replans_only_missing_attachment_same_operation(self):
         tofu = FakeTofu(False)
         tofu.partial_apply_once = True
@@ -686,11 +720,14 @@ class PolicyBoundaryTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {'TF_CLI_ARGS': '-destroy', 'TF_VAR_session_present': 'false', 'CLOUDFLARE_API_TOKEN': 'PRIVATE_TOKEN',
                                          'AWS_ACCESS_KEY_ID': 'PRIVATE_AWS_ACCESS', 'AWS_SECRET_ACCESS_KEY': 'PRIVATE_AWS_SECRET',
                                          'AWS_CONFIG_FILE': '/unreviewed/config', 'AWS_SHARED_CREDENTIALS_FILE': '/unreviewed/credentials',
+                                        'AWS_ROLE_ARN':'arn:aws:iam::123456789012:role/unreviewed', 'AWS_WEB_IDENTITY_TOKEN_FILE':'/unreviewed/token', 'AWS_ROLE_SESSION_NAME':'unreviewed',
+                                        'AWS_CA_BUNDLE':'/unreviewed/ca', 'HTTP_PROXY':'http://unreviewed.invalid', 'HTTPS_PROXY':'http://unreviewed.invalid', 'ALL_PROXY':'http://unreviewed.invalid',
+                                        'http_proxy':'http://unreviewed.invalid', 'https_proxy':'http://unreviewed.invalid', 'all_proxy':'http://unreviewed.invalid',
                                          'AWS_ENDPOINT_URL': 'https://unreviewed.invalid', 'AWS_ENDPOINT_URL_S3': 'https://other.invalid'}), \
                 mock.patch.object(lifecycle.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{}')) as run:
             client.run('state', 'pull')
         environment = run.call_args.kwargs['env']
-        for name in ('TF_CLI_ARGS', 'TF_VAR_session_present', 'CLOUDFLARE_API_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE', 'AWS_ENDPOINT_URL', 'AWS_ENDPOINT_URL_S3'):
+        for name in ('TF_CLI_ARGS', 'TF_VAR_session_present', 'CLOUDFLARE_API_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE', 'AWS_ROLE_ARN', 'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_ROLE_SESSION_NAME', 'AWS_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'AWS_ENDPOINT_URL', 'AWS_ENDPOINT_URL_S3'):
             self.assertNotIn(name, environment)
         self.assertEqual(environment['AWS_IGNORE_CONFIGURED_ENDPOINT_URLS'],'true')
         self.assertEqual(environment['AWS_PROFILE'], 'workloads-admin')

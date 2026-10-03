@@ -6,6 +6,7 @@ import io
 import json
 import os
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -39,6 +40,35 @@ class PrivateTransferTests(unittest.TestCase):
         self.assertEqual((self.destination / 'rcon.secret').read_text(), self.secret.read_text())
         for name in transfer.FILES:
             self.assertEqual((self.destination / name).stat().st_mode & 0o777, 0o600)
+        certificate = self.destination / transfer.INPUT_CERTIFICATE
+        expected = hashlib.sha256(self.operator.read_bytes() + b'\0' + self.secret.read_bytes()).hexdigest()
+        self.assertEqual(certificate.read_text(), expected + '\n')
+        self.assertEqual(certificate.stat().st_mode & 0o777, 0o600)
+        transfer.verify_installed_inputs(expected, self.destination, require_root=False)
+
+    def test_installed_digest_requires_current_files_and_trusted_certificate(self):
+        expected = hashlib.sha256(self.operator.read_bytes() + b'\0' + self.secret.read_bytes()).hexdigest()
+        with self.assertRaises(transfer.TransferError):
+            transfer.verify_installed_inputs(expected, self.destination, require_root=False)
+        transfer.receive_bundle(self.bundle, self.digest, self.destination, require_root=False)
+        for name in ('operator.json', 'rcon.secret', transfer.INPUT_CERTIFICATE):
+            path = self.destination / name
+            saved = path.read_bytes()
+            path.write_bytes(b'changed installed input')
+            with self.subTest(name=name), self.assertRaises(transfer.TransferError):
+                transfer.verify_installed_inputs(expected, self.destination, require_root=False)
+            path.write_bytes(saved)
+        certificate = self.destination / transfer.INPUT_CERTIFICATE
+        certificate.chmod(0o644)
+        with self.assertRaises(transfer.TransferError):
+            transfer.verify_installed_inputs(expected, self.destination, require_root=False)
+
+    def test_new_verification_cli_option_is_available_to_the_actual_subprocess(self):
+        result = subprocess.run([sys.executable, transfer.__file__, 'verify-inputs', '--help'],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('verify-inputs', result.stdout)
+        self.assertIn('--sha256', result.stdout)
 
     def test_invalid_digest_schema_inventory_and_payload_leave_destination_unchanged(self):
         cases = [(self.bundle, '0' * 64), (b'{}', hashlib.sha256(b'{}').hexdigest()),
