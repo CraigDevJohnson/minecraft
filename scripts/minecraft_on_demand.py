@@ -667,21 +667,27 @@ class OnDemandSession:
             self.record(journal, 'complete')
             return {'host': 'absent', 'root_disk': 'absent', 'data_disk': 'retained', 'backup': journal.get('backup', 'unverified')}
 
+    def verify_handoff_inventory(self) -> bool:
+        inventory = resources(self.tofu.state())
+        if {'aws_instance.host', 'aws_volume_attachment.data'}.intersection(inventory):
+            raise HostError('session ownership migration is incomplete; DNS and status require the current handoff')
+        actual_present = SESSION_ADDRESSES <= set(inventory)
+        if SESSION_ADDRESSES.intersection(inventory) and not actual_present:
+            raise HostError('session infrastructure is partial; resume its operation')
+        if bool(self.deployment.get('host_id')) != actual_present or self.deployment.get('session_present') != actual_present:
+            raise HostError('deployment host identity is stale; resume the saved lifecycle operation')
+        if actual_present:
+            host, attachment = (inventory[name] for name in ('aws_instance.host[0]', 'aws_volume_attachment.data[0]'))
+            if (host.get('id') != self.deployment['host_id'] or attachment.get('instance_id') != self.deployment['host_id']
+                    or attachment.get('volume_id') != self.deployment['data_volume_id']):
+                raise HostError('deployment host or attachment identity differs from infrastructure state')
+        return actual_present
+
     def status(self):
         with operation_lock(self.directory):
-            state = self.tofu.state()
-            inventory = resources(state)
-            actual_present = SESSION_ADDRESSES <= set(inventory)
-            if bool(self.deployment.get('host_id')) != actual_present or self.deployment.get('session_present') != actual_present:
-                raise HostError('deployment host identity is stale; resume the saved lifecycle operation')
-            if not actual_present:
-                if SESSION_ADDRESSES.intersection(inventory):
-                    raise HostError('session infrastructure is partial; resume its operation')
+            if not self.verify_handoff_inventory():
                 self.state = 'absent'
                 return {'host': 'absent', 'application': 'unavailable', 'backup': 'unverified', 'data_disk': 'retained'}
-            host = inventory['aws_instance.host[0]']
-            if host.get('id') != self.deployment['host_id']:
-                raise HostError('deployment host identity differs from infrastructure state')
             session = self.running_session()
             result = session.status()
             self.adopt(session)
@@ -689,8 +695,16 @@ class OnDemandSession:
 
     def repair_dns(self):
         with operation_lock(self.directory):
+            if self.journal_path.exists():
+                try:
+                    journal = json.loads(private_file(self.journal_path))
+                except (TransferError, ValueError) as exc:
+                    raise HostError('cannot validate the private lifecycle journal before DNS repair') from exc
+                if not isinstance(journal, dict) or journal.get('schema_version') != 1 or journal.get('phase') != 'complete':
+                    raise HostError('DNS repair requires resuming the incomplete lifecycle operation first')
+            present = self.verify_handoff_inventory()
             session = HostSession(self.deployment, self.aws, self.cloudflare)
-            if self.deployment.get('host_id'):
+            if present:
                 result = session.repair_dns()
             else:
                 session.state = 'stopped'
