@@ -1,0 +1,72 @@
+# Private family device evidence
+
+Copy this blank form to ignored `operator-config/family/device-evidence.md`. Keep completed records private. An unchecked item means unverified. Share only the sanitized summary at the end in issue #9.
+
+Date/time and timezone:
+Operator:
+Installed Git revision and content revision/digest:
+Private endpoint/inventory reference:
+Session start/end and actual peak player count:
+Network contexts tested:
+
+## Device results
+
+| Device | Model / OS | Client edition/version | Private account reference | Network | Route/service | Joined same world | Chat/interactions | Reconnect identity/inventory | Result / failure stage |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Java computer | | | | | Direct hostname | | | | |
+| Tablet/iPad | | | | | Direct hostname | | | | |
+| PlayStation | | | | | | | | | |
+| Nintendo Switch | | | | | | | | | |
+
+For each device, record the checkpoint item/slot/quantity, location and shared chest/block observation. Use private account aliases in any shared version.
+
+## Console setup and rollback
+
+| Console/network | Original DNS mode | Original primary/secondary | Selected service and lookup date | Changed settings | Join/transfer result | Restored exact original settings | Internet and featured-server result after rollback |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| PlayStation | | | | | | | |
+| Nintendo Switch | | | | | | | |
+
+## Access check
+
+- [ ] Every approved family account joined.
+- [ ] A known unapproved account was denied before entering the world.
+- [ ] An approved account still joined after the denial test.
+
+Private identity references, timestamps and denial result:
+
+## Representative session
+
+| Sample time | Activity and actual player count | TPS 1m / 5m / 15m | MSPT returned values | Container memory usage/limit | Lag / rubber-banding / crash observations |
+| --- | --- | --- | --- | --- | --- |
+| Before play | | | | | |
+| New chunk exploration | | | | | |
+| Shared play | | | | | |
+
+- [ ] The representative session approached six simultaneous players; actual peak recorded.
+- [ ] Exploration/chunk generation and shared play exercised.
+- [ ] Every required device completed the reconnect checkpoint.
+- [ ] Craig accepts the observed experience and measured hardware behavior, or a failure remains recorded.
+
+## Operator and recovery checks
+
+- [ ] Craig ran documented start and status without undocumented setup.
+- [ ] Craig ran clean host stop and confirmed complete backup evidence.
+- [ ] Console connection rollback passed.
+- [ ] Issue #8 separately records the required live recovery acceptance.
+
+Private backup/recovery reference and any undocumented steps:
+
+## Sanitized issue summary
+
+Installed revision:
+Device/client versions and routes, with account aliases only:
+Join/chat/interaction and reconnect results:
+Unapproved-account denial result:
+Peak players, session duration and TPS/MSPT/memory samples:
+User experience and hardware acceptance:
+Console rollback result:
+Operator/recovery evidence links:
+Outstanding failures and next action:
+
+Remove account names, UUIDs, endpoint, DNS screenshots, credentials, raw server/SSM output and private report links before publishing.
