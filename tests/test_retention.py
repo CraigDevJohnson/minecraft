@@ -21,6 +21,17 @@ class RetentionStore(fixture_module.VersionedStore):
         self.events = []
         self.fail_retirement = False
         self.fail_protection = False
+        self.lifecycle = {'Rules': [
+            {'ID': 'retire-verified-survival', 'Status': 'Enabled',
+             'Filter': {'And': {'Prefix': 'instances/survival/', 'Tags': [{'Key': 'minecraft-retention', 'Value': 'retired'}]}},
+             'Expiration': {'Days': 14}, 'NoncurrentVersionExpiration': {'NoncurrentDays': 14}},
+            {'ID': 'abort-incomplete-survival', 'Status': 'Enabled', 'Filter': {'Prefix': 'instances/survival/'},
+             'AbortIncompleteMultipartUpload': {'DaysAfterInitiation': 1}},
+            {'ID': 'remove-expired-markers-survival', 'Status': 'Enabled', 'Filter': {'Prefix': 'instances/survival/'},
+             'Expiration': {'ExpiredObjectDeleteMarker': True}}]}
+
+    def lifecycle_configuration(self):
+        return copy.deepcopy(self.lifecycle)
 
     def list_versions(self, prefix):
         result = []
@@ -271,6 +282,85 @@ class RetentionTests(unittest.TestCase):
             self.reconcile()
         self.store.set_retention = original
         self.assertEqual(self.reconcile()['retention'], 'verified')
+
+    def test_live_lifecycle_conflict_or_missing_access_blocks_protection_without_tag_mutation(self):
+        self.publish(1)
+        valid = copy.deepcopy(self.store.lifecycle)
+        for conflict in ({'ID': 'blanket', 'Status': 'Enabled', 'Filter': {}, 'NoncurrentVersionExpiration': {'NoncurrentDays': 14}},
+                         {'ID': 'tagless', 'Status': 'Enabled', 'Filter': {'Prefix': 'instances/survival/'}, 'Expiration': {'Days': 14}},
+                         {'ID': 'wrong-tag', 'Status': 'Enabled', 'Filter': {'And': {'Prefix': 'instances/survival/', 'Tags': [{'Key': 'minecraft-retention', 'Value': 'keep'}]}}, 'Expiration': {'Days': 14}}):
+            self.store.lifecycle = {'Rules': valid['Rules'] + [conflict]}
+            before = dict(self.store.tags)
+            with self.assertRaises(backup.BackupError):
+                retention.protect_current_selection(self.store, 'survival', self.fixture.workspace, expected_selection=self.current)
+            self.assertEqual(self.store.tags, before)
+        self.store.lifecycle = valid
+        with mock.patch.object(self.store, 'lifecycle_configuration', side_effect=backup.BackupError('access denied')):
+            with self.assertRaises(backup.BackupError):
+                retention.protect_current_selection(self.store, 'survival', self.fixture.workspace, expected_selection=self.current)
+        self.assertEqual(self.store.tags, before)
+
+    def test_missing_cleanup_rule_or_lifecycle_drift_cannot_certify_protection(self):
+        self.publish(1)
+        valid = copy.deepcopy(self.store.lifecycle)
+        self.store.lifecycle['Rules'].pop()
+        with self.assertRaises(backup.BackupError):
+            retention.protect_current_selection(self.store, 'survival', self.fixture.workspace, expected_selection=self.current)
+        self.store.lifecycle = valid
+        changed = copy.deepcopy(valid)
+        changed['Rules'][0]['Expiration']['Days'] = 1
+        with mock.patch.object(self.store, 'lifecycle_configuration', side_effect=[valid, changed]):
+            with self.assertRaises(backup.BackupError):
+                retention.protect_current_selection(self.store, 'survival', self.fixture.workspace, expected_selection=self.current)
+
+    def test_modified_interrupted_journal_cannot_silently_skip_obsolete_versions(self):
+        for number in range(1, 16):
+            self.publish(number)
+        self.store.fail_retirement = True
+        with self.assertRaises(backup.BackupError):
+            self.reconcile()
+        path = self.fixture.journal / 'retention-survival.json'
+        plan = json.loads(path.read_text())
+        plan['retire'].pop()
+        from minecraft_instance import write_json
+        write_json(path, plan)
+        self.store.fail_retirement = False
+        before = dict(self.store.tags)
+        with self.assertRaisesRegex(backup.BackupError, 'omits'):
+            self.reconcile()
+        self.assertEqual(self.store.tags, before)
+
+    def test_read_only_replay_verifier_requires_keep_on_every_selected_version_without_repair(self):
+        receipt = self.publish(1)
+        references = [retention.identity(receipt['marker']), retention.identity(receipt['archive']),
+                      retention.identity(self.current['receipt']), retention.identity(self.current['revision'])]
+        before_events = list(self.store.events)
+        self.assertEqual(retention.verify_current_selection_protection(self.store, 'survival', self.fixture.workspace,
+            expected_selection=self.current)['protection'], 'verified')
+        self.assertEqual(self.store.events, before_events)
+        for pair in references:
+            for value in ({}, {'minecraft-retention': 'retired'}):
+                with self.subTest(pair=pair, value=value):
+                    self.store.tags[pair] = value
+                    with self.assertRaisesRegex(backup.BackupError, 'lost its keep'):
+                        retention.verify_current_selection_protection(self.store, 'survival', self.fixture.workspace, expected_selection=self.current)
+                    self.assertEqual(self.store.tags[pair], value)
+                    self.assertEqual(self.store.events, before_events)
+                    self.store.tags[pair] = {'minecraft-retention': 'keep'}
+
+    def test_read_only_replay_refuses_tag_drift_during_archive_verification(self):
+        receipt = self.publish(1)
+        original = self.store.download_revision
+        def change_archive_tag(key, target, **kwargs):
+            result = original(key, target, **kwargs)
+            if key == receipt['archive']['key']:
+                self.store.tags[retention.identity(receipt['archive'])] = {}
+            return result
+        before_events = list(self.store.events)
+        with mock.patch.object(self.store, 'download_revision', side_effect=change_archive_tag):
+            with self.assertRaisesRegex(backup.BackupError, 'lost its keep'):
+                retention.verify_current_selection_protection(self.store, 'survival', self.fixture.workspace, expected_selection=self.current)
+        self.assertEqual(self.store.events, before_events)
 
 
 if __name__ == '__main__':

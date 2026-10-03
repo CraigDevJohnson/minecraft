@@ -7,11 +7,15 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import contextlib
+import io
+import threading
 from unittest import mock
 
 import test_restore as restore_fixture
 import minecraft_backup as backup
 import minecraft_restore as restore
+import minecraft_instance
 
 
 class VersionedStore:
@@ -269,12 +273,13 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.restore(receipt)
         target = self.fixture.target_root / 'instances/survival'
         before = {str(path.relative_to(target)): (path.read_bytes(), path.stat().st_mtime_ns)
-                  for path in target.rglob('*') if path.is_file()}
+                  for path in target.rglob('*') if path.is_file() and path.name != 'operation.json'}
         result = self.restore(receipt, resume=True)
         self.assertTrue(result['resumed'])
         after = {str(path.relative_to(target)): (path.read_bytes(), path.stat().st_mtime_ns)
-                 for path in target.rglob('*') if path.is_file()}
+                 for path in target.rglob('*') if path.is_file() and path.name != 'operation.json'}
         self.assertEqual(before, after)
+        self.assertTrue(json.loads((target / 'operation.json').read_text())['restore_certified'])
 
     def test_partial_wrong_receipt_changed_target_or_checkpoint_are_preserved_for_repair(self):
         for scenario in ('missing-file', 'changed-checkpoint', 'wrong-receipt', 'wrong-target', 'extra-file', 'symlink'):
@@ -301,11 +306,11 @@ class RecoveryReceiptTests(unittest.TestCase):
                         state['restore_target']['filesystem_uuid'] = '22222222-2222-4222-8222-222222222222'
                     (target / 'operation.json').write_text(json.dumps(state))
                 before = [(str(path.relative_to(target)), path.lstat().st_mode, path.readlink() if path.is_symlink()
-                           else path.read_bytes() if path.is_file() else None) for path in target.rglob('*')]
+                           else path.read_bytes() if path.is_file() else None) for path in target.rglob('*') if path.name != 'operation.json']
                 with self.assertRaises(backup.BackupError):
                     self.restore(receipt, resume=True)
                 after = [(str(path.relative_to(target)), path.lstat().st_mode, path.readlink() if path.is_symlink()
-                          else path.read_bytes() if path.is_file() else None) for path in target.rglob('*')]
+                          else path.read_bytes() if path.is_file() else None) for path in target.rglob('*') if path.name != 'operation.json']
                 self.assertEqual(before, after)
 
     def test_capacity_bootstrap_and_receipt_corruption_fail_without_installing_an_empty_world(self):
@@ -369,11 +374,11 @@ class RecoveryReceiptTests(unittest.TestCase):
                         return info
                     self.fixture.machine.restore_metadata = changed_metadata
                 before = {str(path.relative_to(target)): (path.lstat().st_mode, path.read_bytes())
-                          for path in target.rglob('*') if path.is_file()}
+                          for path in target.rglob('*') if path.is_file() and path.name != 'operation.json'}
                 with self.assertRaisesRegex(backup.BackupError, 'ownership or permissions'):
                     self.restore(receipt, resume=True)
                 after = {str(path.relative_to(target)): (path.lstat().st_mode, path.read_bytes())
-                         for path in target.rglob('*') if path.is_file()}
+                         for path in target.rglob('*') if path.is_file() and path.name != 'operation.json'}
                 self.assertEqual(before, after)
 
     def test_receipt_default_store_uses_explicit_bounded_budget_and_invalid_budget_fails_before_io(self):
@@ -411,6 +416,150 @@ class RecoveryReceiptTests(unittest.TestCase):
         result = backup.verify_stop_receipt(source, drain, self.journal, self.bootstrap, store=self.store, timeout=3000)
         self.assertEqual(set(result), {'survival', 'creative'})
         self.assertEqual(factory.call_args_list, [mock.call(timeout=3000), mock.call(timeout=3000)])
+
+    def test_archive_hashing_checks_budget_between_file_chunks_without_a_later_s3_call(self):
+        key = 'instances/survival/objects/point/data.tar.gz'
+        self.store.put(key, b'x' * (3 * 1024 * 1024))
+        check = mock.Mock(side_effect=[None, None, backup.BackupError('verification budget expired')])
+        self.store.check_deadline = check
+        with self.assertRaisesRegex(backup.BackupError, 'budget expired'):
+            backup._object_receipt(self.store, key, self.workspace / 'large-archive.tar.gz', 4 * 1024 * 1024)
+        self.assertEqual(check.call_count, 3)
+        self.assertEqual(self.store.reads, [(key, self.store.current[key])])
+
+    def test_matching_prior_receipt_cannot_certify_hashing_after_budget_expiry(self):
+        backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+        original = backup.digest_file
+        expired = False
+        def check():
+            if expired:
+                raise backup.BackupError('verification budget expired')
+        self.store.check_deadline = check
+        def expire_before_archive_hash(path, **kwargs):
+            nonlocal expired
+            if str(path).endswith('.tar.gz'):
+                expired = True
+            return original(path, **kwargs)
+        before = dict(self.store.objects)
+        with mock.patch.object(backup, 'digest_file', side_effect=expire_before_archive_hash), self.assertRaisesRegex(backup.BackupError, 'budget expired'):
+            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+        self.assertEqual(self.store.objects, before)
+
+    def test_extraction_budget_failure_leaves_target_absent_and_backups_unchanged(self):
+        receipt = self.receipt()
+        def check():
+            if list(self.fixture.target_root.glob('.minecraft-restore-*/instance/data')):
+                raise backup.BackupError('extraction budget expired')
+        self.store.check_deadline = check
+        before = dict(self.store.objects)
+        with self.assertRaisesRegex(backup.BackupError, 'extraction budget expired'):
+            self.restore(receipt)
+        self.assertFalse((self.fixture.target_root / 'instances').exists())
+        self.assertEqual(self.store.objects, before)
+
+    def test_final_budget_expiry_preserves_complete_target_for_same_receipt_retry(self):
+        receipt = self.receipt()
+        expired = False
+        def check():
+            if expired:
+                raise backup.BackupError('final budget expired')
+        original_write = restore.write_json
+        def expire_certification(path, value):
+            nonlocal expired
+            original_write(path, value)
+            if path.name == 'operation.json' and value.get('restore_certified') is True:
+                expired = True
+        self.store.check_deadline = check
+        with mock.patch.object(restore, 'write_json', side_effect=expire_certification), self.assertRaisesRegex(backup.BackupError, 'final budget expired'):
+            self.restore(receipt)
+        target = self.fixture.target_root / 'instances/survival'
+        self.assertEqual((target / 'data/world/level.dat').read_bytes(), self.fixture.checkpoints['data/world/level.dat'])
+        self.assertIs(json.loads((target / 'operation.json').read_text())['restore_certified'], False)
+        expired = False
+        self.assertTrue(self.restore(receipt, resume=True)['resumed'])
+
+    def test_actual_concurrent_start_waits_for_restore_lock_then_refuses_pending_certification(self):
+        receipt = self.receipt()
+        machine = self.fixture.machine
+        lock_path = self.directory / 'host-runtime.lock'
+        @contextlib.contextmanager
+        def actual_lock():
+            with minecraft_instance.operation_lock(lock_path, timeout=2):
+                machine.lock_held = True
+                try:
+                    yield
+                finally:
+                    machine.lock_held = False
+        machine.lock = actual_lock
+        machine.desired_revision = lambda instance: receipt['manifest_sha256']
+        launches = []
+        machine.prepare = lambda instance: None
+        def launch(instance):
+            launches.append(instance)
+            machine.container.update(exists=True, running=True, exit_code=0,
+                                     container_id='fixture-container', started_at='fixture-start')
+        machine.launch = launch
+        machine.wait_ready = lambda instance: None
+        machine.verify_restored = lambda instance, state: None
+        machine.storage_usage = lambda: {'size_bytes': 5 * 1024 ** 3, 'available_bytes': 4 * 1024 ** 3, 'used_percent': 20}
+        published, release, started = threading.Event(), threading.Event(), threading.Event()
+        target = machine.root / 'instances/survival'
+        failures = []
+        armed = True
+        def budget():
+            if armed and target.exists():
+                published.set()
+                if not release.wait(2):
+                    raise backup.BackupError('test synchronization failed')
+                raise backup.BackupError('published restore budget expired')
+        self.store.check_deadline = budget
+        def restore_worker():
+            try:
+                self.restore(receipt)
+            except Exception as error:
+                failures.append(('restore', error))
+        def start_worker():
+            try:
+                minecraft_instance.Manager(machine.root, machine, ['survival']).execute('start', 'survival')
+            except Exception as error:
+                failures.append(('start', error))
+            finally:
+                started.set()
+        first = threading.Thread(target=restore_worker)
+        second = threading.Thread(target=start_worker)
+        first.start()
+        self.assertTrue(published.wait(2))
+        second.start()
+        self.assertFalse(started.wait(0.05))
+        release.set()
+        first.join(2)
+        second.join(2)
+        self.assertFalse(first.is_alive() or second.is_alive())
+        self.assertEqual({name for name, _ in failures}, {'restore', 'start'})
+        self.assertTrue(any(isinstance(error, minecraft_instance.OperationError) and 'certification' in str(error) for name, error in failures if name == 'start'))
+        self.assertEqual(launches, [])
+        self.assertIs(json.loads((target / 'operation.json').read_text())['restore_certified'], False)
+        armed = False
+        self.assertTrue(self.restore(receipt, resume=True)['resumed'])
+        self.assertTrue(json.loads((target / 'operation.json').read_text())['restore_certified'])
+        result = minecraft_instance.Manager(machine.root, machine, ['survival']).execute('start', 'survival')
+        self.assertTrue(result['ready'])
+        self.assertEqual(launches, ['survival'])
+
+    def test_restore_cli_passes_default_and_explicit_bounded_operation_budget(self):
+        receipt = self.receipt()
+        for timeout in (None, 2500):
+            args = ['--config', 'operator.json', '--receipt', 'receipt.json', '--bootstrap-sha256', self.bootstrap,
+                    'survival', receipt['recovery_point']]
+            if timeout is not None:
+                args.extend(('--timeout', str(timeout)))
+            with mock.patch.object(restore, 'private_json', side_effect=[{}, receipt]), \
+                    mock.patch.object(restore, 'LinuxMachine', return_value=self.fixture.machine), \
+                    mock.patch('minecraft_backup_store.S3Store', return_value=self.store) as factory, \
+                    mock.patch.object(restore, 'restore', return_value={'status': 'restored'}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(restore.main(args), 0)
+            factory.assert_called_once_with('source-backups', region='us-west-2', timeout=timeout or 3000)
 
 
 if __name__ == '__main__':

@@ -119,3 +119,5 @@ AWS interface references: [SendCommand delivery timeout and parameters](https://
 ## Opt-in absent-host lifecycle
 
 The version-2 `on-demand-host` handoff can name an absent host. That mode requires the separately reviewed workstation policy (`--lifecycle` and `--policy-sha256`) and replaces EC2 stop/start with guarded OpenTofu session removal/recreation. The protected data disk remains retained. Follow [on-demand host sessions](on-demand-host.md) for migration, private transfer, interruption repair, recurring authority and actual cold-start timing. Existing handoffs retain the commands above.
+
+The separate opt-in `s3-only` mode also removes the session data disk, with exact independently verified recovery selections in its absent-data handoff. Follow [S3-only world operations](s3-only-world.md) for the explicit ownership/protection migration, provenance floor, receipt transfer, restore retries and measured timing. Existing retained-host and on-demand-host modes remain compatible.

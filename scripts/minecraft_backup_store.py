@@ -56,6 +56,10 @@ class S3Store:
         return S3Store(self.bucket, self.region, timeout=timeout, profile=self.profile,
                        environment_provider=self.environment_provider)
 
+    def check_deadline(self):
+        if time.monotonic() >= self.deadline:
+            raise BackupError('S3 verification operation timed out')
+
     def _call(self, operation: str, *arguments: str, download_limit: tuple[Path, int] | None = None,
               transfer_budget: bool = False) -> dict:
         started = time.monotonic()
@@ -273,6 +277,9 @@ class S3Store:
 
     def delete(self, key: str) -> None:
         self._call("delete-object", "--key", key)
+
+    def lifecycle_configuration(self) -> dict:
+        return self._call('get-bucket-lifecycle-configuration')
 
     def list_versions(self, prefix: str) -> list[dict]:
         if not re.fullmatch(r'instances/[a-z][a-z0-9-]{0,31}/', prefix):

@@ -96,6 +96,46 @@ class OperatorRoleExampleTests(unittest.TestCase):
                     self.assertNotIn("NotAction", statement)
                     self.assertNotIn("NotResource", statement)
 
+    def test_s3_only_retention_supplement_is_named_instance_scoped_and_never_version_deletes(self):
+        policy = statements("s3-only-retention")
+        bucket = "arn:aws:s3:::example-prefix-backups"
+        for statement in policy:
+            for resource in as_list(statement["Resource"]):
+                self.assertTrue(resource == bucket or resource.startswith(bucket + "/instances/survival/"))
+            for action in as_list(statement["Action"]):
+                self.assertTrue(action.startswith("s3:"))
+                self.assertNotIn("*", action)
+        self.assertTrue(unconditionally_denied(policy, "s3:DeleteObjectVersion", bucket + "/instances/survival/objects/point/data.tar.gz"))
+        self.assertTrue(unconditionally_denied(policy, "s3:DeleteObject", bucket + "/instances/survival/receipts/current.json"))
+        listing = next(statement for statement in policy if statement["Sid"] == "ListNamedRecoveryVersions")
+        self.assertEqual(set(listing["Action"]), {"s3:ListBucket", "s3:ListBucketVersions"})
+        self.assertEqual(listing["Condition"], {"StringLike": {"s3:prefix": ["instances/survival/*"]}})
+        locating = next(statement for statement in policy if statement["Sid"] == "LocateTheRecoveryBucket")
+        self.assertEqual(locating["Action"], "s3:GetBucketLocation")
+        self.assertNotIn("Condition", locating)
+        lifecycle = next(statement for statement in policy if statement["Sid"] == "ReadTheRecoveryBucketLifecycle")
+        self.assertEqual(lifecycle["Effect"], "Allow")
+        self.assertEqual(lifecycle["Action"], "s3:GetLifecycleConfiguration")
+        self.assertEqual(lifecycle["Resource"], bucket)
+        self.assertNotIn("Condition", lifecycle)
+
+    def test_s3_only_tag_and_receipt_publication_require_their_actual_conditions(self):
+        policy = statements("s3-only-retention")
+        tagging = next(statement for statement in policy if statement["Sid"] == "SetOnlyTheRequiredRetentionTag")
+        self.assertEqual(tagging["Condition"], {
+            "StringEquals": {"s3:RequestObjectTag/minecraft-retention": ["keep", "retired"]},
+            "ForAllValues:StringEquals": {"s3:RequestObjectTagKeys": ["minecraft-retention"]},
+            "Null": {"s3:RequestObjectTagKeys": "false", "s3:RequestObjectTag/minecraft-retention": "false"},
+        })
+        immutable = next(statement for statement in policy if statement["Sid"] == "PublishImmutableReceipt")
+        prefix = "arn:aws:s3:::example-prefix-backups/instances/survival/receipts/"
+        self.assertTrue(matches(immutable["Resource"], prefix + "a" * 64 + ".json"))
+        self.assertFalse(matches(immutable["Resource"], prefix + "current.json"))
+        self.assertEqual(immutable["Condition"], {"StringEquals": {"s3:if-none-match": "*"}})
+        advance = next(statement for statement in policy if statement["Sid"] == "AdvanceTheObservedSelectionConditionally")
+        self.assertEqual(advance["Resource"], prefix + "current.json")
+        self.assertEqual(advance["Condition"], {"Null": {"s3:if-match": "false"}})
+
     def test_role_permission_changes_require_the_host_boundary(self):
         granted = set()
         for statement in self.permissions:

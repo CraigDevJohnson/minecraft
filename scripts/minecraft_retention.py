@@ -10,6 +10,7 @@ import tempfile
 
 from minecraft_backup import (BackupError, MAX_METADATA_BYTES, RETAIN, _validate_object_receipt,
                               MAX_ARCHIVE_BYTES, check_digest, digest_file, encoded,
+                              budget_checker, check_budget,
                               load_current_receipt, load_receipt_recovery, marker_key,
                               read_json, validate_metadata, validate_receipt)
 from minecraft_backup_store import valid_version
@@ -33,8 +34,9 @@ def _read_version(store, key, version, path, limit):
     result = store.download_revision(key, path, max_bytes=limit, version_id=version)
     if result is None or result['key'] != key or result['version_id'] != version:
         raise BackupError('reviewed legacy version is unavailable')
-    reference = {**result, 'sha256': digest_file(path)}
+    reference = {**result, 'sha256': digest_file(path, check_deadline=budget_checker(store))}
     _validate_object_receipt(reference, key, limit)
+    check_budget(store)
     return reference
 
 
@@ -106,7 +108,7 @@ def import_legacy_points(store, instance, journal_dir, *, reviewed_versions):
             if any(archive[field] != metadata['archive'][field] for field in ('key', 'sha256', 'size_bytes')):
                 raise BackupError('reviewed legacy archive is corrupt')
             with tempfile.TemporaryDirectory(prefix='.minecraft-legacy-check-', dir=workspace) as verify:
-                extract_recovery(metadata, workspace / 'legacy-archive.tar.gz', Path(verify) / 'verified')
+                extract_recovery(metadata, workspace / 'legacy-archive.tar.gz', Path(verify) / 'verified', check_deadline=budget_checker(store))
             core = {'schema_version': 1, 'status': 'verified-legacy', 'instance': instance,
                     'recovery_point': point, 'created_at': metadata['created_at'], 'published_at': available[(key, version)]['last_modified'],
                     'manifest_sha256': metadata['manifest_sha256'], 'definition_sha256': metadata['definition_sha256'],
@@ -123,7 +125,9 @@ def import_legacy_points(store, instance, journal_dir, *, reviewed_versions):
         if path.exists() and private_json(path) != record:
             raise BackupError('legacy point already has a different reviewed inventory')
     for record in records:
+        check_budget(store)
         write_json(journal_dir / f"legacy-{record['recovery_point']}.json", record)
+    check_budget(store)
     return {'instance': instance, 'imported_points': len(records), 'status': 'verified'}
 
 
@@ -143,17 +147,112 @@ def _protect(store, references):
         store.set_retention(key, version, 'keep')
 
 
+def verify_protection_lifecycle(store, instance):
+    """Reject live expiry drift before authorizing removal of the only local copy."""
+    from minecraft_backup import check_instance
+    check_instance(instance)
+    configuration = store.lifecycle_configuration()
+    rules = configuration.get('Rules') if isinstance(configuration, dict) else None
+    if not isinstance(rules, list) or not 0 < len(rules) <= 1000:
+        raise BackupError('live recovery lifecycle is unavailable or malformed')
+    prefix = f'instances/{instance}/'
+    seen, applicable = set(), []
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get('Status') not in ('Enabled', 'Disabled'):
+            raise BackupError('live recovery lifecycle has an unknown rule status')
+        if 'ID' in rule and not isinstance(rule['ID'], str):
+            raise BackupError('live recovery lifecycle has an invalid rule identity')
+        if rule['Status'] == 'Disabled':
+            continue
+        filter_value = rule.get('Filter', {'Prefix': rule.get('Prefix', '')})
+        if not isinstance(filter_value, dict):
+            raise BackupError('live recovery lifecycle has an unsupported filter')
+        tags = []
+        if 'And' in filter_value:
+            conjunction = filter_value['And']
+            if (set(filter_value) != {'And'} or not isinstance(conjunction, dict)
+                    or set(conjunction) - {'Prefix', 'Tags'}):
+                raise BackupError('live recovery lifecycle has an unsupported filter')
+            selected_prefix = conjunction.get('Prefix', '')
+            tags = conjunction.get('Tags', [])
+        elif set(filter_value).issubset({'Prefix', 'Tag'}):
+            selected_prefix = filter_value.get('Prefix', '')
+            tags = [filter_value['Tag']] if 'Tag' in filter_value else []
+        else:
+            raise BackupError('live recovery lifecycle has an unsupported filter')
+        if not isinstance(selected_prefix, str) or not isinstance(tags, list):
+            raise BackupError('live recovery lifecycle filter is malformed')
+        if not prefix.startswith(selected_prefix) and not selected_prefix.startswith(prefix):
+            continue
+        if selected_prefix != prefix:
+            raise BackupError('live recovery lifecycle has a conflicting blanket or partial-prefix rule')
+        actions = set(rule) - {'ID', 'Status', 'Filter', 'Prefix'}
+        if (actions == {'Expiration', 'NoncurrentVersionExpiration'}
+                and tags == [{'Key': 'minecraft-retention', 'Value': 'retired'}]
+                and rule['Expiration'] == {'Days': 14} and rule['NoncurrentVersionExpiration'] == {'NoncurrentDays': 14}
+                and type(rule['Expiration']['Days']) is int and type(rule['NoncurrentVersionExpiration']['NoncurrentDays']) is int):
+            kind = 'retired'
+        elif (actions == {'AbortIncompleteMultipartUpload'} and not tags
+                and rule['AbortIncompleteMultipartUpload'] == {'DaysAfterInitiation': 1}
+                and type(rule['AbortIncompleteMultipartUpload']['DaysAfterInitiation']) is int):
+            kind = 'multipart'
+        elif (actions == {'Expiration'} and not tags
+                and rule['Expiration'] == {'ExpiredObjectDeleteMarker': True}
+                and type(rule['Expiration'].get('ExpiredObjectDeleteMarker')) is bool):
+            kind = 'markers'
+        else:
+            raise BackupError('live recovery lifecycle can expire kept versions or differs from the reviewed retirement policy')
+        if kind in seen:
+            raise BackupError('live recovery lifecycle contains duplicate applicable rules')
+        seen.add(kind)
+        applicable.append(rule)
+    if seen != {'retired', 'multipart', 'markers'}:
+        raise BackupError('live recovery lifecycle is missing required bounded cleanup rules')
+    result = hashlib.sha256(encoded(sorted(applicable, key=lambda rule: rule.get('ID', '')))).hexdigest()
+    check_budget(store)
+    return result
+
+
 def protect_current_selection(store, instance, workspace, *, expected_selection):
     """Verify and protect the selected sole copy before the controller removes its disk."""
     receipt = _assert_current(store, instance, workspace, expected_selection)
+    lifecycle = verify_protection_lifecycle(store, instance)
     metadata, archive = load_receipt_recovery(store, receipt, workspace)
     with tempfile.TemporaryDirectory(prefix='.minecraft-protection-', dir=workspace) as temporary:
-        extract_recovery(metadata, archive, Path(temporary) / 'verified')
+        extract_recovery(metadata, archive, Path(temporary) / 'verified', check_deadline=budget_checker(store))
     references = [identity(receipt['marker']), identity(receipt['archive']),
                   identity(expected_selection['receipt']), identity(expected_selection['revision'])]
     _protect(store, references)
+    if verify_protection_lifecycle(store, instance) != lifecycle:
+        raise BackupError('live recovery lifecycle changed during selected-version protection')
     _assert_current(store, instance, workspace, expected_selection)
-    return {'instance': instance, 'receipt_id': receipt['receipt_id'], 'protection': 'verified'}
+    check_budget(store)
+    return {'instance': instance, 'receipt_id': receipt['receipt_id'], 'protection': 'verified',
+            'lifecycle_sha256': lifecycle}
+
+
+def verify_current_selection_protection(store, instance, workspace, *, expected_selection):
+    """Read-only replay/start gate; missing protection is never silently repaired."""
+    receipt = _assert_current(store, instance, workspace, expected_selection)
+    lifecycle = verify_protection_lifecycle(store, instance)
+    references = {identity(receipt['marker']), identity(receipt['archive']),
+                  identity(expected_selection['receipt']), identity(expected_selection['revision'])}
+    def require_tags():
+        for key, version in sorted(references):
+            check_budget(store)
+            if store.version_tags(key, version) != {'minecraft-retention': 'keep'}:
+                raise BackupError('selected recovery version lost its keep protection; preserve resources for repair')
+    require_tags()
+    metadata, archive = load_receipt_recovery(store, receipt, workspace)
+    with tempfile.TemporaryDirectory(prefix='.minecraft-replay-check-', dir=workspace) as verify:
+        extract_recovery(metadata, archive, Path(verify) / 'verified', check_deadline=budget_checker(store))
+    require_tags()
+    if verify_protection_lifecycle(store, instance) != lifecycle:
+        raise BackupError('live recovery lifecycle changed during selected-version verification')
+    _assert_current(store, instance, workspace, expected_selection)
+    check_budget(store)
+    return {'instance': instance, 'receipt_id': receipt['receipt_id'], 'protection': 'verified',
+            'lifecycle_sha256': lifecycle}
 
 
 def reconcile_retention(store, instance, journal_dir, *, current_selection, active_receipt_ids):
@@ -171,6 +270,7 @@ def reconcile_retention(store, instance, journal_dir, *, current_selection, acti
     if len(paths) > 10000:
         raise BackupError('private receipt inventory exceeds its safety limit')
     for path in paths:
+        check_budget(store)
         receipt = validate_receipt(private_json(path))
         if path.name != f"receipt-{receipt['receipt_id']}.json":
             raise BackupError('private receipt filename differs from its identity')
@@ -182,6 +282,7 @@ def reconcile_retention(store, instance, journal_dir, *, current_selection, acti
         raise BackupError('private receipt sequence contains conflicting candidates')
     legacy = {}
     for path in journal_dir.glob('legacy-*.json'):
+        check_budget(store)
         record = _validate_legacy(private_json(path), instance)
         if path.name != f"legacy-{record['recovery_point']}.json":
             raise BackupError('legacy inventory filename differs from its point')
@@ -229,6 +330,7 @@ def reconcile_retention(store, instance, journal_dir, *, current_selection, acti
     with tempfile.TemporaryDirectory(prefix='.minecraft-retention-', dir=journal_dir) as temporary:
         workspace = Path(temporary)
         selected = _assert_current(store, instance, workspace, current_selection)
+        lifecycle = verify_protection_lifecycle(store, instance)
         if selected != receipts[current_selection['receipt_id']]:
             raise BackupError('private selected receipt differs from authoritative S3 evidence')
         if not references.issubset(objects):
@@ -269,11 +371,11 @@ def reconcile_retention(store, instance, journal_dir, *, current_selection, acti
         for receipt_id in kept:
             metadata, archive = load_receipt_recovery(store, receipts[receipt_id], workspace)
             with tempfile.TemporaryDirectory(prefix='.minecraft-keep-check-', dir=workspace) as verify:
-                extract_recovery(metadata, archive, Path(verify) / 'verified')
+                extract_recovery(metadata, archive, Path(verify) / 'verified', check_deadline=budget_checker(store))
         for point in kept_legacy:
             metadata, archive = _load_legacy(store, legacy[point], workspace)
             with tempfile.TemporaryDirectory(prefix='.minecraft-legacy-keep-', dir=workspace) as verify:
-                extract_recovery(metadata, archive, Path(verify) / 'verified')
+                extract_recovery(metadata, archive, Path(verify) / 'verified', check_deadline=budget_checker(store))
         retired = sorted(set(objects) - references)
         plan = {'schema_version': 1, 'instance': instance, 'receipt_id': current_selection['receipt_id'],
                 'selection': current_selection, 'active_receipt_ids': sorted(active), 'keep': [list(pair) for pair in sorted(references)],
@@ -287,6 +389,8 @@ def reconcile_retention(store, instance, journal_dir, *, current_selection, acti
                 expected = {**plan, 'retire': prior.get('retire')}
                 if prior != expected or not set(map(tuple, prior['retire'])).isdisjoint(references):
                     raise BackupError('interrupted retention journal differs from the current operation')
+                if {pair for pair in map(tuple, prior['retire']) if pair in objects} != set(retired):
+                    raise BackupError('interrupted retirement omits a currently verified obsolete version')
                 for pair in map(tuple, prior['retire']):
                     if (len(pair) != 2 or not all(isinstance(value, str) for value in pair)
                             or not re.fullmatch(f'instances/{instance}/(?:completed/[a-f0-9]{{64}}.json|objects/[a-f0-9]{{64}}/data.tar.gz|receipts/(?:[a-f0-9]{{64}}|current).json)', pair[0])):
@@ -310,12 +414,16 @@ def reconcile_retention(store, instance, journal_dir, *, current_selection, acti
         # Save the verified retirement intent before tags can make old versions expire.
         write_json(ledger_path, {'schema_version': 1, 'instance': instance, 'points': sorted(retired_points)})
         for key, version in plan['retire']:
+            check_budget(store)
             _assert_current(store, instance, workspace, current_selection)
             if (key, version) in objects:
                 store.set_retention(key, version, 'retired')
         _assert_current(store, instance, workspace, current_selection)
+        if verify_protection_lifecycle(store, instance) != lifecycle:
+            raise BackupError('live recovery lifecycle changed during retirement')
         plan['status'] = 'completed'
         write_json(journal_path, plan)
+        check_budget(store)
     return {'instance': instance, 'receipt_id': current_selection['receipt_id'],
             'keep_versions': len(references), 'retired_versions': len(retired), 'retention': 'verified'}
 

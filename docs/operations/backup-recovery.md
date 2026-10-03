@@ -75,12 +75,14 @@ After the lifecycle controller creates and verifies a distinct target disk and f
 ```sh
 sudo minecraft-restore --config /etc/minecraft/operator.json \
   --receipt /etc/minecraft/recovery-receipt.json \
-  --bootstrap-sha256 REVIEWED_BUNDLE_SHA256 --resume survival RECOVERY_POINT
+  --bootstrap-sha256 REVIEWED_BUNDLE_SHA256 --timeout 3000 --resume survival RECOVERY_POINT
 ```
 
 Restore reads the recorded object versions even if the current keys change. It requires exact target content/definition compatibility and sufficient free capacity for the archive, extracted files and 1 GiB of working margin. It installs the recovery data atomically and leaves Minecraft stopped. `--resume` recognizes an occupied target only when its prepared record names the same receipt and target storage and every world/player/configuration file still matches the recorded inventory and hash. A partial, changed or ambiguous target is preserved for repair. The default restore command continues to refuse occupied targets.
 
 An authoritative sole-copy receipt must retain access to its selected versions for as long as the server is off. The existing 14-day noncurrent-version expiry can remove a pinned version after a later write or delete marker. The [phase-two retention proposal](s3-only-retention.md) protects the exact selected versions and retires only a bounded, independently verified obsolete set; its lifecycle and IAM changes remain unimplemented. Runtime credentials must not receive permanent version deletion. The existing 15-minute fresh-volume provenance wait remains required; these foundations do not establish a three-minute S3-only startup or close #24.
+
+Restore accepts a bounded `--timeout` of 1 to 3000 seconds, defaulting to 3000. The operation budget covers archive transfer, periodic file hashing, extraction, ownership, inventory checks and final success. Receipt targets publish with pending certification, which ordinary instance start refuses. Cleanup, fsync, the final budget decision and certification remain under the host lifecycle lock. A matching prior receipt or complete occupied target must pass again within the current budget; revalidation revokes its previous certification before inspecting known same-receipt data. Expiration during staging leaves the target absent. Expiration after atomic publication preserves complete files with pending admission until same-receipt retry succeeds. World and runtime files remain intact; only lifecycle certification changes. Non-receipt restore behavior remains compatible.
 
 ## Evidence and live handoff
 

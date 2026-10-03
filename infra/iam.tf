@@ -41,7 +41,7 @@ resource "aws_iam_role_policy" "backups" {
   role = aws_iam_role.host.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Sid      = "ListNamedInstanceBackups"
         Effect   = "Allow"
@@ -54,14 +54,20 @@ resource "aws_iam_role_policy" "backups" {
       {
         Sid    = "ManageCurrentNamedInstanceBackups"
         Effect = "Allow"
-        Action = [
+        Action = var.lifecycle_mode == "s3-only" ? [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:PutObject",
+          "s3:AbortMultipartUpload",
+          "s3:ListMultipartUploadParts",
+          ] : [
           "s3:GetObject",
           "s3:PutObject",
           "s3:DeleteObject",
           "s3:AbortMultipartUpload",
           "s3:ListMultipartUploadParts",
         ]
-        Resource = [for id in sort(tolist(var.instance_ids)) : "${local.backup_bucket_arn}/instances/${id}/*"]
+        Resource = var.lifecycle_mode == "s3-only" ? local.backup_point_objects : local.backup_instance_objects
       },
       {
         Sid      = "LocateBackupBucket"
@@ -69,7 +75,12 @@ resource "aws_iam_role_policy" "backups" {
         Action   = ["s3:GetBucketLocation"]
         Resource = [local.backup_bucket_arn]
       },
-    ]
+      ], var.lifecycle_mode == "s3-only" ? [{
+        Sid      = "ReadExactRecoveryReceipts"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:GetObjectVersion"]
+        Resource = local.backup_receipt_objects
+    }] : [])
   })
 }
 

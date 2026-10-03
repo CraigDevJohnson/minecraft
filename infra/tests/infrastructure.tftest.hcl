@@ -550,3 +550,88 @@ run "s3_only_keeps_retained_protection_until_ownership_migrates" {
     error_message = "Before explicit ownership migration, the original data disk remains retained/protected."
   }
 }
+
+run "s3_only_expires_only_explicitly_retired_versions" {
+  command = plan
+  variables {
+    lifecycle_mode   = "s3-only"
+    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+  assert {
+    condition     = toset([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule.id]) == toset(["retire-verified-survival", "abort-incomplete-survival", "remove-expired-markers-survival"])
+    error_message = "S3-only mode must remove the blanket noncurrent rule and separate retirement, multipart and marker cleanup."
+  }
+  assert {
+    condition     = one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "retire-verified-survival"]).filter[0].and[0].prefix == "instances/survival/" && one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "retire-verified-survival"]).filter[0].and[0].tags["minecraft-retention"] == "retired" && length(one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "retire-verified-survival"]).filter[0].and[0].tags) == 1 && one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "retire-verified-survival"]).expiration[0].days == 14 && one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "retire-verified-survival"]).noncurrent_version_expiration[0].noncurrent_days == 14
+    error_message = "Current and historical data may expire only inside survival's prefix with the explicit retired tag."
+  }
+  assert {
+    condition     = one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "abort-incomplete-survival"]).filter[0].prefix == "instances/survival/" && one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "abort-incomplete-survival"]).abort_incomplete_multipart_upload[0].days_after_initiation == 1 && length(one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "abort-incomplete-survival"]).expiration) == 0 && length(one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "abort-incomplete-survival"]).noncurrent_version_expiration) == 0
+    error_message = "Multipart cleanup must be prefix-only and cannot expire a complete recovery object."
+  }
+  assert {
+    condition     = one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "remove-expired-markers-survival"]).filter[0].prefix == "instances/survival/" && one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "remove-expired-markers-survival"]).expiration[0].expired_object_delete_marker && length(one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "remove-expired-markers-survival"]).filter[0].and) == 0 && length(one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "remove-expired-markers-survival"]).noncurrent_version_expiration) == 0
+    error_message = "Expired delete-marker cleanup must be a separate untagged rule with no historical-data expiration."
+  }
+}
+
+run "s3_only_runtime_reads_versions_and_only_publishes_points" {
+  command = plan
+  variables {
+    lifecycle_mode   = "s3-only"
+    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+  assert {
+    condition     = toset(flatten([for statement in jsondecode(aws_iam_role_policy.backups.policy).Statement : statement.Action])) == toset(["s3:ListBucket", "s3:GetBucketLocation", "s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"])
+    error_message = "S3-only runtime credentials must not gain deletion, tagging, receipt mutation or bucket administration."
+  }
+  assert {
+    condition     = toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[1].Resource) == toset(["arn:aws:s3:::minecraft-test-example-backups/instances/survival/completed/*", "arn:aws:s3:::minecraft-test-example-backups/instances/survival/objects/*"]) && !contains(jsondecode(aws_iam_role_policy.backups.policy).Statement[1].Action, "s3:DeleteObject")
+    error_message = "Immutable point publication and version reads must use only the configured completed/object prefixes."
+  }
+  assert {
+    condition     = one([for statement in jsondecode(aws_iam_role_policy.backups.policy).Statement : statement if statement.Sid == "ReadExactRecoveryReceipts"]).Action == ["s3:GetObject", "s3:GetObjectVersion"] && one([for statement in jsondecode(aws_iam_role_policy.backups.policy).Statement : statement if statement.Sid == "ReadExactRecoveryReceipts"]).Resource == ["arn:aws:s3:::minecraft-test-example-backups/instances/survival/receipts/*"]
+    error_message = "Receipt access must remain a separate read-only exact-instance permission."
+  }
+}
+
+run "s3_only_bucket_guards_immutable_publication_and_selection" {
+  command = plan
+  variables {
+    lifecycle_mode   = "s3-only"
+    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+  assert {
+    condition     = one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireImmutableRecoveryPublication"]).Condition.StringNotEquals["s3:if-none-match"] == "*" && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireImmutableRecoveryPublication"]).Condition.Bool["s3:ObjectCreationOperation"] == "true" && contains(one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireImmutableRecoveryPublication"]).Resource, "arn:aws:s3:::minecraft-test-example-backups/instances/survival/receipts/${join("", [for index in range(64) : "?"])}.json")
+    error_message = "Immutable point/receipt completion needs If-None-Match while multipart creation and parts remain exempt."
+  }
+  assert {
+    condition     = one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireConditionalCurrentSelection"]).Resource == ["arn:aws:s3:::minecraft-test-example-backups/instances/survival/receipts/current.json"] && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireConditionalCurrentSelection"]).Condition.Null == { "s3:if-match" = "true", "s3:if-none-match" = "true" } && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "NeverDeleteCurrentSelection"]).Action == ["s3:DeleteObject", "s3:DeleteObjectVersion"]
+    error_message = "Authoritative selection needs conditional creation/CAS and cannot be directly deleted."
+  }
+  assert {
+    condition     = one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "LifecycleOwnsRetiredVersionDeletion"]).Action == "s3:DeleteObjectVersion" && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RuntimeCannotRetireRecoveryObjects"]).Condition.ArnEquals["aws:PrincipalArn"] == "arn:aws:iam::111122223333:role/minecraft-test-host" && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RuntimeCannotPublishReceipts"]).Action == ["s3:PutObject", "s3:AbortMultipartUpload"]
+    error_message = "The bucket must deny manual historical deletion and runtime deletion/tagging/receipt publication despite broader identity permissions."
+  }
+  assert {
+    condition     = one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireRetentionTagValue"]).Condition.StringNotEquals["s3:RequestObjectTag/minecraft-retention"] == ["keep", "retired"] && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireRetentionTagKeys"]).Condition.Null["s3:RequestObjectTagKeys"] == "true" && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RejectUnownedRetentionTagKeys"]).Condition["ForAnyValue:StringNotEquals"]["s3:RequestObjectTagKeys"] == ["minecraft-retention"]
+    error_message = "Retention writes must require the approved nonempty key/value and reject extra tags."
+  }
+}
+
+run "s3_only_multiple_instances_have_separate_retirement_prefixes" {
+  command = plan
+  variables {
+    lifecycle_mode   = "s3-only"
+    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    instance_ids     = ["survival", "creative"]
+  }
+  assert {
+    condition     = length(aws_s3_bucket_lifecycle_configuration.backups.rule) == 6 && toset([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule.filter[0].and[0].prefix if startswith(rule.id, "retire-verified-")]) == toset(["instances/survival/", "instances/creative/"])
+    error_message = "Every configured instance needs its own retired-only rule and separate cleanup scope."
+  }
+  assert {
+    condition     = toset(one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "NeverDeleteCurrentSelection"]).Resource) == toset(["arn:aws:s3:::minecraft-test-example-backups/instances/survival/receipts/current.json", "arn:aws:s3:::minecraft-test-example-backups/instances/creative/receipts/current.json"])
+    error_message = "Only configured per-instance authoritative selections receive the deletion guard."
+  }
+}

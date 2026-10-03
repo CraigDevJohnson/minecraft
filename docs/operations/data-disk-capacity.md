@@ -1,6 +1,6 @@
 # Data disk capacity
 
-The retained data disk, `aws_ebs_volume.data` mounted at `/srv/minecraft`, takes its size from the required private input `data_volume_size_gib`. EBS grows a volume online and never shrinks one, so the disk starts small and grows when the [usage warning](#usage-report-and-warning) says so. gp3 gives the same 3,000 IOPS and 125 MiB/s at any size: a smaller disk is not a slower one. Keep volume IDs, UUIDs, and command output in the private operator directory, never in an issue or pull request.
+The retained data disk, `aws_ebs_volume.data[0]` mounted at `/srv/minecraft`, takes its size from the required private input `data_volume_size_gib`. EBS grows a volume online and never shrinks one, so the disk starts small and grows when the [usage warning](#usage-report-and-warning) says so. gp3 gives the same 3,000 IOPS and 125 MiB/s at any size: a smaller disk is not a slower one. Keep volume IDs, UUIDs, and command output in the private operator directory, never in an issue or pull request.
 
 ## What the disk holds
 
@@ -29,7 +29,7 @@ No code depends on the size. `minecraft-storage mount` and `verify` check the EB
 
 The variable has no default, so a deployment that has not set it fails to plan instead of planning a shrink. An existing deployment sets its current size, 40 for the first deployment, before any plan with this revision.
 
-`prevent_destroy` does not catch a shrink. The pinned AWS provider plans a smaller `size` as an in-place update. The apply then calls `ModifyVolume`, AWS rejects it, and other changes in that apply may already have happened. Treat **any plan in which `aws_ebs_volume.data` `size` decreases** as a stop, whether it shows as an update or as a replacement. A smaller disk comes only from the [replacement](#replace-the-disk-with-a-smaller-one) below.
+`prevent_destroy` does not catch a shrink. The pinned AWS provider plans a smaller `size` as an in-place update. The apply then calls `ModifyVolume`, AWS rejects it, and other changes in that apply may already have happened. Treat **any plan in which `aws_ebs_volume.data[0]` `size` decreases** as a stop, whether it shows as an update or as a replacement. A smaller disk comes only from the [replacement](#replace-the-disk-with-a-smaller-one) below.
 
 ## Usage report and warning
 
@@ -40,7 +40,7 @@ The variable has no default, so a deployment that has not set it fails to plan i
 Growing needs no downtime and does not replace the host: `size` is not part of the host's user data.
 
 1. In the private tfvars, raise `data_volume_size_gib`, for example from 5 to 10. Never lower it.
-2. Make a saved plan from the private infrastructure copy used for the last apply, as in [infrastructure operations](infrastructure.md#private-deployment-inputs-and-output). It must show only `aws_ebs_volume.data` updated in place, with `size` increasing. Anything else, including a host replacement, is a stop. Apply only the saved plan that Craig approved.
+2. Make a saved plan from the private infrastructure copy used for the last apply, as in [infrastructure operations](infrastructure.md#private-deployment-inputs-and-output). It must show only `aws_ebs_volume.data[0]` updated in place, with `size` increasing. Anything else, including a host replacement, is a stop. Apply only the saved plan that Craig approved.
 3. Wait for the new size to reach the host, with `data_volume_id` set from the private `deployment` output. It does once the modification is `optimizing`, usually within seconds:
 
    ```sh
@@ -64,7 +64,7 @@ AWS accepts another modification of the same volume only after the previous one 
 
 EBS cannot shrink a volume or create a smaller one from a snapshot. The replacement is a new blank disk, created by OpenTofu together with a new host, then a restore of the latest verified recovery point with the existing `minecraft-restore`. Restore requires a target volume and filesystem UUID that differ from the recovery point's source, and an absent target instance directory. A new disk with a **new UUID** meets both. A file copy is not used: it skips restore's checksum and inventory checks and needs the old disk mounted by hand, outside the storage tool's rules.
 
-OpenTofu forgets the old volume and never destroys it. `tofu state rm aws_ebs_volume.data` keeps the address and its `prevent_destroy`. The apply only detaches the old volume, which stays `available` and unmodified as the rollback copy until it is [retired](#retire-the-old-volume). Both disks bill until then.
+OpenTofu forgets the old volume and never destroys it. `tofu state rm 'aws_ebs_volume.data[0]'` keeps the address and its `prevent_destroy`. The apply only detaches the old volume, which stays `available` and unmodified as the rollback copy until it is [retired](#retire-the-old-volume). Both disks bill until then.
 
 The family cannot play from step 3 until step 11. Every state change and AWS change needs Craig's approval of that exact action or saved plan. A pending host change shares this apply and its one runtime reinstall; follow that change's own plan checks as well.
 
@@ -205,8 +205,8 @@ Before changing state, prove this revision plans at all. With the private tfvars
 Then, in the private tfvars, set `data_volume_size_gib` to the new size and `data_filesystem_uuid` to the new UUID. Show Craig the dry run. With his approval of this state change, remove the old volume from state. From here until a saved plan is approved, any failure is handled by [re-importing the old volume](#roll-back):
 
 ```sh
-"$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" state rm -dry-run aws_ebs_volume.data
-"$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" state rm aws_ebs_volume.data
+"$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" state rm -dry-run 'aws_ebs_volume.data[0]'
+"$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" state rm 'aws_ebs_volume.data[0]'
 ```
 
 Make the saved plan. `-replace='aws_instance.host[0]'` is mandatory. The new volume's ID is unknown at plan time, so without it the provider plans the host as an in-place update: the old host, launched without an auto-assigned address, would lose its Elastic IP and its reach. An in-place host change is a stop. The flag also makes this apply create the host, which the first-setup zero-fill rule requires:
@@ -230,7 +230,7 @@ The text plan hides attributes that do not change, including the public-address 
 
 The plan must show exactly:
 
-- `aws_ebs_volume.data` created: encrypted gp3 at the new size;
+- `aws_ebs_volume.data[0]` created: encrypted gp3 at the new size;
 - `aws_instance.host[0]` replaced, never updated in place. The JSON check above proves its auto-assigned address and 20 GiB root disk;
 - `aws_volume_attachment.data[0]` replaced. Its prior `volume_id` is the old volume, and `grep` must find the old ID nowhere else;
 - for a deployment whose state still holds the Elastic IP, `aws_eip_association.host` and `aws_eip.host` destroyed.
@@ -317,7 +317,7 @@ The old volume is deleted only through the [explicit destructive workflow](infra
 
 ```sh
 old_volume_id="$(jq -er .data_volume_id "$private_dir/deployment-before-shrink.json")" || exit 1
-"$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" state show aws_ebs_volume.data \
+"$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" state show 'aws_ebs_volume.data[0]' \
   | grep -E '^[[:space:]]+(id|size)[[:space:]]'
 aws ec2 describe-volumes --volume-ids "$old_volume_id" \
   --query 'Volumes[0].[VolumeId,State,Size,length(Attachments),Tags]'
@@ -338,13 +338,13 @@ Keep `deployment-before-shrink.json` until no retained recovery point names the 
 
   ```sh
   "$repo_dir/.tools/bin/tofu" -chdir="$tofu_dir" import \
-    -var-file="$private_dir/infrastructure.tfvars" aws_ebs_volume.data "$old_volume_id"
+    -var-file="$private_dir/infrastructure.tfvars" 'aws_ebs_volume.data[0]' "$old_volume_id"
   ```
 
   A new plan must show no change to the volume. It can still replace the host, because the revision changed the bootstrap. Do not apply that without separate approval; the rollback does not need it.
 - **A failure after the apply, before the family plays on the new disk.**
   1. Stop the host if it runs. If a session started, drain it with the `stop` command first. A host without an installed runtime cannot give drain evidence, so stop it directly with `aws ec2 stop-instances --instance-ids "$(jq -er .host_id "$deployment")"` and wait for `stopped`. Then run the `dns` command with the token, which parks the record.
-  2. Run `tofu state rm aws_ebs_volume.data`, which drops the new volume from state, then the import above.
+  2. Run `tofu state rm 'aws_ebs_volume.data[0]'`, which drops the new volume from state, then the import above.
   3. Restore the old UUID and size in the private tfvars.
   4. Plan. Only the host and attachment replacements may appear, and the imported volume must show no change. Apply the saved plan that Craig approved.
   5. Cloud-init mounts the old filesystem without intervention. Never zero-fill it. Reinstall the runtime, restage the private configuration with the refreshed output, start with the token so the record follows the host, and verify the checkpoint.

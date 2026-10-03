@@ -263,6 +263,16 @@ class BackupStoreTests(unittest.TestCase):
         self.assertEqual(args[args.index('--key-marker') + 1], key)
         self.assertEqual(args[args.index('--version-id-marker') + 1], 'one')
 
+    def test_lifecycle_read_is_bounded_scoped_and_never_substitutes_missing_access(self):
+        self.steps({'operation': 'get-bucket-lifecycle-configuration', 'response': {'Rules': []}})
+        self.assertEqual(self.store.lifecycle_configuration(), {'Rules': []})
+        self.assertEqual(self.calls()[0]['args'][self.calls()[0]['args'].index('--bucket') + 1], 'family-backups')
+        self.steps({'operation': 'get-bucket-lifecycle-configuration', 'exit': 254,
+                    'error': 'An error occurred (AccessDenied) when calling the GetBucketLifecycleConfiguration operation: secret'})
+        with self.assertRaises(backup_store.BackupError) as caught:
+            self.store.lifecycle_configuration()
+        self.assertNotIn('secret', str(caught.exception))
+
     def test_incomplete_duplicate_or_foreign_version_inventory_is_rejected(self):
         item = {'Key': 'instances/survival/objects/one', 'VersionId': 'one', 'IsLatest': True, 'LastModified': '2026-10-03T12:00:00Z'}
         for page in ({'IsTruncated': True}, {'IsTruncated': False, 'Versions': [item, item]},

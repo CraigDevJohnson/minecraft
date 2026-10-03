@@ -26,33 +26,33 @@
 
 **Interfaces:** `lifecycle_mode="s3-only"`; `data_ownership="retained"|"session"`; protected retained `aws_ebs_volume.data[0]` and session `aws_ebs_volume.session_data[0]`; `recovery_receipt_ids` maps every configured instance to a 64-hex receipt. Absent-data schema-2 handoff has null host/data/UUID only with that complete mapping.
 
-- [ ] Add compatibility moved block for retained data indexing, preserve exact existing bootstrap bytes and protection.
-- [ ] Document and verify the separate no-change state-address ownership migration before any removal authority.
-- [ ] Test absent session data plus retained network/IAM/backups/state, invalid ownership/presence/receipt combinations and idle-stop incompatibility.
+- [x] Add compatibility moved block for retained data indexing, preserve exact existing bootstrap bytes and protection.
+- [x] Document and verify the separate no-change state-address ownership migration before any removal authority.
+- [x] Test absent session data plus retained network/IAM/backups/state, invalid ownership/presence/receipt combinations and idle-stop incompatibility.
 
 ### Task 2: Receipt-bound controller and deletion
 
 **Files:** Create `scripts/minecraft_s3_session.py`; modify `scripts/minecraft_on_demand.py`, `scripts/minecraft_host.py`; create `tests/test_s3_session.py`.
 
-**Interfaces:** `S3Session` uses `S3Store(environment_provider=aws.environment)`, `verify_stop_receipt(deployment,drain,journal_dir,bootstrap_sha256,store=store,protect=True,timeout=3000)`, and the shared operation lock. Receipt journal remains the same durable directory across operations.
+**Interfaces:** `S3Session` uses `S3Store(environment_provider=aws.environment)`, `verify_stop_receipt(deployment,drain,journal_dir,bootstrap_sha256,store=store,protect=True,timeout=3000)`, and the shared operation lock. Read-only `verify_current_selection_protection` proves existing keep tags and live lifecycle exclusion before every removal retry and off-state create apply. Receipt journal remains the same durable directory across operations.
 
-- [ ] Attest installed runtime against the pinned public release before accepting a receipt’s declared bootstrap digest.
-- [ ] Consume `host-drain-private`, validate every final session and use exact versions/inventory outside the data disk.
-- [ ] Save receipt IDs/selection revisions/source storage privately before graceful EC2 stop and the actual saved removal plan.
-- [ ] Permit only exact session host/attachment/data changes; independently prove all session EBS/host absence and publish valid off-state handoff.
-- [ ] Test failed/corrupt/missing/incompatible receipt, stale selection and changed source/plan refusing removal.
+- [x] Attest installed runtime against the pinned public release before accepting a receipt’s declared bootstrap digest.
+- [x] Consume `host-drain-private`, validate every final session and use exact versions/inventory outside the data disk.
+- [x] Save receipt IDs/selection revisions/source storage privately before graceful EC2 stop and the actual saved removal plan.
+- [x] Permit only exact session host/attachment/data changes; independently prove all session EBS/host absence and publish valid off-state handoff.
+- [x] Test failed/corrupt/missing/incompatible receipt, stale selection and changed source/plan refusing removal.
 
 ### Task 3: Fresh disk, guarded restore and interruption
 
 **Files:** `scripts/minecraft_s3_session.py`, `scripts/minecraft_bootstrap_release.py`, `scripts/minecraft_private_transfer.py`, source-digest binding, `tests/test_s3_session.py`.
 
-**Interfaces:** `verify_fresh_volume(aws,deployment,journal,timeout=1800)` consumes `successful_apply_window={started_at_utc,completed_at_utc}`, `source_storage=[{volume_id,filesystem_uuid}]`, `receipt_ids={instance:64hex}`. The caller uses its evidence within ten minutes before guarded zero-fill. Restore command is `minecraft-restore --config /etc/minecraft/operator.json --receipt /etc/minecraft/recovery-receipt.json --bootstrap-sha256 SHA --resume INSTANCE POINT`.
+**Interfaces:** `verify_fresh_volume(aws,deployment,journal,timeout=1800)` consumes `successful_apply_window={started_at_utc,completed_at_utc}`, `source_storage=[{volume_id,filesystem_uuid}]`, `receipt_ids={instance:64hex}`. The caller uses its evidence within ten minutes before guarded zero-fill. Restore command is `minecraft-restore --config /etc/minecraft/operator.json --receipt /etc/minecraft/recovery-receipt.json --bootstrap-sha256 SHA --timeout 3000 --resume INSTANCE POINT`.
 
-- [ ] Validate/download the authoritative receipt/archive outside the target before provisioning; persist target capacity/UUID and immutable receipt IDs in the operation.
-- [ ] Record the actual successful apply window, prove current disk provenance and initial first-boot state, then zero-fill/initialize/mount through existing guarded commands.
-- [ ] Securely transfer the exact receipt, restore every configured instance and independently recognize only a complete same-receipt target on retry.
-- [ ] Persist phases before normal start so retries never rerun restore once game startup progressed; preserve ambiguous/partial target disks.
-- [ ] Test unknown apply outcome, UUID reuse, inadequate capacity, failed provenance/restore/readiness, changed selection, interrupted restore and DNS failure.
+- [x] Validate/download the authoritative receipt/archive outside the target before provisioning; persist target capacity/UUID and immutable receipt IDs in the operation.
+- [x] Record the actual successful apply window, prove current disk provenance and initial first-boot state, then zero-fill/initialize/mount through existing guarded commands.
+- [x] Securely transfer the exact receipt, restore every configured instance and independently recognize only a complete same-receipt target on retry.
+- [x] Persist phases before normal start so retries never rerun restore once game startup progressed; preserve ambiguous/partial target disks.
+- [x] Test unknown apply outcome, UUID reuse, inadequate capacity, failed provenance/restore/readiness, changed selection, interrupted restore and DNS failure.
 
 ### Task 4: Retention integration and final verification
 
@@ -60,6 +60,7 @@
 
 **Interfaces:** `reconcile_retention(store,instance,journal_dir,current_selection=...,active_receipt_ids=...)` runs under the same full-operation lock and preserves latest fourteen/current/active exact versions. Runtime pruning is disabled in S3-only mode.
 
-- [ ] Integrate component commits without altering their owned files; include retention/provenance/controller code in source binding and appropriate public release members.
-- [ ] Run meaningful boundary tests and the combined `.tools/bin/task check` on final state; independently review and fix findings.
-- [ ] Commit/publish a reviewable PR with `Refs #24`; keep the issue open for actual no-EBS S3 round trip, failure proof, capacity/provenance and measured timing.
+- [x] Integrate component commits without altering their owned files; include retention/provenance/controller code in source binding and appropriate public release members.
+- [x] Run meaningful boundary tests and the combined `.tools/bin/task check` on final state; independently review and fix findings. Final gate: 444 Python tests, Go race/vet and 64 infrastructure assertions; independent bounded review found no safety blocker.
+- [x] Commit the complete verified local implementation with `Refs #24`.
+- [ ] Parent publishes and integrates the reviewed PR; keep the issue open for actual no-EBS S3 round trip, failure proof, capacity/provenance and measured timing.
