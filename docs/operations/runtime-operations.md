@@ -36,7 +36,7 @@ The retained disk stores `instances/<id>/operation.json` beside mutable `data/` 
 
 The [operator host commands](host-commands.md) control EC2 separately. Instance stop never stops the host. `host-drain` records a durable start barrier, rejects unconfigured running containers, and finishes every instance's safe stop and backup, including already-stopped instances with pending backups. Only then may the operator request EC2 stop. If AWS stop fails, the barrier remains for retry. Concurrent start cannot cancel it during the same Linux boot. An actual host stop/start gives a new boot ID; a subsequent start still requires valid storage and completed earlier backups. There is no automatic same-boot cancellation.
 
-`host-status` reports configured instances and the barrier. A pristine instance without data or operation state has `backup: not-required`, which is not a recovery point. An already-stopped EC2 host cannot provide fresh application or backup verification.
+`host-status` reports configured instances and the barrier. `host-status` and `start` also report `storage` for the retained disk: `size_bytes`, `available_bytes`, and `used_percent`, as an unprivileged writer and `df` see them. The [operator command](host-commands.md#data-disk-usage) warns at 80 percent. The `status`, `stop`, `backup`, `update`, and `host-drain` responses carry no storage report. A pristine instance without data or operation state has `backup: not-required`, which is not a recovery point. An already-stopped EC2 host cannot provide fresh application or backup verification.
 
 ## Required backup hook
 

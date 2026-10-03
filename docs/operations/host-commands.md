@@ -31,7 +31,19 @@ The drain barrier survives failed backups and failed EC2 calls. Repair the failu
 
 `status` reports host, application, and backup separately. The `host` field is the last observed EC2 state. Application statuses are `running`, `stopped`, or `unknown`; backup statuses from the runtime are `pending`, `complete`, `not-required`, or `failed`. Stopped/unreachable hosts cannot supply fresh runtime evidence: output uses `application: unavailable` and `backup: unverified` for a host that is not running, or returns a structured failure when a running host cannot be reached through SSM. A repeated host stop on an already-stopped EC2 instance returns success for that existing host state, with backup `unverified`; it does not assert that a backup was checked.
 
-Failed operations exit nonzero. If EC2 stop fails after a successful drain, output retains the confirmed application/backup outcomes. Failures before runtime evidence is available report application `unknown` and backup `unverified`. JSON output includes only configured instance names, controlled status values, and bounded error descriptions. Raw AWS stderr, SSM output, Cloudflare responses, deployment identifiers, credentials, RCON secrets, and player identities are not printed. The one exception is `public_ip` after a failed DNS update on a running host. Diagnose detailed errors in private AWS/SSM records; do not paste those records into public logs.
+Failed operations exit nonzero. If EC2 stop fails after a successful drain, output retains the confirmed application/backup outcomes. Failures before runtime evidence is available report application `unknown` and backup `unverified`. JSON output includes only configured instance names, controlled status values, data disk usage numbers, and bounded error descriptions. Raw AWS stderr, SSM output, Cloudflare responses, deployment identifiers, credentials, RCON secrets, and player identities are not printed. The one exception is `public_ip` after a failed DNS update on a running host. Diagnose detailed errors in private AWS/SSM records; do not paste those records into public logs.
+
+## Data disk usage
+
+`start` and `status` add the host's `storage` report for the retained data disk: `size_bytes`, `available_bytes`, which is what Minecraft's unprivileged account can still write, and `used_percent`. The percentage is computed like `df`'s `Use%`, so the blocks ext4 reserves for root count as neither used nor available:
+
+```json
+{"host": "running", "draining": false, "instances": {"survival": {"instance": "survival", "application": "running", "backup": "pending"}}, "storage": {"size_bytes": 5196382208, "available_bytes": 4100000000, "used_percent": 17}}
+```
+
+At 80 percent or more the output also has `storage_warning`, `data disk N% used; grow it (docs/operations/data-disk-capacity.md)`. The warning never changes the exit status and never blocks a start. [Grow the disk](data-disk-capacity.md#grow-the-disk) when it first appears; that takes minutes and no downtime.
+
+A host whose runtime predates this report sends none, and the output then has no `storage` field. A malformed report fails the command and keeps the verified application and backup states; a game that `start` already started keeps running. `stop` and its drain evidence carry no storage report.
 
 ## Public hostname
 
@@ -95,6 +107,8 @@ The operator needs existing access to `ec2:DescribeInstances`, `ec2:StartInstanc
 
 For the public hostname, the same tests use a controlled Cloudflare boundary. They cover the update after start and its order before the game start, no update when the record is current, forced DNS only and TTL 60, the bounded wait for a global address, every failure type leaving the game started with `dns: failed` and `public_ip`, parking only after EC2 reports `stopped` and on a repeat stop, a failed park keeping the drain evidence, `dns` on running, stopped, and transitional hosts, no DNS call without a hostname or for `status`, and hostname and zone validation before any AWS or Cloudflare call. A loopback HTTP server and a stand-in `aws` executable exercise the real adapters: the token appears only in the `Authorization` header, is never printed, is never sent to a redirect target, and is absent from the `aws` process environment.
 
-These tests contact neither AWS nor Cloudflare and do not establish live backup recovery or live DNS behavior.
+For data disk usage, they cover the three validated numbers passing through `start` and `status`, the warning at 80 percent and not at 79, a malformed report failing with the verified states kept, a host that sends no report, and unchanged `stop` and drain output.
+
+These tests contact neither AWS nor Cloudflare and do not establish live backup recovery, live DNS behavior, or a real disk's usage.
 
 AWS interface references: [SendCommand delivery timeout and parameters](https://docs.aws.amazon.com/cli/latest/reference/ssm/send-command.html), [GetCommandInvocation eventual consistency](https://docs.aws.amazon.com/cli/latest/reference/ssm/get-command-invocation.html), and [Run Shell Script execution timeout](https://docs.aws.amazon.com/systems-manager/latest/userguide/documents-command-ssm-plugin-reference.html#aws-runShellScript).

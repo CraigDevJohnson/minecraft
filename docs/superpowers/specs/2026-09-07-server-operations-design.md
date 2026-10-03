@@ -24,7 +24,7 @@ Long-term independent creative, experimental, and guided instances follow [ADR 0
 
 - OpenTofu provisions AWS infrastructure. Initial region `us-west-2` and `m7g.large` (2 vCPU, 8 GiB ARM64) are deployment defaults to confirm in the live plan.
 - One public subnet, Internet gateway, a stable DNS hostname over a public IPv4 address that changes on each host start ([ADR 0002](../../adr/0002-dynamic-public-ipv4-with-cloudflare-hostname.md)), Java TCP 25565, Bedrock UDP 19132. Administration uses Systems Manager; RCON stays local to the host.
-- A 20 GiB root disk is replaceable. A separate encrypted 40 GiB gp3 disk retains instance data across compute replacement. Verify its filesystem identity before starting Minecraft; a missing mount must never silently become a new world on the root disk.
+- A 20 GiB root disk is replaceable. A separate encrypted gp3 disk sized by `data_volume_size_gib` (5 GiB start, grown online; [#22](https://github.com/CraigDevJohnson/minecraft/issues/22)) retains instance data across compute replacement. Verify its filesystem identity before starting Minecraft; a missing mount must never silently become a new world on the root disk.
 - Docker Compose owns the Paper/Geyser/Floodgate runtime. Pin compatible AMI, image digest, Java, server/plugin builds and content when implementing that runtime.
 - Private, encrypted, versioned S3 storage holds backups. A separate versioned state bucket uses locking. Host credentials are temporary and scoped; operator configuration and credentials stay outside Git.
 - Start with a 5 GiB Java heap and measure actual memory/tick performance. Six players alone does not prove capacity, and 8 GiB is not a promise for several simultaneously running instances.
@@ -65,4 +65,4 @@ Live acceptance proves stop/start persistence, host replacement using retained E
 
 Craig authorizes PR merges, account/state bootstrap and the concrete AWS apply/test plan. EULA acceptance is needed before any real Minecraft runtime test, including local tests. It has not been inferred from design approval.
 
-The initial Oregon planning rates were $0.0816/hour compute, $0.08/GB-month gp3 and $0.005/hour retained IPv4. For 40–100 running hours, 60 GB disks and 10 GB average backups, the prior subtotal was about $12–$17/month before tax, charged traffic, monitoring and temporary recovery resources. Recheck rates and actual usage at deployment; the proposed $25 budget alert is a notification, not a spending cap.
+The initial Oregon planning rates were $0.0816/hour compute, $0.08/GB-month gp3 and $0.005/hour retained IPv4. For 40–100 running hours, 60 GB disks and 10 GB average backups, the prior subtotal was about $12–$17/month before tax, charged traffic, monitoring and temporary recovery resources. The [cost review](../../operations/infrastructure.md#cost-review) has the current figures. Recheck rates and actual usage at deployment; the proposed $25 budget alert is a notification, not a spending cap.

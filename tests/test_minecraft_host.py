@@ -557,6 +557,7 @@ class HostCommandTests(unittest.TestCase):
                         self.assertEqual(output["storage_warning"], f"data disk {percent}% used; grow it ({STORAGE_DOC})")
                     else:
                         self.assertNotIn("storage_warning", output)
+        self.assertTrue((ROOT / STORAGE_DOC).is_file(), "the warning names a document that does not exist")
 
     def test_host_runtime_that_reports_no_storage_keeps_the_previous_output(self):
         for action in ("start", "status"):
