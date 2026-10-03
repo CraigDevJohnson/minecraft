@@ -427,6 +427,16 @@ func TestLoadConfig(t *testing.T) {
 			t.Fatalf("%s=%q must be rejected", key, value)
 		}
 	}
+	for _, arn := range []string{"arn:aws:secretsmanager:us-west-2:111122223333:secret:*", "arn:aws:secretsmanager:us-west-2:111122223333:secret:token"} {
+		if _, err := loadConfig(func(key string) string {
+			if key == "CLOUDFLARE_TOKEN_SECRET_ARN" {
+				return arn
+			}
+			return env[key]
+		}); err == nil {
+			t.Fatal("wildcard or partial secret ARN must be rejected")
+		}
+	}
 	if _, err := ParseInstances("survival,survival"); err == nil {
 		t.Fatal("duplicate instances must be rejected")
 	}

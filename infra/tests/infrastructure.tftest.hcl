@@ -432,3 +432,11 @@ run "reject_idle_stop_secret_in_another_region" {
   }
   expect_failures = [var.idle_stop]
 }
+
+run "reject_wildcard_idle_stop_secret_permissions" {
+  command = plan
+  variables {
+    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:*" }
+  }
+  expect_failures = [var.idle_stop]
+}

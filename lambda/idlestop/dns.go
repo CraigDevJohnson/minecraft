@@ -20,6 +20,7 @@ const parkedAddress = "192.0.2.1"
 
 var cloudflareID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 var hostname = regexp.MustCompile(`^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+var secretARN = regexp.MustCompile(`^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$`)
 var apiToken = regexp.MustCompile(`^[\x21-\x7e]+$`)
 
 type SecretsAPI interface {

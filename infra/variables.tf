@@ -170,7 +170,7 @@ variable "idle_stop" {
   })
   default = null
   validation {
-    condition     = var.idle_stop == null || try(can(regex("^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$", var.idle_stop.cloudflare_token_secret_arn)) && split(":", var.idle_stop.cloudflare_token_secret_arn)[3] == var.region && split(":", var.idle_stop.cloudflare_token_secret_arn)[4] == var.account_id, false)
+    condition     = var.idle_stop == null || try(can(regex("^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$", var.idle_stop.cloudflare_token_secret_arn)) && split(":", var.idle_stop.cloudflare_token_secret_arn)[3] == var.region && split(":", var.idle_stop.cloudflare_token_secret_arn)[4] == var.account_id, false)
     error_message = "idle_stop.cloudflare_token_secret_arn must name an administrator-owned secret in the deployment account and region."
   }
   validation {

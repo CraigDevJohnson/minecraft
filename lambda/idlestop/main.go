@@ -45,7 +45,7 @@ func loadConfig(getenv func(string) string) (Config, error) {
 	if cfg.HostID == "" || cfg.StateParameter == "" {
 		return Config{}, errors.New("HOST_ID and STATE_PARAMETER are required")
 	}
-	if len(cfg.PublicHostname) > 253 || !hostname.MatchString(cfg.PublicHostname) || !cloudflareID.MatchString(cfg.CloudflareZoneID) || cfg.CloudflareTokenSecretARN == "" {
+	if len(cfg.PublicHostname) > 253 || !hostname.MatchString(cfg.PublicHostname) || !cloudflareID.MatchString(cfg.CloudflareZoneID) || !secretARN.MatchString(cfg.CloudflareTokenSecretARN) {
 		return Config{}, errors.New("valid hostname, zone and token secret ARN are required")
 	}
 	return cfg, nil
