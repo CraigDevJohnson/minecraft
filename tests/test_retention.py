@@ -86,7 +86,7 @@ class RetentionTests(unittest.TestCase):
                     self.store.current.pop(key, None)
         self.fixture.evidence.update(session=metadata['session'], recovery_point=point)
         result = backup.verify_stop_receipt(self.fixture.source, self.fixture.drain(), self.fixture.journal,
-                                           self.fixture.bootstrap, store=self.store, protect=True)
+                                           self.fixture.bootstrap, store=self.store, protect=True, fresh_drain=self.fixture.drain)
         self.current = result['survival']['selection']
         return result['survival']['receipt']
 

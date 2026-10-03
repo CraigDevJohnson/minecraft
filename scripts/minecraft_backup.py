@@ -217,12 +217,14 @@ def validate_receipt(receipt):
     try:
         fields = {'schema_version', 'status', 'receipt_id', 'instance', 'session', 'recovery_point',
                   'created_at', 'manifest_sha256', 'definition_sha256', 'bootstrap_sha256', 'source',
-                  'marker', 'archive', 'data_size_bytes', 'required_capacity_bytes', 'sequence', 'previous_receipt_id'}
+                  'marker', 'archive', 'data_size_bytes', 'required_capacity_bytes', 'sequence', 'previous_receipt_id', 'boot_id'}
         if (not isinstance(receipt, dict) or set(receipt) != fields
                 or type(receipt['schema_version']) is not int or receipt['schema_version'] != 1
                 or receipt['status'] != 'verified'):
             raise BackupError('malformed or incompatible recovery receipt')
         check_instance(receipt['instance'])
+        if not isinstance(receipt['boot_id'], str) or not re.fullmatch(r'[a-zA-Z0-9._-]{1,128}', receipt['boot_id']):
+            raise BackupError('invalid receipt host boot identity')
         for field in ('receipt_id', 'recovery_point', 'manifest_sha256', 'definition_sha256', 'bootstrap_sha256'):
             check_digest(receipt[field])
         if (not isinstance(receipt['session'], str) or not re.fullmatch(r'[a-zA-Z0-9._-]{1,128}', receipt['session'])
@@ -318,7 +320,7 @@ def create_recovery_receipt(store, source_deployment, instance, evidence, bootst
             raise BackupError('recovery receipt selection cannot regress or change ownership')
     data_bytes = sum(item.get('size_bytes', 0) for item in metadata['files'])
     core = {'schema_version': 1, 'status': 'verified', 'instance': instance, 'session': metadata['session'],
-            'recovery_point': point, 'created_at': metadata['created_at'], 'manifest_sha256': metadata['manifest_sha256'],
+            'recovery_point': point, 'boot_id': evidence.get('boot_id'), 'created_at': metadata['created_at'], 'manifest_sha256': metadata['manifest_sha256'],
             'definition_sha256': metadata['definition_sha256'], 'bootstrap_sha256': bootstrap_sha256,
             'source': {'account_id': source_deployment.get('account_id'), 'region': source_deployment.get('region'),
                        'host_id': source_deployment.get('host_id'), 'backup_bucket_name': source_deployment.get('backup_bucket_name'),
@@ -337,13 +339,26 @@ def _selection_key(instance):
     return f'instances/{instance}/receipts/current.json'
 
 
-def load_current_receipt(store, instance, workspace, *, expected_receipt_id=None, allow_absent=False):
+def load_current_receipt(store, instance, workspace, *, expected_receipt_id=None, allow_absent=False, pending_first=None):
     """The authoritative current selection is mandatory; never choose catalog latest."""
     workspace = Path(workspace)
     path = workspace / 'selection.json'
     revision = store.download_revision(_selection_key(instance), path, max_bytes=MAX_METADATA_BYTES)
     if revision is None:
         if allow_absent and expected_receipt_id is None:
+            if store.has_version_history(_selection_key(instance)):
+                raise BackupError('authoritative selection is missing despite prior version history')
+            keys = store.keys(f'instances/{instance}/receipts/')
+            if keys:
+                if pending_first is None:
+                    raise BackupError('authoritative selection is missing despite immutable receipt history')
+                validate_receipt(pending_first)
+                key = f"instances/{instance}/receipts/{pending_first['receipt_id']}.json"
+                if pending_first['sequence'] != 1 or pending_first['previous_receipt_id'] is not None or keys != [key]:
+                    raise BackupError('missing selection cannot reset an existing receipt authority')
+                _object_receipt(store, key, workspace / 'pending-first.json', MAX_METADATA_BYTES)
+                if read_json(workspace / 'pending-first.json') != pending_first:
+                    raise BackupError('pending first receipt differs from the durable publication intent')
             return None, None
         raise BackupError('authoritative recovery selection is unavailable')
     try:
@@ -368,10 +383,10 @@ def load_current_receipt(store, instance, workspace, *, expected_receipt_id=None
         raise BackupError('malformed authoritative recovery selection') from error
 
 
-def publish_recovery_receipt(store, receipt, workspace, *, previous_selection=None):
+def publish_recovery_receipt(store, receipt, workspace, *, previous_selection=None, pending_first=None):
     validate_receipt(receipt)
     workspace = Path(workspace)
-    current, observed = load_current_receipt(store, receipt['instance'], workspace, allow_absent=True)
+    current, observed = load_current_receipt(store, receipt['instance'], workspace, allow_absent=True, pending_first=pending_first)
     if current and current['receipt_id'] == receipt['receipt_id']:
         check_budget(store)
         return observed
@@ -403,11 +418,17 @@ def publish_recovery_receipt(store, receipt, workspace, *, previous_selection=No
     return verified
 
 
-def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, store=None, protect=False, timeout=3000):
+def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, store=None, protect=False, timeout=3000, fresh_drain=None):
     """Publish exact final-session receipts and durable private selection before disk deletion."""
     from minecraft_instance import private_json, write_json
     if type(timeout) is not int or not 0 < timeout <= 3000:
         raise BackupError('receipt verification timeout must be between 1 and 3000 seconds per instance')
+    if not callable(fresh_drain):
+        raise BackupError('fresh current-host drain retrieval is required before disk removal')
+    if not isinstance(drain, dict) or not isinstance(drain.get('boot_id'), str) or not re.fullmatch(r'[a-zA-Z0-9._-]{1,128}', drain['boot_id']):
+        raise BackupError('private drain requires a valid current host boot identity')
+    if fresh_drain() != drain:
+        raise BackupError('saved private drain differs from freshly retrieved current host state')
     journal_dir = Path(journal_dir)
     if (not journal_dir.is_dir() or journal_dir.is_symlink() or journal_dir.stat().st_uid != os.geteuid()
             or stat.S_IMODE(journal_dir.stat().st_mode) != 0o700):
@@ -431,16 +452,34 @@ def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, sto
                     or drain['instances'][instance].get('application') != 'stopped'
                     or drain['instances'][instance].get('backup') != 'complete'):
                 raise BackupError('a completed final-session backup is required for every configured instance')
-            evidence = {**drain['instances'][instance], **drain['recovery'][instance]}
+            evidence = {**drain['instances'][instance], **drain['recovery'][instance], 'boot_id': drain['boot_id']}
             local_path = journal_dir / f'current-{instance}.json'
             local = private_json(local_path) if local_path.exists() or local_path.is_symlink() else None
-            prior, selection = load_current_receipt(store, instance, workspace, allow_absent=local is None)
+            intent_path = journal_dir / f'first-publication-{instance}.json'
+            intent = private_json(intent_path) if intent_path.exists() or intent_path.is_symlink() else None
+            if intent is not None:
+                if (set(intent) != {'schema_version', 'status', 'receipt_id'} or type(intent['schema_version']) is not int
+                        or intent['schema_version'] != 1 or intent['status'] not in ('pending', 'complete')):
+                    raise BackupError('first-publication intent is malformed')
+                check_digest(intent['receipt_id'])
+            pending_first = None
+            if intent and intent.get('status') == 'pending':
+                candidate = validate_receipt(private_json(journal_dir / f"receipt-{intent['receipt_id']}.json"))
+                if (candidate['instance'] != instance or candidate['sequence'] != 1 or candidate['previous_receipt_id'] is not None
+                        or candidate['boot_id'] != drain['boot_id'] or candidate['session'] != evidence['session']
+                        or candidate['recovery_point'] != evidence['recovery_point']
+                        or candidate['source']['deployment_sha256'] != hashlib.sha256(encoded(deployment)).hexdigest()
+                        or candidate['bootstrap_sha256'] != bootstrap_sha256):
+                    raise BackupError('pending initialization belongs to a different host or final session')
+                pending_first = candidate
+            prior, selection = load_current_receipt(store, instance, workspace, allow_absent=local is None, pending_first=pending_first)
             if local is not None and (selection is None or local != selection):
                 candidate_path = journal_dir / f"receipt-{prior['receipt_id']}.json" if prior else None
                 if (prior is None or prior['previous_receipt_id'] != local.get('receipt_id')
                         or candidate_path is None or not candidate_path.exists() or private_json(candidate_path) != prior
                         or prior['session'] != evidence.get('session') or prior['recovery_point'] != evidence.get('recovery_point')
                         or prior['manifest_sha256'] != evidence.get('manifest_sha256')
+                        or prior['boot_id'] != drain['boot_id']
                         or prior['source']['deployment_sha256'] != hashlib.sha256(encoded(deployment)).hexdigest()
                         or prior['bootstrap_sha256'] != bootstrap_sha256):
                     raise BackupError('durable local recovery selection differs from authoritative S3 selection')
@@ -449,6 +488,7 @@ def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, sto
                 write_json(local_path, selection)
             if (prior and prior['session'] == evidence.get('session') and prior['recovery_point'] == evidence.get('recovery_point')
                     and prior['manifest_sha256'] == evidence.get('manifest_sha256')
+                    and prior['boot_id'] == drain['boot_id']
                     and prior['source']['deployment_sha256'] == hashlib.sha256(encoded(deployment)).hexdigest()
                     and prior['bootstrap_sha256'] == bootstrap_sha256):
                 load_receipt_recovery(store, prior, workspace, bootstrap_sha256=bootstrap_sha256)
@@ -456,8 +496,17 @@ def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, sto
             else:
                 receipt = create_recovery_receipt(store, deployment, instance, evidence, bootstrap_sha256, workspace, previous=prior)
                 write_json(journal_dir / f"receipt-{receipt['receipt_id']}.json", receipt)
-                selection = publish_recovery_receipt(store, receipt, workspace, previous_selection=selection)
+                if prior is None:
+                    if intent is not None and intent != {'schema_version': 1, 'status': 'pending', 'receipt_id': receipt['receipt_id']}:
+                        raise BackupError('first-publication authority already existed or has changed')
+                    write_json(intent_path, {'schema_version': 1, 'status': 'pending', 'receipt_id': receipt['receipt_id']})
+                    pending_first = receipt
+                selection = publish_recovery_receipt(store, receipt, workspace, previous_selection=selection, pending_first=pending_first)
+                if prior is None:
+                    write_json(intent_path, {'schema_version': 1, 'status': 'complete', 'receipt_id': receipt['receipt_id']})
             write_json(journal_dir / f"receipt-{receipt['receipt_id']}.json", receipt)
+            if intent and intent.get('status') == 'pending' and intent.get('receipt_id') == receipt['receipt_id']:
+                write_json(intent_path, {'schema_version': 1, 'status': 'complete', 'receipt_id': receipt['receipt_id']})
             write_json(local_path, selection)
             check_budget(store)
             if protect:
@@ -465,6 +514,9 @@ def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, sto
                 protect_current_selection(store, instance, workspace, expected_selection=selection)
             check_budget(store)
             result[instance] = {'receipt_id': receipt['receipt_id'], 'selection': selection, 'receipt': receipt}
+    if fresh_drain() != drain:
+        raise BackupError('host boot or final-session state changed during receipt verification')
+    check_budget(store)
     return result
 
 

@@ -18,7 +18,7 @@ import uuid
 from minecraft_backup import (BackupError, budget_checker, check_budget, digest_file,
                               load_recovery, load_receipt_recovery, read_json, tree_snapshot)
 from minecraft_content import manifest_digest
-from minecraft_instance import LinuxMachine, OperationError, private_json, write_json
+from minecraft_instance import LinuxMachine, OperationError, private_json, write_json, verify_restore_control_directories
 
 
 def extract_recovery(metadata, archive_path, destination, *, check_deadline=None):
@@ -90,7 +90,8 @@ def verify_restored_receipt(target, metadata, receipt, deployment, *, metadata_r
         for name in ('operation.json', 'runtime/manifest.json', 'runtime/definition.json'):
             if not stat.S_ISREG((target / name).lstat().st_mode):
                 raise BackupError('occupied restore target has untrusted metadata; preserve it for repair')
-        state = read_json(target / 'operation.json')
+        verify_restore_control_directories(target)
+        state = private_json(target / 'operation.json')
         fields = {'phase', 'backup', 'revision', 'session', 'restored_from', 'restore_receipt_id', 'restore_target', 'bootstrap_sha256'}
         if (set(state) not in (fields, fields | {'restore_certified'})
                 or ('restore_certified' in state and type(state['restore_certified']) is not bool)
@@ -140,7 +141,8 @@ def restore(machine, source_deployment, instance, recovery_point, store, *, rece
             raise BackupError("restore requires an absent target instance directory and container")
         if (occupied and receipt is not None and resume and not target.is_symlink()
                 and target.is_dir() and target == target.resolve()):
-            state = read_json(target / 'operation.json')
+            verify_restore_control_directories(target)
+            state = private_json(target / 'operation.json')
             expected_target = {'volume_id': machine.deployment['data_volume_id'],
                                'filesystem_uuid': machine.deployment['data_filesystem_uuid']}
             info = (target / 'operation.json').lstat()
@@ -187,6 +189,7 @@ def restore(machine, source_deployment, instance, recovery_point, store, *, rece
                         raise BackupError('restore target has insufficient available capacity for the selected receipt')
                 staged = workspace / "instance"
                 extract_recovery(metadata, archive, staged, check_deadline=budget_checker(store))
+                (staged / 'runtime').mkdir(mode=0o700)
                 write_json(staged / "runtime/manifest.json", metadata["manifest"])
                 write_json(staged / "runtime/definition.json", metadata["definition"])
                 state = {
@@ -238,7 +241,7 @@ def restore(machine, source_deployment, instance, recovery_point, store, *, rece
         result = {"schema_version": 1, "status": "restored", "instance": instance,
                   "recovery_point": recovery_point, "application": "stopped", "backup": "not-required"}
         if receipt is not None:
-            certify_restore(target, read_json(target / 'operation.json'), store)
+            certify_restore(target, private_json(target / 'operation.json'), store)
             return {**result, 'receipt_id': receipt['receipt_id'], 'resumed': occupied}
         return result
 

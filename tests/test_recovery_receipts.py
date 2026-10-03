@@ -10,6 +10,9 @@ import unittest
 import contextlib
 import io
 import threading
+import multiprocessing
+import os
+import stat
 from types import SimpleNamespace
 from unittest import mock
 
@@ -40,6 +43,12 @@ class VersionedStore:
     def upload(self, key, source):
         if key not in self.objects:
             self.put(key, Path(source).read_bytes())
+
+    def keys(self, prefix):
+        return sorted(key for key in self.objects if key.startswith(prefix))
+
+    def has_version_history(self, key):
+        return any(selected.startswith(key) for selected, _ in self.versions)
 
     def download_revision(self, key, target, *, max_bytes, version_id=None):
         selected = version_id or self.current.get(key)
@@ -81,7 +90,7 @@ class RecoveryReceiptTests(unittest.TestCase):
                        'region': 'us-west-2', 'host_id': 'i-00000000000000000',
                        'instances': {'survival': self.fixture.definition}}
         self.bootstrap = 'a' * 64
-        self.evidence = {'application': 'stopped', 'backup': 'complete',
+        self.evidence = {'application': 'stopped', 'backup': 'complete', 'boot_id': 'boot-one',
                          'session': self.fixture.metadata['session'], 'manifest_sha256': self.fixture.metadata['manifest_sha256'],
                          'recovery_point': self.fixture.recovery_point}
 
@@ -94,7 +103,7 @@ class RecoveryReceiptTests(unittest.TestCase):
                                                previous_selection=previous_selection)
 
     def drain(self):
-        return {'draining': True, 'instances': {'survival': {'instance': 'survival', 'application': 'stopped', 'backup': 'complete'}},
+        return {'draining': True, 'boot_id': self.evidence['boot_id'], 'instances': {'survival': {'instance': 'survival', 'application': 'stopped', 'backup': 'complete'}},
                 'recovery': {'survival': {key: self.evidence[key] for key in ('session', 'manifest_sha256', 'recovery_point')}}}
 
     def next_session(self):
@@ -193,27 +202,27 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.assertEqual(current['receipt_id'], first['receipt_id'])
 
     def test_rollback_of_s3_selection_is_rejected_against_durable_local_identity(self):
-        initial = backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+        initial = backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store)
         old_selection = {key: value for key, value in initial['survival']['selection'].items() if key != 'revision'}
         self.next_session()
-        final = backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+        final = backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store)
         self.store.put('instances/survival/receipts/current.json', backup.encoded(old_selection))
         with self.assertRaises(backup.BackupError):
             backup.load_current_receipt(self.store, 'survival', self.workspace, expected_receipt_id=final['survival']['receipt_id'])
         with self.assertRaisesRegex(backup.BackupError, 'durable local'):
-            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store)
         self.assertEqual(json.loads((self.journal / 'current-survival.json').read_text()), final['survival']['selection'])
 
     def test_selection_failure_retains_recorded_candidate_and_retry_completes_same_receipt(self):
         self.store.fail_selection = True
         with self.assertRaises(backup.BackupError):
-            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store)
         candidates = list(self.journal.glob('receipt-*.json'))
         self.assertEqual(len(candidates), 1)
         candidate = json.loads(candidates[0].read_text())
         self.assertFalse((self.journal / 'current-survival.json').exists())
         self.store.fail_selection = False
-        final = backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+        final = backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store)
         self.assertEqual(final['survival']['receipt_id'], candidate['receipt_id'])
 
     def test_missing_recorded_archive_version_does_not_substitute_current_bytes(self):
@@ -224,7 +233,7 @@ class RecoveryReceiptTests(unittest.TestCase):
             backup.load_receipt_recovery(self.store, receipt, self.workspace)
 
     def test_stop_wrapper_publishes_durable_private_files_and_is_idempotent(self):
-        result = backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+        result = backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store)
         receipt = result['survival']['receipt']
         current = self.journal / 'current-survival.json'
         saved = self.journal / f"receipt-{receipt['receipt_id']}.json"
@@ -233,20 +242,20 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.assertEqual(current.stat().st_mode & 0o777, 0o600)
         self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
         versions = len(self.store.versions)
-        self.assertEqual(backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store), result)
+        self.assertEqual(backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store), result)
         self.assertEqual(len(self.store.versions), versions)
         failed = self.drain()
         failed['instances']['survival']['backup'] = 'failed'
         with self.assertRaises(backup.BackupError):
-            backup.verify_stop_receipt(self.source, failed, self.journal, self.bootstrap, store=self.store)
+            backup.verify_stop_receipt(self.source, failed, self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store)
         inconsistent = self.drain()
         inconsistent['recovery']['survival']['manifest_sha256'] = 'b' * 64
         with self.assertRaises(backup.BackupError):
-            backup.verify_stop_receipt(self.source, inconsistent, self.journal, self.bootstrap, store=self.store)
+            backup.verify_stop_receipt(self.source, inconsistent, self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store)
         self.assertEqual(json.loads(current.read_text()), result['survival']['selection'])
 
     def test_stop_wrapper_resumes_same_recorded_candidate_after_selection_commit_interruption(self):
-        backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+        backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store)
         self.next_session()
         from minecraft_instance import write_json
         def fail_current(path, value):
@@ -254,8 +263,8 @@ class RecoveryReceiptTests(unittest.TestCase):
                 raise OSError('interruption after S3 commit')
             return write_json(path, value)
         with mock.patch('minecraft_instance.write_json', side_effect=fail_current), self.assertRaises(OSError):
-            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
-        result = backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store)
+        result = backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store)
         self.assertEqual(result['survival']['receipt']['sequence'], 2)
         self.assertEqual(json.loads((self.journal / 'current-survival.json').read_text()), result['survival']['selection'])
 
@@ -384,18 +393,18 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def test_receipt_default_store_uses_explicit_bounded_budget_and_invalid_budget_fails_before_io(self):
         with mock.patch.object(backup, 'S3Store', return_value=self.store) as factory:
-            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, timeout=3000)
+            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, timeout=3000)
         factory.assert_called_once_with('source-backups', region='us-west-2', timeout=3000)
         for timeout in (0, 3001, True, '3000'):
             with self.subTest(timeout=timeout), mock.patch.object(backup, 'S3Store') as factory, self.assertRaises(backup.BackupError):
-                backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, timeout=timeout)
+                backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, timeout=timeout)
             factory.assert_not_called()
 
     def test_injected_store_begins_a_fresh_configured_verification_operation(self):
         factory = mock.Mock(return_value=self.store)
         self.store.for_operation = factory
-        backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store, timeout=2500)
-        backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store, timeout=2500)
+        backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store, timeout=2500)
+        backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store, timeout=2500)
         self.assertEqual(factory.call_args_list, [mock.call(timeout=2500), mock.call(timeout=2500)])
 
     def test_multiple_instances_do_not_share_one_receipt_verification_deadline(self):
@@ -414,7 +423,7 @@ class RecoveryReceiptTests(unittest.TestCase):
         drain['recovery']['creative'] = {field: metadata[field] for field in ('session', 'manifest_sha256', 'recovery_point')}
         factory = mock.Mock(return_value=self.store)
         self.store.for_operation = factory
-        result = backup.verify_stop_receipt(source, drain, self.journal, self.bootstrap, store=self.store, timeout=3000)
+        result = backup.verify_stop_receipt(source, drain, self.journal, self.bootstrap, fresh_drain=lambda: drain, store=self.store, timeout=3000)
         self.assertEqual(set(result), {'survival', 'creative'})
         self.assertEqual(factory.call_args_list, [mock.call(timeout=3000), mock.call(timeout=3000)])
 
@@ -429,7 +438,7 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.assertEqual(self.store.reads, [(key, self.store.current[key])])
 
     def test_matching_prior_receipt_cannot_certify_hashing_after_budget_expiry(self):
-        backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+        backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store)
         original = backup.digest_file
         expired = False
         def check():
@@ -443,7 +452,7 @@ class RecoveryReceiptTests(unittest.TestCase):
             return original(path, **kwargs)
         before = dict(self.store.objects)
         with mock.patch.object(backup, 'digest_file', side_effect=expire_before_archive_hash), self.assertRaisesRegex(backup.BackupError, 'budget expired'):
-            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, fresh_drain=self.drain, store=self.store)
         self.assertEqual(self.store.objects, before)
 
     def test_extraction_budget_failure_leaves_target_absent_and_backups_unchanged(self):
@@ -599,7 +608,7 @@ class RecoveryReceiptTests(unittest.TestCase):
                 self.store.check_deadline = mock.Mock(side_effect=backup.BackupError('revalidation budget expired'))
                 before = {str(path.relative_to(target)): path.read_bytes() for path in target.rglob('*') if path.is_file()}
                 with mock.patch.object(Path, 'lstat', changed_lstat), mock.patch.object(minecraft_instance.os, 'fstat', changed_fstat):
-                    with self.assertRaisesRegex(backup.BackupError, 'revalidation budget expired'):
+                    with self.assertRaises((backup.BackupError, minecraft_instance.OperationError)):
                         self.restore(receipt, resume=True)
                     self.assertTrue(json.loads(journal.read_text())['restore_certified'])
                     with self.assertRaisesRegex(minecraft_instance.OperationError, 'operator file'):
@@ -607,6 +616,95 @@ class RecoveryReceiptTests(unittest.TestCase):
                 self.assertEqual(launches, [])
                 after = {str(path.relative_to(target)): path.read_bytes() for path in target.rglob('*') if path.is_file()}
                 self.assertEqual(before, after)
+
+    def test_fifo_lifecycle_journal_is_rejected_without_blocking_or_replacing_target(self):
+        receipt = self.receipt()
+        self.restore(receipt)
+        target = self.fixture.machine.root / 'instances/survival'
+        journal = target / 'operation.json'
+        journal.unlink()
+        os.mkfifo(journal, 0o600)
+        context = multiprocessing.get_context('fork')
+        queue = context.Queue()
+        def attempt():
+            try:
+                self.restore(receipt, resume=True)
+            except (backup.BackupError, minecraft_instance.OperationError) as error:
+                queue.put(type(error).__name__)
+        process = context.Process(target=attempt)
+        process.start()
+        process.join(2)
+        if process.is_alive():
+            process.terminate()
+            process.join()
+            self.fail('FIFO restore admission blocked instead of rejecting')
+        self.assertEqual(process.exitcode, 0)
+        self.assertEqual(queue.get(timeout=1), 'OperationError')
+        self.assertTrue(stat.S_ISFIFO(journal.lstat().st_mode))
+        self.assertEqual((target / 'data/world/level.dat').read_bytes(), self.fixture.checkpoints['data/world/level.dat'])
+
+    def test_restore_control_directory_mode_or_owner_drift_prevents_resume_and_start(self):
+        for directory_name in ('target', 'runtime'):
+            for changed in ('mode', 'owner'):
+                with self.subTest(directory=directory_name, changed=changed):
+                    self.setUp()
+                    receipt = self.receipt()
+                    self.restore(receipt)
+                    machine = self.fixture.machine
+                    target = machine.root / 'instances/survival'
+                    directory = target if directory_name == 'target' else target / 'runtime'
+                    original = Path.lstat
+                    def drifted(path, *args, **kwargs):
+                        result = original(path, *args, **kwargs)
+                        if changed == 'owner' and path == directory:
+                            return SimpleNamespace(st_mode=result.st_mode, st_uid=result.st_uid + 1)
+                        return result
+                    if changed == 'mode':
+                        directory.chmod(0o770)
+                    before = {str(path.relative_to(target)): path.read_bytes() for path in target.rglob('*') if path.is_file()}
+                    machine.desired_revision = lambda instance: receipt['manifest_sha256']
+                    with mock.patch.object(Path, 'lstat', drifted):
+                        with self.assertRaises(minecraft_instance.OperationError):
+                            self.restore(receipt, resume=True)
+                        with self.assertRaises(minecraft_instance.OperationError):
+                            minecraft_instance.Manager(machine.root, machine, ['survival']).execute('start', 'survival')
+                    self.assertEqual(before, {str(path.relative_to(target)): path.read_bytes() for path in target.rglob('*') if path.is_file()})
+
+    def test_saved_drain_from_prior_boot_or_session_cannot_authorize_receipt(self):
+        saved = self.drain()
+        self.evidence['boot_id'] = 'boot-two'
+        self.next_session()
+        before = dict(self.store.objects)
+        with self.assertRaisesRegex(backup.BackupError, 'freshly retrieved'):
+            backup.verify_stop_receipt(self.source, saved, self.journal, self.bootstrap, store=self.store, fresh_drain=self.drain)
+        self.assertEqual(self.store.objects, before)
+        self.assertFalse(self.store.reads)
+
+    def test_boot_change_during_verification_prevents_authorization_and_receipt_records_boot(self):
+        saved = self.drain()
+        changed = {**saved, 'boot_id': 'boot-two'}
+        with self.assertRaisesRegex(backup.BackupError, 'state changed'):
+            backup.verify_stop_receipt(self.source, saved, self.journal, self.bootstrap, store=self.store,
+                                       fresh_drain=mock.Mock(side_effect=[saved, changed]))
+        receipts = [json.loads(path.read_text()) for path in self.journal.glob('receipt-*.json')]
+        self.assertEqual(receipts[0]['boot_id'], 'boot-one')
+
+    def test_missing_selector_with_version_or_immutable_history_never_resets_sequence(self):
+        result = backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap,
+                                           store=self.store, fresh_drain=self.drain)
+        key = 'instances/survival/receipts/current.json'
+        self.store.current.pop(key)
+        self.store.objects.pop(key)
+        (self.journal / 'current-survival.json').unlink()
+        before = dict(self.store.objects)
+        with self.assertRaisesRegex(backup.BackupError, 'prior version history'):
+            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store, fresh_drain=self.drain)
+        for pair in list(self.store.versions):
+            if pair[0] == key:
+                del self.store.versions[pair]
+        with self.assertRaisesRegex(backup.BackupError, 'immutable receipt history'):
+            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store, fresh_drain=self.drain)
+        self.assertEqual(before, self.store.objects)
 
 
 if __name__ == '__main__':

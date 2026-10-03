@@ -275,6 +275,20 @@ class S3Store:
     def keys(self, prefix: str) -> list[str]:
         return self._list_objects(prefix, include_last_modified=False)
 
+    def has_version_history(self, key: str) -> bool:
+        page = self._call('list-object-versions', '--prefix', key, '--max-keys', '1', '--no-paginate')
+        versions, markers = page.get('Versions', []), page.get('DeleteMarkers', [])
+        if (type(page.get('IsTruncated')) is not bool or not isinstance(versions, list) or not isinstance(markers, list)
+                or len(versions) + len(markers) > 1):
+            raise BackupError('authoritative selection history is malformed or unavailable')
+        for item in versions + markers:
+            if not isinstance(item, dict) or not isinstance(item.get('Key'), str) or not item['Key'].startswith(key):
+                raise BackupError('authoritative selection history is outside its key')
+            valid_version(item.get('VersionId'))
+        if page['IsTruncated'] and not versions and not markers:
+            raise BackupError('authoritative selection history is incomplete')
+        return bool(versions or markers)
+
     def delete(self, key: str) -> None:
         self._call("delete-object", "--key", key)
 

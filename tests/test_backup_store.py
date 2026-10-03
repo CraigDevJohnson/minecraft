@@ -220,6 +220,22 @@ class BackupStoreTests(unittest.TestCase):
         args = self.calls()[1]["args"]
         self.assertEqual(args[args.index("--continuation-token") + 1], "page-two")
 
+    def test_authority_history_probe_detects_versions_delete_markers_and_rejects_ambiguity(self):
+        key = 'instances/survival/receipts/current.json'
+        for field in ('Versions', 'DeleteMarkers'):
+            self.steps({'operation': 'list-object-versions', 'response': {'IsTruncated': False,
+                        field: [{'Key': key, 'VersionId': 'prior'}]}})
+            self.assertTrue(self.store.has_version_history(key))
+            args = self.calls()[0]['args']
+            self.assertEqual(args[args.index('--prefix') + 1], key)
+            self.assertEqual(args[args.index('--max-keys') + 1], '1')
+        self.steps({'operation': 'list-object-versions', 'response': {'IsTruncated': False}})
+        self.assertFalse(self.store.has_version_history(key))
+        for page in ({}, {'IsTruncated': True}, {'IsTruncated': False, 'Versions': [{'Key': 'foreign', 'VersionId': 'prior'}]}):
+            self.steps({'operation': 'list-object-versions', 'response': page})
+            with self.assertRaises(backup_store.BackupError):
+                self.store.has_version_history(key)
+
     def test_listing_metadata_fails_closed_on_missing_or_invalid_last_modified(self):
         for value in (None, "not-a-timestamp", 123):
             with self.subTest(value=value):
