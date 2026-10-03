@@ -1,0 +1,75 @@
+name: Minecraft health
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minecraft-health-main
+  cancel-in-progress: false
+
+jobs:
+  health:
+    name: Read-only family health
+    if: >-
+      github.repository == 'CraigDevJohnson/minecraft' &&
+      github.repository_id == '1359070973' &&
+      github.repository_owner_id == '42454849' &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out approved main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Mask AWS role metadata
+        env:
+          HEALTH_ROLE_ID: ${{ secrets.MINECRAFT_HEALTH_ROLE_ID }}
+          HEALTH_ROLE_SESSION: minecraft-health-${{ github.run_id }}
+        run: |
+          if [[ ! "$HEALTH_ROLE_ID" =~ ^AROA[A-Z0-9]{17}$ ]]; then
+            printf 'Health role metadata must be configured before dispatch.\n' >&2
+            exit 1
+          fi
+          printf '::add-mask::%s\n' "$HEALTH_ROLE_ID"
+          printf '::add-mask::%s\n' "$HEALTH_ROLE_SESSION"
+          printf '::add-mask::%s\n' '793680745829'
+      - name: Obtain temporary read-only AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::793680745829:role/minecraft-github-health-readonly
+          aws-region: us-west-2
+          audience: sts.amazonaws.com
+          allowed-account-ids: '793680745829'
+          role-duration-seconds: 900
+          role-session-name: minecraft-health-${{ github.run_id }}
+          unset-current-credentials: true
+          output-credentials: false
+          mask-aws-account-id: true
+          retry-max-attempts: 2
+          action-timeout-s: 60
+      - name: Observe host and public game listeners
+        env:
+          AWS_EC2_METADATA_DISABLED: 'true'
+          AWS_MAX_ATTEMPTS: '1'
+          AWS_PAGER: ''
+        run: |
+          python3 scripts/minecraft_health.py > "$RUNNER_TEMP/minecraft-health.json"
+      - name: Publish sanitized observation
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/minecraft-health.json"; then
+            cat "$RUNNER_TEMP/minecraft-health.json"
+            {
+              printf '### Minecraft health\n\n```json\n'
+              cat "$RUNNER_TEMP/minecraft-health.json"
+              printf '\n```\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
