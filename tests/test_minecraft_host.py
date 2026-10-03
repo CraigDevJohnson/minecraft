@@ -1118,3 +1118,43 @@ with mock.patch.object(host.subprocess,'run') as run:
 """
             result=subprocess.run([sys.executable,'-c',script,str(ROOT/'scripts'),str(path)],capture_output=True,text=True,timeout=3)
             self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_reviewed_source_snapshot_is_checked_and_kept_for_role_assumption(self):
+        identity={'Account':'123456789012','Arn':'arn:aws:sts::123456789012:assumed-role/reviewed-source/session-one','UserId':'AROASOURCEID:session-one'}
+        expected=minecraft_host.source_principal(identity)
+        same={**identity,'Arn':identity['Arn'].replace('session-one','session-two'),'UserId':'AROASOURCEID:session-two'}
+        self.assertEqual(minecraft_host.source_principal(same),expected)
+        client=minecraft_host.AWSCLI('us-west-2','workloads-admin','arn:aws:iam::123456789012:role/minecraft-operator',source_identity=expected)
+        def request(command,**kwargs):
+            if 'export-credentials' in command:
+                self.assertIn('--profile',command)
+                body={'Version':1,'AccessKeyId':'SOURCE_KEY','SecretAccessKey':'SOURCE_SECRET','SessionToken':'SOURCE_TOKEN'}
+            elif 'get-caller-identity' in command:
+                self.assertNotIn('--profile',command)
+                self.assertEqual(kwargs['env']['AWS_SECRET_ACCESS_KEY'],'SOURCE_SECRET')
+                os.environ['AWS_PROFILE']='another-trusted-profile'
+                body=identity
+            elif 'assume-role' in command:
+                self.assertNotIn('--profile',command)
+                self.assertEqual(kwargs['env']['AWS_SECRET_ACCESS_KEY'],'SOURCE_SECRET')
+                self.assertEqual(kwargs['env']['AWS_SESSION_TOKEN'],'SOURCE_TOKEN')
+                body={'Credentials':{'AccessKeyId':'OPERATOR_KEY','SecretAccessKey':'OPERATOR_SECRET','SessionToken':'OPERATOR_TOKEN'},
+                      'AssumedRoleUser':{'Arn':'arn:aws:sts::123456789012:assumed-role/minecraft-operator/minecraft-host'}}
+            else:
+                self.assertEqual(kwargs['env']['AWS_SECRET_ACCESS_KEY'],'OPERATOR_SECRET')
+                body={}
+            return subprocess.CompletedProcess([],0,json.dumps(body),'')
+        with mock.patch.dict(os.environ,{}),mock.patch.object(minecraft_host.subprocess,'run',side_effect=request) as run:
+            client.run('ec2','describe-instances',timeout=30)
+        self.assertEqual(run.call_count,4)
+        self.assertNotIn('SOURCE_SECRET',json.dumps([call.args for call in run.call_args_list]))
+
+    def test_different_trusted_source_is_refused_before_operator_assumption(self):
+        expected={'account_id':'123456789012','principal_arn':'arn:aws:iam::123456789012:user/reviewed','principal_id':'AIDAREVIEWED'}
+        client=minecraft_host.AWSCLI('us-west-2','workloads-admin','arn:aws:iam::123456789012:role/minecraft-operator',source_identity=expected)
+        replies=[subprocess.CompletedProcess([],0,json.dumps({'Version':1,'AccessKeyId':'SOURCE_KEY','SecretAccessKey':'SOURCE_SECRET'}),''),
+                 subprocess.CompletedProcess([],0,json.dumps({'Account':'123456789012','Arn':'arn:aws:iam::123456789012:user/another-trusted','UserId':'AIDAOTHER'}),'')]
+        with mock.patch.object(minecraft_host.subprocess,'run',side_effect=replies) as run:
+            with self.assertRaises(minecraft_host.HostError):client.run('ec2','describe-instances',timeout=30)
+        self.assertEqual(run.call_count,2)
+        self.assertFalse(any('assume-role' in call.args[0] for call in run.call_args_list))

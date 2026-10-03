@@ -18,13 +18,13 @@ import time
 import uuid
 from pathlib import Path
 
-from minecraft_host import HostError, HostSession, verified_executable
+from minecraft_host import AWSCLI, HostError, HostSession, source_principal, verified_executable
 from minecraft_private_transfer import TransferError, build_bundle, private_file, send_bundle
 
 HOST_STOP_FIELDS = frozenset(('instance_state', 'public_ip', 'public_dns', 'associate_public_ip_address'))
 SESSION_ADDRESSES = frozenset(('aws_instance.host[0]', 'aws_volume_attachment.data[0]'))
 SHA256 = re.compile('[0-9a-f]{64}')
-POLICY_FIELDS = frozenset(('schema_version', 'workstation', 'aws_profile', 'aws_cli_path', 'aws_cli_sha256', 'aws_cli_file_identity',
+POLICY_FIELDS = frozenset(('schema_version', 'workstation', 'aws_profile', 'aws_source_identity', 'aws_cli_path', 'aws_cli_sha256', 'aws_cli_file_identity',
                           'session_plugin_path', 'session_plugin_sha256', 'session_plugin_file_identity', 'infra_root', 'variables_file', 'variables_sha256',
                           'source_sha256', 'backend', 'backend_sha256', 'tofu_sha256', 'tofu_file_identity', 'private_inputs_sha256', 'bootstrap_sha256', 'operator_file', 'secret_file', 'journal_dir'))
 
@@ -127,7 +127,7 @@ def backend_digest(root, policy):
                      'access_key', 'secret_key', 'token', 'shared_credentials_file', 'shared_credentials_files', 'shared_config_files',
                      'custom_ca_bundle', 'insecure', 'skip_credentials_validation', 'skip_region_validation',
                      'skip_requesting_account_id', 'skip_s3_checksum', 'force_path_style', 'use_path_style')
-        if any(nonempty(actual.get(name)) for name in forbidden) or actual.get('profile') not in (None, '', policy['aws_profile']):
+        if any(nonempty(actual.get(name)) for name in forbidden) or nonempty(actual.get('profile')):
             raise HostError('initialized backend uses unreviewed endpoints, credentials or insecure settings')
         role = actual.get('assume_role_with_web_identity')
         if nonempty(role):
@@ -179,10 +179,18 @@ def load_policy(path: Path, expected_sha256: str, deployment: dict) -> dict:
         if not SHA256.fullmatch(expected_sha256 or '') or hashlib.sha256(data).hexdigest() != expected_sha256:
             raise HostError('lifecycle policy does not match its reviewed SHA-256')
         policy = json.loads(data)
-        if set(policy) != POLICY_FIELDS or policy['schema_version'] != 3:
+        if set(policy) != POLICY_FIELDS or policy['schema_version'] != 4:
             raise HostError('lifecycle policy schema is invalid')
         if not isinstance(policy['aws_profile'], str) or not re.fullmatch('[A-Za-z0-9_-]{1,64}', policy['aws_profile']):
             raise HostError('lifecycle AWS profile must be explicit and valid')
+        identity=policy['aws_source_identity']
+        if not isinstance(identity,dict) or set(identity)!={'account_id','principal_arn','principal_id'}:
+            raise HostError('reviewed source principal schema is invalid')
+        assumed=isinstance(identity['principal_arn'],str) and ':assumed-role/' in identity['principal_arn']
+        caller={'Account':identity['account_id'],'Arn':identity['principal_arn'] + ('/reviewed-session' if assumed else ''),
+                'UserId':identity['principal_id'] + (':reviewed-session' if assumed else '')}
+        if source_principal(caller)!=identity:
+            raise HostError('reviewed source principal representation is invalid')
         if policy['workstation'] != socket.gethostname():
             raise HostError('lifecycle policy is assigned to another operator workstation')
         for name in ('infra_root', 'variables_file', 'operator_file', 'secret_file', 'journal_dir'):
@@ -368,8 +376,12 @@ def validate_plan(plan: dict, *, present: bool, state: dict, deployment: dict, s
 
 
 class TofuCLI:
-    def __init__(self, policy: dict):
+    def __init__(self, policy: dict, *, source_environment_provider=None):
         self.policy = policy
+        source=AWSCLI(policy['backend']['region'],policy['aws_profile'],executable=policy['aws_cli_path'],
+                      executable_sha256=policy['aws_cli_sha256'],executable_identity=policy['aws_cli_file_identity'],
+                      source_identity=policy['aws_source_identity'])
+        self.source_environment_provider=source_environment_provider or source.source_environment
         self.root = canonical_infra_root(Path(policy['infra_root']))
         metadata = self.root.stat()
         self.root_identity = (metadata.st_dev, metadata.st_ino)
@@ -391,10 +403,17 @@ class TofuCLI:
             raise HostError('reviewed lifecycle source or variables changed before infrastructure execution')
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(('TF_', 'TOFU_', 'AWS_ENDPOINT_URL')) and key not in ('CLOUDFLARE_API_TOKEN', 'AWS_DEBUG', 'AWS_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy')}
-        environment.update(TF_IN_AUTOMATION='true', TF_LOG='OFF', AWS_PROFILE=self.policy['aws_profile'], AWS_IGNORE_CONFIGURED_ENDPOINT_URLS='true')
+        environment.update(TF_IN_AUTOMATION='true', TF_LOG='OFF', AWS_IGNORE_CONFIGURED_ENDPOINT_URLS='true')
         for name in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_SECURITY_TOKEN', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE',
                      'AWS_ROLE_ARN', 'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_ROLE_SESSION_NAME'):
             environment.pop(name, None)
+        environment.pop('AWS_PROFILE',None)
+        environment.pop('AWS_DEFAULT_PROFILE',None)
+        admitted=self.source_environment_provider()
+        if any(not isinstance(admitted.get(name),str) or not admitted[name] for name in ('AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY')):
+            raise HostError('admitted source credentials are unavailable')
+        environment.update({name:admitted[name] for name in ('AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','AWS_SESSION_TOKEN') if name in admitted})
+        execution_tools(self.policy)
         try:
             with tempfile.TemporaryDirectory(prefix='minecraft-trusted-tofu-') as temporary:
                 directory = Path(temporary)
@@ -403,9 +422,14 @@ class TofuCLI:
                 configuration.chmod(0o600)
                 for name in ('config', 'data'):
                     (directory / name).mkdir(mode=0o700)
+                aws_config=directory/'aws-config'
+                aws_credentials=directory/'aws-credentials'
+                for path in (aws_config,aws_credentials):
+                    path.write_bytes(b''); path.chmod(0o600)
                 environment.update(TF_CLI_CONFIG_FILE=str(configuration), TERRAFORM_CONFIG=str(configuration),
                                    XDG_CONFIG_HOME=str(directory / 'config'), XDG_CONFIG_DIRS=str(directory / 'config'),
                                    XDG_DATA_HOME=str(directory / 'data'), XDG_DATA_DIRS=str(directory / 'data'))
+                environment.update(AWS_CONFIG_FILE=str(aws_config),AWS_SHARED_CREDENTIALS_FILE=str(aws_credentials))
                 result = subprocess.run([str(self.binary), f'-chdir={self.root}', *arguments], capture_output=True,
                                         text=True, timeout=timeout, env=environment)
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -452,7 +476,7 @@ class OnDemandSession:
         self.cloudflare = cloudflare
         self.policy = policy
         self.deployment_path = deployment_path
-        self.tofu = tofu or TofuCLI(policy)
+        self.tofu = tofu or TofuCLI(policy,source_environment_provider=self.aws.source_environment)
         self.transfer = transfer or self.transfer_private
         self.directory = Path(policy['journal_dir'])
         self.journal_path = self.directory / 'operation.json'

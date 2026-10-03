@@ -181,6 +181,7 @@ class FakeSession:
 
 
 def pin_fixture_tools(directory, policy):
+    policy.setdefault('aws_source_identity',{'account_id':'123456789012','principal_arn':'arn:aws:iam::123456789012:user/reviewed-source','principal_id':'AIDAREVIEWEDSOURCE'})
     tools = directory / 'reviewed-tools'
     tools.mkdir(exist_ok=True)
     for prefix, filename in (('aws_cli', 'aws'), ('session_plugin', 'session-manager-plugin')):
@@ -682,7 +683,7 @@ class PolicyBoundaryTests(unittest.TestCase):
         self.secret = self.directory / 'rcon.secret'
         self.secret.write_text('PRIVATE_SECRET_DONT_DISCLOSE')
         self.secret.chmod(0o600)
-        self.policy = {'schema_version': 3, 'workstation': socket.gethostname(), 'aws_profile': 'workloads-admin',
+        self.policy = {'schema_version': 4, 'workstation': socket.gethostname(), 'aws_profile': 'workloads-admin',
                        'infra_root': str(self.infra), 'variables_file': str(self.variables),
                        'variables_sha256': lifecycle.digest_file(self.variables), 'source_sha256': DIGEST,
                        'backend': {name: self.backend[name] for name in ('bucket', 'key', 'region')},
@@ -697,6 +698,8 @@ class PolicyBoundaryTests(unittest.TestCase):
                            backend_sha256=lifecycle.backend_digest(self.infra, self.policy),
                            private_inputs_sha256=lifecycle.private_inputs_digest(self.policy))
         pin_fixture_tools(self.directory, self.policy)
+        self.source_environment_patch=mock.patch.object(host.AWSCLI,'source_environment',return_value={'AWS_ACCESS_KEY_ID':'ADMITTED_SOURCE_KEY','AWS_SECRET_ACCESS_KEY':'ADMITTED_SOURCE_SECRET'})
+        self.source_environment_patch.start(); self.addCleanup(self.source_environment_patch.stop)
         self.path = self.directory / 'lifecycle.json'
         self.mock_digest = mock.patch.object(lifecycle, 'source_digest', return_value=DIGEST)
         self.mock_digest.start()
@@ -824,10 +827,12 @@ class PolicyBoundaryTests(unittest.TestCase):
                 mock.patch.object(lifecycle.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{}')) as run:
             client.run('state', 'pull')
         environment = run.call_args.kwargs['env']
-        for name in ('TF_CLI_ARGS', 'TF_VAR_session_present', 'CLOUDFLARE_API_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE', 'AWS_ROLE_ARN', 'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_ROLE_SESSION_NAME', 'AWS_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'AWS_ENDPOINT_URL', 'AWS_ENDPOINT_URL_S3'):
+        for name in ('TF_CLI_ARGS', 'TF_VAR_session_present', 'CLOUDFLARE_API_TOKEN', 'AWS_ROLE_ARN', 'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_ROLE_SESSION_NAME', 'AWS_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'AWS_ENDPOINT_URL', 'AWS_ENDPOINT_URL_S3'):
             self.assertNotIn(name, environment)
         self.assertEqual(environment['AWS_IGNORE_CONFIGURED_ENDPOINT_URLS'],'true')
-        self.assertEqual(environment['AWS_PROFILE'], 'workloads-admin')
+        self.assertNotIn('AWS_PROFILE',environment)
+        self.assertEqual(environment['AWS_ACCESS_KEY_ID'],'ADMITTED_SOURCE_KEY')
+        self.assertEqual(environment['AWS_SECRET_ACCESS_KEY'],'ADMITTED_SOURCE_SECRET')
 
     def test_tofu_uses_fresh_empty_config_instead_of_user_overrides(self):
         client=lifecycle.TofuCLI(self.policy)
@@ -840,6 +845,8 @@ class PolicyBoundaryTests(unittest.TestCase):
             self.assertEqual(config.parent.stat().st_mode & 0o777,0o700)
             self.assertEqual(list(Path(env['XDG_CONFIG_HOME']).iterdir()),[])
             self.assertEqual(list(Path(env['XDG_DATA_HOME']).iterdir()),[])
+            self.assertEqual(Path(env['AWS_CONFIG_FILE']).read_bytes(),b'')
+            self.assertEqual(Path(env['AWS_SHARED_CREDENTIALS_FILE']).read_bytes(),b'')
             self.assertNotEqual(env['XDG_CONFIG_HOME'],'/unreviewed/config')
             return subprocess.CompletedProcess([],0,'{}','')
         with mock.patch.dict(os.environ, {'TF_CLI_CONFIG_FILE':'/unreviewed/dev.tfrc','TERRAFORM_CONFIG':'/unreviewed/legacy.tfrc',
@@ -869,6 +876,24 @@ class PolicyBoundaryTests(unittest.TestCase):
         with mock.patch.dict(os.environ,environment), mock.patch.object(lifecycle.subprocess,'run',side_effect=execute):
             with self.assertRaises(host.HostError):client.run('validate')
         self.assertFalse(marker.exists())
+
+    def test_different_source_principal_refuses_before_tofu_backend_or_provider_command(self):
+        self.source_environment_patch.stop()
+        try:
+            client=lifecycle.TofuCLI(self.policy)
+            replies=[subprocess.CompletedProcess([],0,json.dumps({'Version':1,'AccessKeyId':'SOURCE_KEY','SecretAccessKey':'SOURCE_SECRET'}),''),
+                     subprocess.CompletedProcess([],0,json.dumps({'Account':'123456789012','Arn':'arn:aws:iam::123456789012:user/different-trusted','UserId':'AIDADIFFERENT'}),'')]
+            with mock.patch.object(lifecycle.subprocess,'run',side_effect=replies) as run:
+                with self.assertRaises(host.HostError):client.run('plan')
+            self.assertEqual(run.call_count,2)
+            self.assertTrue(all(call.args[0][0]==self.policy['aws_cli_path'] for call in run.call_args_list))
+        finally:
+            self.source_environment_patch.start()
+
+    def test_explicit_backend_profile_is_rejected_even_when_its_name_matches(self):
+        self.backend['profile']=self.policy['aws_profile']
+        self.metadata.write_text(json.dumps({'backend':{'type':'s3','config':self.backend}}))
+        with self.assertRaises(host.HostError):lifecycle.backend_digest(self.infra,self.policy)
     def test_removal_accepts_only_matching_launch_lookup_state_removal(self):
         current = state(True)
         plan = {'resource_changes': [
