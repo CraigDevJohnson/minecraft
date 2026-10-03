@@ -47,7 +47,7 @@ class BootstrapReleaseTests(unittest.TestCase):
             self.assertEqual(release.verify_installed_release(ROOT,installed,launcher_dir=launchers,service_dir=services,require_root=False),'missing')
             for folder in ('scripts','runtime','bin'):(installed/folder).mkdir(parents=True,mode=0o755)
             launchers.mkdir(); services.mkdir()
-            for name in ('minecraft_instance.py','minecraft_content.py','minecraft_access.py','minecraft_backup.py','minecraft_backup_store.py','minecraft_restore.py'):
+            for name in ('minecraft_instance.py','minecraft_content.py','minecraft_access.py','minecraft_backup.py','minecraft_backup_store.py','minecraft_restore.py','minecraft_retention.py'):
                 shutil.copy2(ROOT/'scripts'/name,installed/'scripts'/name)
             for name in release.RUNTIME:shutil.copy2(ROOT/'runtime'/name,installed/'runtime'/name)
             for name in ('minecraft-instance','minecraft-backup','minecraft-restore'):
