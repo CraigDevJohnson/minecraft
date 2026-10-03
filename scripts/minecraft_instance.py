@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import http.client
+import ipaddress
 import json
 import os
 import re
@@ -16,11 +18,39 @@ import sys
 import tempfile
 import time
 import uuid
+import urllib.request
 from pathlib import Path
 
 
 class OperationError(Exception):
     pass
+
+
+class RefuseMetadataRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *arguments, **keywords):
+        return None
+
+
+def ec2_public_ipv4() -> str:
+    """Current same-port NAT advertisement; fixed IMDSv2 endpoint, never through a proxy."""
+    endpoint = "http://169.254.169.254/latest"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), RefuseMetadataRedirects())
+    try:
+        request = urllib.request.Request(endpoint + "/api/token", method="PUT",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"})
+        with opener.open(request, timeout=5) as reply:
+            token = reply.read(4097).decode("ascii")
+        if not re.fullmatch(r"[\x21-\x7e]{1,4096}", token):
+            raise ValueError("invalid metadata token")
+        request = urllib.request.Request(endpoint + "/meta-data/public-ipv4",
+            headers={"X-aws-ec2-metadata-token": token})
+        with opener.open(request, timeout=5) as reply:
+            address = ipaddress.IPv4Address(reply.read(65).decode("ascii").strip())
+        if not address.is_global or address.is_multicast:
+            raise ValueError("invalid public IPv4")
+        return str(address)
+    except (OSError, http.client.HTTPException, UnicodeError, ValueError) as error:
+        raise OperationError("cannot verify the current EC2 public IPv4 for NetherNet; retry after host networking is ready") from error
 
 
 def ensure_runtime_lock_directory(parent: Path = Path("/run")) -> Path:
@@ -478,6 +508,7 @@ class LinuxMachine:
         if self.config.get("eula_accepted") is not True:
             raise OperationError("explicit private operator EULA acceptance is required")
         password = private_text(self.config["rcon_password_file"]).strip()
+        public_address = self.nethernet_advertise_address()
         manifest = self.manifests[instance]
         runtime = self.runtime(instance)
         artifacts = stage_content(manifest, runtime / "content")
@@ -485,7 +516,8 @@ class LinuxMachine:
         self.verify_storage()
         data = self.root / "instances" / instance / "data"
         compose = render_compose(self.definitions[instance], manifest, data_dir=data, artifacts_dir=artifacts,
-                                 rcon_password=password, eula_accepted=True)
+                                 rcon_password=password, eula_accepted=True,
+                                 nethernet_advertise_address=public_address)
         data.mkdir(mode=0o750, parents=True, exist_ok=True)
         os.chown(data, 1000, 1000)
         active = runtime / "manifest.json"
@@ -496,6 +528,9 @@ class LinuxMachine:
         write_json(active, manifest)
         write_json(runtime / "definition.json", self.definitions[instance])
         write_json(runtime / "compose.json", compose)
+
+    def nethernet_advertise_address(self):
+        return ec2_public_ipv4()
 
     def verify_restored(self, instance, state):
         from minecraft_content import load_definition, load_manifest, manifest_digest

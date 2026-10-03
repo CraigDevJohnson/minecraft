@@ -30,27 +30,35 @@ ARTIFACTS = {
 RELEASE_ASSETS = {"viaversion": "/ViaVersion/ViaVersion/releases/download/{version}/ViaVersion-{version}.jar"}
 
 
-def _approved_geyser(config_version: int) -> dict:
-    return {
+def _approved_geyser(config_version: int, *, dual_transport: bool = False) -> dict:
+    configuration = {
         "config-version": config_version,
         "bedrock": {"address": "0.0.0.0", "port": 19132, "clone-remote-port": False},
         "java": {"auth-type": "floodgate"},
         "log-player-ip-addresses": False,
         "saved-user-logins": [],
     }
+    if dual_transport:
+        configuration["bedrock"].update({"transport": "both", "webrtc-port": 19133,
+                                         "signaling": {"mode": "builtin"}})
+    return configuration
 
 
 # This release's content policy: the exact artifact set and its approved Geyser configuration.
-CONTENT_POLICY = (frozenset(ARTIFACTS), _approved_geyser(8))
+CONTENT_POLICY = (frozenset(ARTIFACTS), _approved_geyser(8, dual_transport=True))
 # Earlier reviewed policies that completed recovery points may still record. They are accepted
 # only when validating recorded recovery metadata, so catalog, status and retention keep working
 # after a content upgrade; this release never stages or launches them.
 RECORDED_CONTENT_POLICIES = (
     CONTENT_POLICY,
+    (frozenset(ARTIFACTS), _approved_geyser(8)),  # survival-2026-10-02-bedrock-2650-viaversion
     (frozenset({"paper", "geyser", "floodgate"}), _approved_geyser(7)),  # survival-2026-09-08-managed-config
 )
 # An earlier policy admits only the exact manifests that were reviewed under it.
-EARLIER_REVIEWED_MANIFESTS = frozenset({"ebe2fd621e9328dd708aa77918dbd96f8039670cddc3364c4f45e582b931c29e"})
+EARLIER_REVIEWED_MANIFESTS = frozenset({
+    "ebe2fd621e9328dd708aa77918dbd96f8039670cddc3364c4f45e582b931c29e",
+    "72f0640583a5fec446ccd299cbbf35c5aff6815a358eb251cece7975bd148c82",
+})
 
 
 def load_definition(path: Path) -> dict:
@@ -112,8 +120,6 @@ def _validate_manifest(manifest: dict, *, recorded: bool = False) -> None:
     approved = [geyser for names, geyser in policies if names == found]
     if not approved:
         raise ContentError("manifest must contain exactly Paper, Geyser, Floodgate and ViaVersion")
-    if found != CONTENT_POLICY[0] and manifest_digest(manifest) not in EARLIER_REVIEWED_MANIFESTS:
-        raise ContentError("recorded manifest is not an exact earlier reviewed release")
     if artifacts[0]["name"] != "paper" or artifacts[0]["version"] != manifest["minecraft_version"]:
         raise ContentError("Paper and Minecraft versions must match")
     managed_files = manifest.get("managed_files")
@@ -127,13 +133,15 @@ def _validate_manifest(manifest: dict, *, recorded: bool = False) -> None:
             or hashlib.sha256(_managed_file_bytes(managed)).hexdigest() != managed["sha256"]):
         raise ContentError("managed configuration checksum mismatch")
     configuration = managed["content"]
-    approved_schema = approved[0]
     # Policy validation only: staged bytes always come from the manifest payload.
     # JSON equality keeps scalar types distinct (8.0/8 and false/0 differ).
     if (not isinstance(configuration, dict)
-            or _managed_file_bytes(managed) != _managed_file_bytes({"content": approved_schema})):
-        raise ContentError(f"managed configuration schema must preserve the approved Geyser v{approved_schema['config-version']} "
+            or not any(_managed_file_bytes(managed) == _managed_file_bytes({"content": schema}) for schema in approved)):
+        raise ContentError("managed configuration schema must preserve the approved Geyser "
                            "authentication, network and privacy settings")
+    if ((found, configuration) != CONTENT_POLICY
+            and manifest_digest(manifest) not in EARLIER_REVIEWED_MANIFESTS):
+        raise ContentError("recorded manifest is not an exact earlier reviewed release")
 
 
 def _managed_file_bytes(managed: dict) -> bytes:
@@ -208,7 +216,8 @@ def stage_content(manifest: dict, cache_dir: Path) -> Path:
 
 
 def render_compose(definition: dict, manifest: dict, *, data_dir: Path, artifacts_dir: Path,
-                   rcon_password: str, eula_accepted: bool, bind_address: str = "0.0.0.0") -> dict:
+                   rcon_password: str, eula_accepted: bool, bind_address: str = "0.0.0.0",
+                   nethernet_advertise_address: str | None = None) -> dict:
     """Return Compose JSON; callers keep the generated file private (mode 0600)."""
     _validate_definition(definition)
     _validate_manifest(manifest)
@@ -220,6 +229,18 @@ def render_compose(definition: dict, manifest: dict, *, data_dir: Path, artifact
         ipaddress.IPv4Address(bind_address)
     except ipaddress.AddressValueError as error:
         raise ContentError("game bind address must be an IPv4 address") from error
+    if definition["java_port"] == definition["bedrock_port"] or definition["bedrock_port"] == 19133:
+        raise ContentError("Java/signaling TCP and RakNet/WebRTC UDP ports must be distinct")
+    if nethernet_advertise_address is not None:
+        if not isinstance(nethernet_advertise_address, str):
+            raise ContentError("NetherNet advertisement must be one IPv4 address")
+        try:
+            address = ipaddress.IPv4Address(nethernet_advertise_address)
+        except ipaddress.AddressValueError as error:
+            raise ContentError("NetherNet advertisement must be one IPv4 address") from error
+        if address.is_multicast or (not address.is_global and not (
+                bind_address == "127.0.0.1" and address == ipaddress.IPv4Address("127.0.0.1"))):
+            raise ContentError("NetherNet advertisement must be a global IPv4 address outside local validation")
     data_dir, artifacts_dir = Path(data_dir), Path(artifacts_dir)
     if not data_dir.is_absolute() or not artifacts_dir.is_absolute():
         raise ContentError("runtime bind mounts require absolute paths")
@@ -263,8 +284,13 @@ def render_compose(definition: dict, manifest: dict, *, data_dir: Path, artifact
             "SYNC_SKIP_NEWER_IN_DESTINATION": "FALSE",
             "REPLACE_ENV_DURING_SYNC": "FALSE",
             "LOG_TIMESTAMP": "TRUE",
+            **({"JVM_OPTS": f"-DgeyserAdvertiseAddresses={nethernet_advertise_address}"}
+               if nethernet_advertise_address is not None else {}),
         },
-        "ports": [f"{bind_address}:{definition['java_port']}:25565/tcp", f"{bind_address}:{definition['bedrock_port']}:19132/udp"],
+        "ports": [f"{bind_address}:{definition['java_port']}:25565/tcp",
+                  f"{bind_address}:{definition['bedrock_port']}:19132/udp",
+                  f"{bind_address}:{definition['bedrock_port']}:19132/tcp",
+                  f"{bind_address}:19133:19133/udp"],
         "volumes": [bind(data_dir, "/data", False), bind(artifacts_dir / "paper.jar", "/runtime/paper.jar", True), bind(artifacts_dir / "plugins", "/plugins", True)],
         "healthcheck": {"test": ["CMD", "mc-health"], "interval": "10s", "timeout": "5s", "start_period": "180s", "retries": 6},
         "logging": {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}},

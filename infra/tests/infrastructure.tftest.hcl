@@ -109,8 +109,13 @@ run "game_only_ingress_and_ssm_only_administration" {
   command = plan
 
   assert {
-    condition     = length(aws_vpc_security_group_ingress_rule.game) == 2 && aws_vpc_security_group_ingress_rule.game["java"].ip_protocol == "tcp" && aws_vpc_security_group_ingress_rule.game["java"].from_port == 25565 && aws_vpc_security_group_ingress_rule.game["java"].to_port == 25565 && aws_vpc_security_group_ingress_rule.game["bedrock"].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.game["bedrock"].from_port == 19132 && aws_vpc_security_group_ingress_rule.game["bedrock"].to_port == 19132
-    error_message = "Only Java TCP 25565 and Bedrock UDP 19132 may accept inbound connections; SSH and RCON must remain closed."
+    condition     = aws_vpc_security_group_egress_rule.webrtc.ip_protocol == "udp" && aws_vpc_security_group_egress_rule.webrtc.from_port == 1 && aws_vpc_security_group_egress_rule.webrtc.to_port == 65535 && aws_vpc_security_group_egress_rule.webrtc.cidr_ipv4 == "0.0.0.0/0" && aws_vpc_security_group_egress_rule.webrtc.security_group_id == aws_security_group.host.id
+    error_message = "The full ICE agent needs UDP egress to arbitrary client/NAT candidate ports, with no extra TCP egress."
+  }
+
+  assert {
+    condition     = length(aws_vpc_security_group_ingress_rule.game) == 4 && aws_vpc_security_group_ingress_rule.game["java"].ip_protocol == "tcp" && aws_vpc_security_group_ingress_rule.game["java"].from_port == 25565 && aws_vpc_security_group_ingress_rule.game["java"].to_port == 25565 && aws_vpc_security_group_ingress_rule.game["bedrock"].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.game["bedrock"].from_port == 19132 && aws_vpc_security_group_ingress_rule.game["bedrock"].to_port == 19132 && aws_vpc_security_group_ingress_rule.game["signaling"].ip_protocol == "tcp" && aws_vpc_security_group_ingress_rule.game["signaling"].from_port == 19132 && aws_vpc_security_group_ingress_rule.game["signaling"].to_port == 19132 && aws_vpc_security_group_ingress_rule.game["webrtc"].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.game["webrtc"].from_port == 19133 && aws_vpc_security_group_ingress_rule.game["webrtc"].to_port == 19133 && alltrue([for rule in aws_vpc_security_group_ingress_rule.game : rule.cidr_ipv4 == "0.0.0.0/0" && rule.security_group_id == aws_security_group.host.id])
+    error_message = "Only Java TCP 25565, RakNet UDP 19132, signaling TCP 19132 and WebRTC UDP 19133 may accept inbound connections; SSH and RCON must remain closed."
   }
 
   assert {

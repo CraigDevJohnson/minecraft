@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "survival-2026-10-02-bedrock-2650-viaversion",
+  "revision": "survival-2026-10-03-dual-transport",
   "platform": "linux/arm64",
   "image": "itzg/minecraft-server@sha256:fa70ecc878ed641a89bc7dceaf43d8160faa351d9da4b48a2d9973f6ac9cb594",
   "image_source_revision": "da99021d880273b4fd5c1bf86a9a8d2489e0be43",
@@ -48,13 +48,20 @@
         "bedrock": {
           "address": "0.0.0.0",
           "port": 19132,
-          "clone-remote-port": false
+          "clone-remote-port": false,
+          "transport": "both",
+          "webrtc-port": 19133,
+          "signaling": {
+            "mode": "builtin"
+          }
         },
-        "java": {"auth-type": "floodgate"},
+        "java": {
+          "auth-type": "floodgate"
+        },
         "log-player-ip-addresses": false,
         "saved-user-logins": []
       },
-      "sha256": "a98d3442120aa0cfe4eb63e28eebb935b01e7c52b0aa1d8e55bb6d618d1c442f"
+      "sha256": "961fc91c79c38f8e09fd14d1e959b06522ec72b595b933e78fef83563e4b8e42"
     }
   ]
 }

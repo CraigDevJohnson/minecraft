@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import socket
 import struct
@@ -68,6 +69,63 @@ class StatusServer:
 
 
 class ValidateRuntimeTests(unittest.TestCase):
+    def test_nethernet_discovery_and_denial_leave_authenticated_transport_unverified(self):
+        metadata = {"protocol": 2193, "version": "26.51", "maxPlayers": 6, "players": 0,
+                    "transportLayer": 2, "connection": 4, "onlineAuth": True, "selfSignedAuth": False}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.assert_path("/v1/join")
+                body = json.dumps(metadata).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                self.assert_path("/v1/join/native-probe")
+                if self.rfile.read(int(self.headers["Content-Length"])) != b"v=0\r\n":
+                    raise AssertionError("unexpected synthetic request")
+                self.send_response(401)
+                self.end_headers()
+
+            def assert_path(self, expected):
+                if self.path != expected:
+                    raise AssertionError("unexpected signaling path")
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = runtime.nethernet_signaling(server.server_port)
+            self.assertEqual(result["discovery"], metadata)
+            self.assertEqual(result["unauthenticated_admission"], "denied")
+            self.assertEqual(result["authenticated_geyser_peer"], "unverified")
+            self.assertEqual(result["real_bedrock_join"], "unverified")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(5)
+
+    def test_nethernet_metadata_refuses_generic_http_stale_protocol_and_disabled_authentication(self):
+        valid = {"protocol": 2193, "version": "26.51", "maxPlayers": 6, "players": 0,
+                 "transportLayer": 2, "connection": 4, "onlineAuth": True, "selfSignedAuth": False}
+        for invalid in ({}, [], dict(valid, protocol=2169), dict(valid, maxPlayers="6"),
+                        dict(valid, transportLayer=1), dict(valid, connection=3),
+                        dict(valid, onlineAuth=False), dict(valid, selfSignedAuth=True),
+                        dict(valid, players=True), dict(valid, players=7)):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                runtime.check_nethernet_metadata(invalid)
+
+    def test_signaling_port_is_free_for_both_protocols(self):
+        port = runtime.free_signaling_port()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+            tcp.bind(("127.0.0.1", port))
+            udp.bind(("127.0.0.1", port))
+
     def test_handshake_requests_status_with_the_exact_client_protocol(self):
         self.assertEqual(runtime.varint(777), b"\x89\x06")
         self.assertEqual(runtime.varint(776), b"\x88\x06")

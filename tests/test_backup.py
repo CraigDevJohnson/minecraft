@@ -241,6 +241,27 @@ class BackupTests(unittest.TestCase):
         self.assertEqual((status['completion'], status['invalid_points']), ('unavailable', 1))
         self.assertEqual(backup.prune(self.store, 'survival', self.workspace)['outcome'], 'pending')
 
+    def test_raknet_v8_points_remain_valid_and_retained_after_dual_transport_upgrade(self):
+        current = json.loads((REPO / 'runtime/content.json').read_text())
+        previous = json.loads((REPO / 'tests/fixtures/content-survival-2026-10-02-bedrock-2650-viaversion.json').read_text())
+        self.use_manifest(previous)
+        points = []
+        with mock.patch.object(backup, '_validate_manifest'):
+            for sequence in range(15):
+                self.request['session'] = f'raknet-v8-{sequence}'
+                self.record_session()
+                points.append(self.publish()['recovery_point'])
+        self.use_manifest(current)
+        self.request['session'] = 'dual-transport'
+        self.record_session()
+        latest = self.publish()['recovery_point']
+        self.assertEqual(backup.status(self.store, 'survival', self.workspace)['invalid_points'], 0)
+        self.assertEqual(backup.load_recovery(self.store, 'survival', points[-1], self.workspace)[0]['manifest'], previous)
+        pruned = backup.prune(self.store, 'survival', self.workspace)
+        self.assertEqual((pruned['outcome'], pruned['removed']), ('complete', 2))
+        retained = backup.status(self.store, 'survival', self.workspace)['recovery_points']
+        self.assertEqual([point['recovery_point'] for point in retained], [latest, *reversed(points[2:])])
+
     def test_retention_keeps_fourteen_and_latest_after_long_inactivity(self):
         points = []
         for day in range(1, 17):

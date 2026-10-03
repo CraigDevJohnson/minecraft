@@ -43,8 +43,10 @@ resource "aws_security_group" "host" {
 
 resource "aws_vpc_security_group_ingress_rule" "game" {
   for_each = {
-    java    = { protocol = "tcp", port = 25565 }
-    bedrock = { protocol = "udp", port = 19132 }
+    java      = { protocol = "tcp", port = 25565 }
+    bedrock   = { protocol = "udp", port = 19132 }
+    signaling = { protocol = "tcp", port = 19132 }
+    webrtc    = { protocol = "udp", port = 19133 }
   }
   security_group_id = aws_security_group.host.id
   description       = "${each.key} clients; runtime family allowlist is required"
@@ -62,4 +64,16 @@ resource "aws_vpc_security_group_egress_rule" "web" {
   ip_protocol       = "tcp"
   from_port         = tonumber(each.value)
   to_port           = tonumber(each.value)
+}
+
+# The pinned native ICE agent initiates checks to each client's UDP candidate port.
+# Those ports are client/NAT-selected, not the server's fixed listening port 19133.
+# No external signaling, STUN or TURN service is selected by the builtin mode.
+resource "aws_vpc_security_group_egress_rule" "webrtc" {
+  security_group_id = aws_security_group.host.id
+  description       = "NetherNet ICE checks to client-selected UDP candidate ports"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "udp"
+  from_port         = 1
+  to_port           = 65535
 }
