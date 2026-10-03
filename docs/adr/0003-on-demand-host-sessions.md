@@ -1,0 +1,15 @@
+# ADR 0003: Operator-owned on-demand host sessions
+
+Status: Accepted design, 2026-10-03; local implementation is opt-in. Live migration, recurring deletion policy, and startup timing remain separate reviewed evidence.
+
+Craig approved the two-phase on-demand design for #23/#24. In phase one, `on-demand-host` removes the replaceable host and root after a verified drain and confirmed graceful EC2 stop for safe detach, retaining the independently protected data disk. Operator start recreates the host through the existing OpenTofu root. Network, host role/profile, backups, budget and state remain outside the session lifecycle. The default `retained-host` behavior stays compatible. An absent host is a valid version-2 handoff only in the opt-in mode.
+
+Use the reviewed Ubuntu ARM64 AMI and automate the existing prerequisites/runtime installers. Pin a deterministic, credential-free runtime archive by SHA-256 under `bootstrap/releases/<digest>/runtime.tar.gz` in the private backup bucket. The host reads only that immutable release prefix. Introduce an image build only if measured startup requires it. The provisional target is 180 seconds from operator start through endpoint/game readiness, measured on the live deployment.
+
+The designated workstation owns one lock across drain, plan/apply, handoff, private setup, game readiness and DNS. Its private journal binds account, profile, backend lineage/serial, source/input/release digests and exact resource inventory. Actual saved plans may only create or delete the session host and its orderly attachment; a partial apply can regenerate only the independently verified remaining changes in that same operation. Unexpected ownership, changed protected resources, replacement/update actions, drift, deferred changes and changed inputs refuse execution.
+
+Deployment, operator configuration and the RCON secret remain owner-only local files and root-owned mode-0600 installed files. Transfer them through an SSM loopback port-forwarding session to a bounded single-use digest-bound receiver with a fixed allowlist. Payload bytes never enter Run Command, user data, Terraform values, the runtime archive or diagnostic output. The operator remains required to recreate a host. Headless operation is a separate credential-path decision.
+
+Reject the existing `idle_stop` integration with on-demand mode because it binds permissions and environment to one host ID. The data-volume removal phase (#24) needs its own protection/ownership migration and independently verified durable versioned S3 recovery receipt before deletion; phase one keeps `aws_ebs_volume.data.prevent_destroy` unchanged.
+
+This extends ADR 0001's replaceable-host boundary and preserves ADR 0002's DNS-only endpoint. Neither an offline passing test nor a merged PR establishes no-host/root live proof or startup timing. See [the operator workflow](../operations/on-demand-host.md).

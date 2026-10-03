@@ -115,3 +115,7 @@ For data disk usage, they cover the three validated numbers passing through `sta
 These tests contact neither AWS nor Cloudflare and do not establish live backup recovery, live DNS behavior, or a real disk's usage.
 
 AWS interface references: [SendCommand delivery timeout and parameters](https://docs.aws.amazon.com/cli/latest/reference/ssm/send-command.html), [GetCommandInvocation eventual consistency](https://docs.aws.amazon.com/cli/latest/reference/ssm/get-command-invocation.html), and [Run Shell Script execution timeout](https://docs.aws.amazon.com/systems-manager/latest/userguide/documents-command-ssm-plugin-reference.html#aws-runShellScript).
+
+## Opt-in absent-host lifecycle
+
+The version-2 `on-demand-host` handoff can name an absent host. That mode requires the separately reviewed workstation policy (`--lifecycle` and `--policy-sha256`) and replaces EC2 stop/start with guarded OpenTofu session removal/recreation. The protected data disk remains retained. Follow [on-demand host sessions](on-demand-host.md) for migration, private transfer, interruption repair, recurring authority and actual cold-start timing. Existing handoffs retain the commands above.

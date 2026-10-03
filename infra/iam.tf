@@ -72,3 +72,17 @@ resource "aws_iam_role_policy" "backups" {
     ]
   })
 }
+
+resource "aws_iam_role_policy" "bootstrap" {
+  count = var.lifecycle_mode == "retained-host" ? 0 : 1
+  name  = "read-pinned-bootstrap"
+  role  = aws_iam_role.host.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["s3:GetObject"]
+      Resource = ["${local.backup_bucket_arn}/bootstrap/releases/${var.bootstrap_sha256}/*"]
+    }]
+  })
+}

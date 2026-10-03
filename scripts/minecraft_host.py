@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import ipaddress
 import json
 import os
 import re
 import ssl
+import stat
 import subprocess
 import time
 import urllib.error
@@ -44,16 +46,140 @@ class InvocationNotVisible(HostError):
     """Run Command is eventually consistent immediately after submission."""
 
 
+def verified_executable(path, digest, identity):
+    """Check a reviewed regular launcher under the trusted platform runtime."""
+    path = Path(path)
+    try:
+        if not path.is_absolute() or any(value.is_symlink() for value in (path, *path.parents)):
+            raise HostError('reviewed executable path must be canonical and regular')
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.geteuid())
+                    or stat.S_IMODE(info.st_mode) & 0o022 or not stat.S_IMODE(info.st_mode) & 0o111):
+                raise HostError('reviewed executable is not trusted and executable')
+            actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+        if (not isinstance(identity, dict) or set(identity) != {'device', 'inode'}
+                or any(type(value) is not int for value in identity.values())
+                or identity != {'device': info.st_dev, 'inode': info.st_ino} or actual != digest):
+            raise HostError('reviewed executable identity or digest changed')
+        return str(path)
+    except (OSError, TypeError, ValueError) as exc:
+        raise HostError('cannot validate reviewed executable') from exc
+
+
+def source_principal(response):
+    """Stable caller identity; assumed-role session names alone are renewable."""
+    try:
+        account, arn, identifier = (response[name] for name in ('Account','Arn','UserId'))
+        if (not isinstance(account,str) or not re.fullmatch(r'[0-9]{12}',account)
+                or not isinstance(arn,str) or not arn.startswith('arn:aws:')
+                or not isinstance(identifier,str) or not identifier):
+            raise ValueError
+        parts=arn.split(':',5)
+        if len(parts)!=6 or parts[4]!=account:
+            raise ValueError
+        if parts[2]=='sts' and parts[5].startswith('assumed-role/'):
+            if len(parts[5].split('/'))!=3 or not all(parts[5].split('/')) or ':' not in identifier:
+                raise ValueError
+            arn=arn.rsplit('/',1)[0]
+            identifier=identifier.split(':',1)[0]
+        elif parts[2]!='iam' or not (parts[5]=='root' or parts[5].startswith('user/')):
+            raise ValueError
+        if not re.fullmatch(r'[A-Za-z0-9]{1,128}',identifier):
+            raise ValueError
+        return {'account_id':account,'principal_arn':arn,'principal_id':identifier}
+    except (ValueError,KeyError,TypeError) as exc:
+        raise HostError('source caller identity is invalid or unsupported') from exc
+
+
 class AWSCLI:
-    def __init__(self, region: str):
+    def __init__(self, region: str, profile: str | None = None, role_arn: str | None = None,
+                 *, executable=None, executable_sha256=None, executable_identity=None, source_identity=None, credential_environment=None):
         self.region = region
+        self.profile = profile
+        self.role_arn = role_arn
+        self.credentials = None
+        self.credentials_deadline = 0
+        self.executable = executable
+        self.executable_sha256 = executable_sha256
+        self.executable_identity = executable_identity
+        self.source_identity = source_identity
+        self.credential_environment = credential_environment
+
+    def command_path(self):
+        if self.executable is None:
+            return 'aws'
+        return verified_executable(self.executable, self.executable_sha256, self.executable_identity)
 
     monotonic = staticmethod(time.monotonic)
     sleep = staticmethod(time.sleep)
 
+    def environment(self) -> dict:
+        if self.credential_environment is not None:
+            return dict(self.credential_environment)
+        transport_overrides = {'AWS_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'PYTHONPATH', 'PYTHONHOME'}
+        environment = {key: value for key, value in os.environ.items()
+                       if key != CLOUDFLARE_TOKEN and key not in transport_overrides and not key.startswith("AWS_ENDPOINT_URL")}
+        environment["AWS_IGNORE_CONFIGURED_ENDPOINT_URLS"] = "true"
+        if self.profile is not None:
+            for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
+                         "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_SESSION_NAME"):
+                environment.pop(name, None)
+        if self.role_arn is not None:
+            if self.credentials is None or self.monotonic() >= self.credentials_deadline:
+                source = self.source_client()
+                if self.source_identity is not None:
+                    source.profile = None
+                    source.credential_environment = self.source_environment()
+                response = source.run("sts", "assume-role", "--role-arn", self.role_arn,
+                         "--role-session-name", "minecraft-host", "--duration-seconds", "3600", timeout=30)
+                credentials = response.get("Credentials")
+                role_name = self.role_arn.rsplit("/", 1)[-1]
+                account = self.role_arn.split(":")[4]
+                expected = f"arn:aws:sts::{account}:assumed-role/{role_name}/minecraft-host"
+                if (not isinstance(credentials, dict) or response.get("AssumedRoleUser", {}).get("Arn") != expected
+                        or any(not isinstance(credentials.get(name), str) or not credentials[name] for name in ("AccessKeyId", "SecretAccessKey", "SessionToken"))):
+                    raise HostError("STS did not confirm the reviewed temporary operator role")
+                self.credentials = {"AWS_ACCESS_KEY_ID": credentials["AccessKeyId"], "AWS_SECRET_ACCESS_KEY": credentials["SecretAccessKey"],
+                                    "AWS_SESSION_TOKEN": credentials["SessionToken"]}
+                self.credentials_deadline = self.monotonic() + 3000
+            for name in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SECURITY_TOKEN"):
+                environment.pop(name, None)
+            environment.update(self.credentials)
+        return environment
+
+    def source_client(self):
+        return AWSCLI(self.region,self.profile,executable=self.executable,executable_sha256=self.executable_sha256,
+                      executable_identity=self.executable_identity)
+
+    def source_environment(self):
+        if self.source_identity is None:
+            raise HostError('reviewed source principal is required for lifecycle credentials')
+        source=self.source_client()
+        exported=source.run('configure','export-credentials','--format','process',timeout=30)
+        if (type(exported.get('Version')) is not int or exported['Version']!=1 or any(not isinstance(exported.get(name),str) or not exported[name]
+                                             for name in ('AccessKeyId','SecretAccessKey'))
+                or exported.get('SessionToken') is not None and (not isinstance(exported['SessionToken'],str) or not exported['SessionToken'])):
+            raise HostError('source profile did not export valid temporary credentials')
+        environment=source.environment()
+        for name in ('AWS_PROFILE','AWS_DEFAULT_PROFILE','AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','AWS_SESSION_TOKEN','AWS_SECURITY_TOKEN'):
+            environment.pop(name,None)
+        environment.update(AWS_ACCESS_KEY_ID=exported['AccessKeyId'],AWS_SECRET_ACCESS_KEY=exported['SecretAccessKey'])
+        if exported.get('SessionToken'):
+            environment['AWS_SESSION_TOKEN']=exported['SessionToken']
+        source.profile=None
+        source.credential_environment=environment
+        if source_principal(source.run('sts','get-caller-identity',timeout=30))!=self.source_identity:
+            raise HostError('source principal differs from reviewed lifecycle identity')
+        return dict(environment)
+
     def run(self, service: str, operation: str, *arguments: str, timeout: float) -> dict:
-        command = ["aws", "--region", self.region, "--output", "json", "--no-cli-pager", "--no-cli-auto-prompt", service, operation, *arguments]
-        environment = {key: value for key, value in os.environ.items() if key != CLOUDFLARE_TOKEN}
+        command = [self.command_path(), "--region", self.region, "--output", "json", "--no-cli-pager", "--no-cli-auto-prompt", service, operation, *arguments]
+        if self.profile is not None and self.role_arn is None:
+            command[1:1] = ["--profile", self.profile]
+        environment = self.environment()
+        command[0] = self.command_path()  # credential refresh may have run another process
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False, env=environment)
         except FileNotFoundError as exc:
@@ -134,8 +260,19 @@ def load_deployment(path: Path) -> dict:
     account_id, host_id, region, instances = (deployment.get(key) for key in ("account_id", "host_id", "region", "instances"))
     if not isinstance(account_id, str) or not re.fullmatch(r"[0-9]{12}", account_id):
         raise HostError("deployment account_id must be a 12-digit AWS account ID")
-    if not isinstance(host_id, str) or not re.fullmatch(r"i-(?:[a-f0-9]{8}|[a-f0-9]{17})", host_id):
+    lifecycle = deployment.get("lifecycle_mode", "retained-host")
+    if lifecycle not in ("retained-host", "on-demand-host"):
+        raise HostError("deployment lifecycle mode is invalid")
+    absent = lifecycle == "on-demand-host" and deployment.get("schema_version") == 2 and deployment.get("session_present") is False and host_id is None
+    if not absent and (not isinstance(host_id, str) or not re.fullmatch(r"i-(?:[a-f0-9]{8}|[a-f0-9]{17})", host_id)):
         raise HostError("deployment host_id is invalid")
+    if lifecycle == "on-demand-host":
+        if deployment.get("schema_version") != 2 or type(deployment.get("session_present")) is not bool or bool(host_id) != deployment["session_present"]:
+            raise HostError("deployment has an invalid on-demand session handoff")
+        for key, expression in (("data_volume_id", r"vol-[0-9a-f]{17}"), ("data_filesystem_uuid", r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"),
+                                ("bootstrap_sha256", r"[0-9a-f]{64}"), ("backup_bucket_name", r"[a-z][a-z0-9-]{1,61}[a-z0-9]")):
+            if not isinstance(deployment.get(key), str) or not re.fullmatch(expression, deployment[key]):
+                raise HostError("deployment on-demand identity is invalid")
     if not isinstance(region, str) or not re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-[0-9]+", region):
         raise HostError("deployment region is invalid")
     if not isinstance(instances, dict) or not instances or any(not INSTANCE_ID.fullmatch(key) or not isinstance(value, dict) for key, value in instances.items()):
@@ -286,6 +423,9 @@ class HostSession:
 
     def remote(self, action: str, instance=None) -> dict:
         command = REMOTE_COMMAND + " " + action + (" " + instance if instance else "")
+        return self.execute_shell(command, action)
+
+    def execute_shell(self, command: str, action: str) -> dict:
         response = self.call("ssm", "send-command", "--instance-ids", self.deployment["host_id"], "--document-name", "AWS-RunShellScript", "--timeout-seconds", "60", "--parameters", json.dumps({"commands": [command], "executionTimeout": [str(REMOTE_TIMEOUT)]}))
         metadata = response.get("Command")
         command_id = metadata.get("CommandId") if isinstance(metadata, dict) else None
@@ -376,8 +516,12 @@ class HostSession:
 
 
 def main(argv=None, *, aws=None, cloudflare=None) -> int:
+    command_started_at = time.time()
+    command_started_monotonic = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--deployment", type=Path, required=True)
+    parser.add_argument("--lifecycle", type=Path, help="private reviewed on-demand controller policy")
+    parser.add_argument("--policy-sha256", help="SHA-256 of the approved recurring lifecycle policy")
     subparsers = parser.add_subparsers(dest="action", required=True)
     start = subparsers.add_parser("start", help="start host if necessary and a named instance")
     start.add_argument("--instance", required=True)
@@ -392,7 +536,17 @@ def main(argv=None, *, aws=None, cloudflare=None) -> int:
             raise HostError("instance is invalid or not configured in the deployment")
         if args.action == "dns" and deployment.get("public_hostname") is None:
             raise HostError("deployment has no public_hostname; it has no DNS record to manage")
-        session = HostSession(deployment, aws or AWSCLI(deployment["region"]), cloudflare or CloudflareAPI())
+        if deployment.get("lifecycle_mode") == "on-demand-host":
+            if args.lifecycle is None:
+                raise HostError("on-demand mode requires a reviewed lifecycle policy")
+            from minecraft_on_demand import OnDemandSession, load_policy
+            policy = load_policy(args.lifecycle, args.policy_sha256, deployment)
+            client = aws or AWSCLI(deployment["region"], policy["aws_profile"], deployment["operator_role_arn"],
+                                   executable=policy['aws_cli_path'], executable_sha256=policy['aws_cli_sha256'],
+                                   executable_identity=policy['aws_cli_file_identity'], source_identity=policy['aws_source_identity'])
+            session = OnDemandSession(deployment, client, cloudflare or CloudflareAPI(), policy, args.deployment, started_at=command_started_at, started_monotonic=command_started_monotonic)
+        else:
+            session = HostSession(deployment, aws or AWSCLI(deployment["region"]), cloudflare or CloudflareAPI())
         session.verify_account()
         if args.action == "start":
             output = session.start(args.instance)
@@ -407,10 +561,11 @@ def main(argv=None, *, aws=None, cloudflare=None) -> int:
             output["error"] = session.dns_error
         print(json.dumps(output, sort_keys=True))
         return 1 if session.dns_error else 0
-    except HostError as exc:
+    except Exception as exc:
+        reason = str(exc) if isinstance(exc, HostError) else "lifecycle command failed; preserve its private journal and inspect the failed phase"
         observed = session.observed if session else {"application": "unknown", "backup": "unverified"}
         dns = session.dns if session else {}
-        print(json.dumps({"host": session.state if session else "unknown", **observed, **dns, "error": str(exc)}, sort_keys=True))
+        print(json.dumps({"host": session.state if session else "unknown", **observed, **dns, "error": reason}, sort_keys=True))
         return 1
 
 

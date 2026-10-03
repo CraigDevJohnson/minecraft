@@ -32,6 +32,8 @@
      "Resource": "arn:aws:ssm:us-west-2::document/AWS-RunShellScript"},
     {"Sid": "DefaultShellSessionDocumentOnly", "Effect": "Allow", "Action": "ssm:StartSession",
      "Resource": "arn:aws:ssm:us-west-2:123456789012:document/SSM-SessionManagerRunShell"},
+    {"Sid": "PrivatePortForwardingSessionDocumentOnly", "Effect": "Allow", "Action": "ssm:StartSession",
+     "Resource": "arn:aws:ssm:us-west-2::document/AWS-StartPortForwardingSession"},
     {"Sid": "OwnSessionsOnly", "Effect": "Allow", "Action": ["ssm:TerminateSession","ssm:ResumeSession"],
      "Resource": "arn:aws:ssm:us-west-2:123456789012:session/*",
      "Condition": {"StringLike": {"ssm:resourceTag/aws:ssmmessages:session-id": ["${aws:userid}*"]}}},

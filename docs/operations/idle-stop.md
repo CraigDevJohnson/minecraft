@@ -83,3 +83,5 @@ The function adds Lambda invocations, scheduling, logs, an alarm, an SNS email s
 ## Evidence limits
 
 `task check` runs the Go unit tests and mocked plan assertions. The Go tests cover state transitions, drain evidence, blocking, launch-time resets, the stop retry, failed activity checks, current-address discovery, stale evidence, DNS parking and retries, token-safe diagnostics, and the ping protocol against a local fake server. None of this calls AWS. Before relying on it, a live check must show that a real idle period drains with a verified backup and stops EC2, that a blocked drain leaves the host running and raises the alarm, and that the existing hostname is parked after stop or after a DNS retry.
+
+The opt-in `on-demand-host` lifecycle rejects `idle_stop` because this function’s permissions and environment bind to one host ID. Keep the retained-host mode for this integration; supporting recreated session hosts is separate work. See [on-demand host sessions](on-demand-host.md).
