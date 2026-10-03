@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Establish or verify the retained EBS mount; formatting is operator-only."""
+"""Establish or verify the retained EBS mount; formatting and growing are operator-only."""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +16,7 @@ from pathlib import Path
 MOUNTPOINT = "/srv/minecraft"
 WHOLE_DEVICE_FLOOR_BYTES_PER_SECOND = 50 * 1024 * 1024
 WHOLE_DEVICE_BASE_SECONDS = 300
+RESIZE_SECONDS = 300
 PARTIAL_ZERO_GUIDANCE = ("the disk may be partially zeroed. Do not initialize it "
                          "until zero-fill is rerun to completion")
 
@@ -55,6 +56,11 @@ class LinuxHost:
         path.mkdir(mode=0o755, parents=True, exist_ok=True)
         if not path.is_dir() or next(path.iterdir(), None) is not None:
             raise StorageError("mountpoint is occupied; refusing to hide root-disk data")
+
+    def filesystem_size(self) -> int:
+        """Total bytes of the filesystem mounted at the mountpoint, as df reports them."""
+        usage = os.statvfs(MOUNTPOINT)
+        return usage.f_frsize * usage.f_blocks
 
     def run(self, command: list[str], *, timeout: int, allowed=(0,)) -> str:
         try:
@@ -182,9 +188,34 @@ def initialize(host, disk: dict, volume_id: str, filesystem_uuid: str) -> None:
     verify_filesystem(host, discover(host, volume_id), filesystem_uuid)
 
 
+def grow(host, disk: dict, volume_id: str, filesystem_uuid: str) -> str:
+    """Extend the verified, mounted filesystem to its enlarged disk; never shrink, format or repair it."""
+    verify_filesystem(host, disk, filesystem_uuid)
+    verify_mount(host, disk, filesystem_uuid)
+    size = device_size(host, disk)
+    before = host.filesystem_size()
+    try:
+        # Without a size argument resize2fs only extends to the device, and does nothing when it already fits.
+        host.run(["resize2fs", disk["name"]], timeout=RESIZE_SECONDS)
+    except StorageError as error:
+        raise StorageError("resize2fs failed or timed out; the filesystem stays mounted and may be "
+                           "partly grown. Fix the cause and rerun grow") from error
+    disk = discover(host, volume_id)
+    verify_filesystem(host, disk, filesystem_uuid)
+    verify_mount(host, disk, filesystem_uuid)
+    after = host.filesystem_size()
+    if after > before:
+        return f"filesystem grew from {before} to {after} bytes: {MOUNTPOINT}"
+    return (f"filesystem not grown: it already fills the {size}-byte disk. After an EBS size increase, "
+            "wait for the volume modification to reach optimizing, then rerun grow")
+
+
 def main(argv=None, *, host=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("mount", "verify", "zero-fill", "initialize"))
+    parser.add_argument(
+        "action", choices=("mount", "verify", "zero-fill", "initialize", "grow"),
+        help="mount or verify the expected filesystem; zero-fill, then initialize, a new blank disk; "
+             "grow the mounted filesystem online after an EBS size increase")
     parser.add_argument("--volume-id", required=True)
     parser.add_argument("--confirm-volume-id", help="required for the explicit zero-fill and blank-disk initialization operations")
     parser.add_argument("--filesystem-uuid", required=True)
@@ -208,6 +239,9 @@ def main(argv=None, *, host=None) -> int:
                 initialize(host, disk, args.volume_id, args.filesystem_uuid)
                 print("filesystem initialized or already matches; run mount separately")
                 return 0
+            if args.action == "grow":
+                print(grow(host, disk, args.volume_id, args.filesystem_uuid))
+                return 0
             verify_filesystem(host, disk, args.filesystem_uuid)
             if args.action == "mount" and not mounted(host):
                 host.prepare_mountpoint()
@@ -218,7 +252,8 @@ def main(argv=None, *, host=None) -> int:
         print(f"storage {args.action} succeeded: {MOUNTPOINT}")
         return 0
     except (StorageError, OSError, ValueError, KeyError, TypeError) as error:
-        print(f"storage unavailable: {error}", file=sys.stderr)
+        outcome = "storage grow failed" if args.action == "grow" else "storage unavailable"
+        print(f"{outcome}: {error}", file=sys.stderr)
         return 1
 
 

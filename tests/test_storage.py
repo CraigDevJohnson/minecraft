@@ -29,6 +29,11 @@ def expected_whole_device_bound(size: int) -> int:
     return 300 + math.ceil(size / (50 * 1024 * 1024))
 
 
+def usable_bytes(device_bytes: int) -> int:
+    """What statvfs reports for ext4 spanning a device: its size less metadata overhead."""
+    return device_bytes - device_bytes // 32
+
+
 class FakeHost:
     """The command/OS boundary: no test can reach a real device or mount."""
 
@@ -55,6 +60,8 @@ class FakeHost:
         self.size = 40 * GIB
         self.blockdev_output: str | None = None
         self.timeouts: list[tuple[str, int]] = []
+        # The device size the filesystem spans; None until a test enlarges the disk under it.
+        self.filesystem_spans: int | None = None
 
     def require_root(self) -> None:
         pass
@@ -66,6 +73,11 @@ class FakeHost:
     def prepare_mountpoint(self) -> None:
         if not self.mountpoint_empty:
             raise minecraft_storage.StorageError("mountpoint is occupied")
+
+    def filesystem_size(self) -> int:
+        if not self.mounts:
+            raise AssertionError("filesystem size was read without a mounted filesystem")
+        return usable_bytes(self.size if self.filesystem_spans is None else self.filesystem_spans)
 
     def run(self, command: list[str], *, timeout: int, allowed=(0,)) -> str:
         self.assert_bounded(command, timeout)
@@ -102,6 +114,13 @@ class FakeHost:
             if self.mount_works:
                 self.mounts = [{"target": "/srv/minecraft", "source": self.disk["name"], "fstype": "ext4", "uuid": UUID, "maj:min": "259:1", "options": "rw,relatime", "fsroot": "/"}]
                 self.disk["mountpoints"] = ["/srv/minecraft"]
+            return ""
+        if tool == "resize2fs":
+            if command != ["resize2fs", self.disk["name"]]:
+                raise AssertionError(f"resize must name only the whole data disk, with no size: {command}")
+            if not self.mounts or self.disk["mountpoints"] != ["/srv/minecraft"]:
+                raise AssertionError("resize2fs ran against a disk that is not mounted at the data mountpoint")
+            self.filesystem_spans = None  # without a size argument it extends to the device and never shrinks
             return ""
         raise AssertionError(f"unexpected command: {command}")
 
@@ -277,7 +296,7 @@ class StorageCommandTests(unittest.TestCase):
 
     def test_whole_device_bound_scales_with_device_size(self) -> None:
         boundaries = {1: 301, 50 * MIB: 301, 50 * MIB + 1: 302, 100 * MIB: 302,
-                      GIB: 321, 40 * GIB: 1120, 220 * GIB: 4806}
+                      GIB: 321, 5 * GIB: 403, 40 * GIB: 1120, 220 * GIB: 4806}
         for size, seconds in boundaries.items():
             with self.subTest(size=size):
                 self.assertEqual(minecraft_storage.whole_device_timeout(size), seconds)
@@ -349,6 +368,122 @@ class StorageCommandTests(unittest.TestCase):
                     self.assertFalse(any(call[0] in ("blkdiscard", "cmp", "mkfs.ext4") for call in host.calls))
                     self.assertFalse(host.zero_filled)
                     self.assertFalse(host.formatted)
+
+    def enlarged(self, *, device=10 * GIB, filesystem=5 * GIB) -> FakeHost:
+        """A mounted, verified filesystem whose EBS disk has since been enlarged."""
+        host = FakeHost()
+        host.size = filesystem
+        self.assertEqual(self.invoke(host)[0], 0)
+        host.size, host.filesystem_spans = device, filesystem
+        host.calls.clear()
+        host.timeouts.clear()
+        return host
+
+    def test_grow_extends_the_verified_mounted_filesystem_to_an_enlarged_disk(self) -> None:
+        host = self.enlarged()
+        result, output = self.invoke(host, "grow")
+        self.assertEqual(result, 0, output)
+        self.assertIn(f"filesystem grew from {usable_bytes(5 * GIB)} to {usable_bytes(10 * GIB)} bytes", output)
+        tools = [call[0] for call in host.calls]
+        self.assertEqual(tools.count("resize2fs"), 1)
+        resize = tools.index("resize2fs")
+        # Disk identity, filesystem identity and the writable mount are proven first, and the mount again after.
+        for check in ("lsblk", "blkid", "findmnt"):
+            self.assertIn(check, tools[:resize])
+        self.assertIn("findmnt", tools[resize + 1:])
+        self.assertIn(("resize2fs", 300), host.timeouts)
+        self.assertFalse(any(tool in ("mount", "mkfs.ext4", "blkdiscard", "cmp", "wipefs") for tool in tools))
+        self.assertEqual(self.invoke(host, "verify")[0], 0)
+
+    def test_grow_on_a_disk_that_is_no_larger_succeeds_and_says_nothing_grew(self) -> None:
+        for device in (5 * GIB, 40 * GIB):
+            with self.subTest(device=device):
+                host = self.enlarged(device=device, filesystem=device)
+                result, output = self.invoke(host, "grow")
+                self.assertEqual(result, 0, output)
+                self.assertIn("filesystem not grown", output)
+                self.assertIn(f"{device}-byte disk", output)
+                self.assertIn("optimizing", output)
+                self.assertNotIn("grew", output)
+                self.assertFalse(any(call[0] in ("mount", "mkfs.ext4") for call in host.calls))
+                result, output = self.invoke(host, "grow")
+                self.assertEqual(result, 0, output)
+
+    def test_grow_refuses_unverified_storage_without_resizing(self) -> None:
+        other_uuid = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+        scenarios = {
+            "unmounted": lambda host: (host.mounts.clear(), host.disk.update(mountpoints=[None])),
+            "wrong-uuid": lambda host: host.disk.update(uuid=other_uuid),
+            "wrong-filesystem": lambda host: host.disk.update(fstype="xfs"),
+            "blank": lambda host: host.disk.update(fstype=None, uuid=None),
+            "ambiguous": lambda host: host.devices.append(dict(host.disk, name="/dev/nvme2n1")),
+            "missing": lambda host: host.devices.clear(),
+            "partitioned": lambda host: host.disk.update(children=[{"name": "/dev/nvme1n1p1"}]),
+            "read-only": lambda host: host.mounts[0].update(options="ro,relatime"),
+            "another-device-mounted": lambda host: host.mounts[0].update({"maj:min": "259:0"}),
+            "another-uuid-mounted": lambda host: host.mounts[0].update(uuid=other_uuid),
+            "subdirectory-mounted": lambda host: host.mounts[0].update(fsroot="/instances"),
+            "also-mounted-elsewhere": lambda host: host.disk.update(mountpoints=["/srv/minecraft", "/other"]),
+        }
+        for scenario, change in scenarios.items():
+            with self.subTest(scenario=scenario):
+                host = self.enlarged()
+                change(host)
+                result, output = self.invoke(host, "grow")
+                self.assertEqual(result, 1, output)
+                self.assertIn("storage grow failed", output)
+                self.assertNotIn("grew", output)
+                self.assertFalse(any(call[0] in ("resize2fs", "mount", "mkfs.ext4", "blkdiscard") for call in host.calls))
+                self.assertEqual(host.filesystem_spans, 5 * GIB)
+
+    def test_failed_resize_reports_failure_and_can_be_rerun(self) -> None:
+        class ResizeFailsHost(FakeHost):
+            def run(self, command, *, timeout, allowed=(0,)):
+                if command[0] != "resize2fs" or not getattr(self, "resize_fails", True):
+                    return super().run(command, timeout=timeout, allowed=allowed)
+                self.assert_bounded(command, timeout)
+                self.calls.append(command)
+                return minecraft_storage.LinuxHost().run(command, timeout=timeout, allowed=allowed)
+        failures = {
+            "timeout": {"side_effect": subprocess.TimeoutExpired("resize2fs", 300)},
+            "nonzero-exit": {"return_value": subprocess.CompletedProcess(["resize2fs"], 1, "", "")},
+        }
+        for failure, behavior in failures.items():
+            with self.subTest(failure=failure):
+                host = ResizeFailsHost()
+                host.size = 5 * GIB
+                self.assertEqual(self.invoke(host)[0], 0)
+                host.size, host.filesystem_spans = 10 * GIB, 5 * GIB
+                with mock.patch.object(minecraft_storage.subprocess, "run", **behavior) as command:
+                    result, output = self.invoke(host, "grow")
+                self.assertEqual(command.call_args.args[0], ["resize2fs", "/dev/nvme1n1"])
+                self.assertEqual(command.call_args.kwargs["timeout"], 300)
+                self.assertEqual(result, 1, output)
+                self.assertIn("storage grow failed: resize2fs failed or timed out", output)
+                self.assertIn("rerun grow", output)
+                self.assertNotIn("grew", output)
+                self.assertNotIn("unavailable", output)
+                # The filesystem stays mounted and usable, and a rerun finishes the grow.
+                self.assertEqual(self.invoke(host, "verify")[0], 0)
+                host.resize_fails = False
+                result, output = self.invoke(host, "grow")
+                self.assertEqual(result, 0, output)
+                self.assertIn("filesystem grew", output)
+
+    def test_grow_needs_no_destructive_confirmation_and_other_actions_never_resize(self) -> None:
+        host = self.enlarged()
+        for action, extra in (("mount", []), ("verify", []), ("initialize", ["--confirm-volume-id", VOLUME])):
+            self.assertEqual(self.invoke(host, action, extra)[0], 0)
+        self.assertFalse(any(call[0] == "resize2fs" for call in host.calls))
+        self.assertEqual(host.filesystem_spans, 5 * GIB)
+        self.assertEqual(self.invoke(host, "grow", ["--confirm-volume-id", "vol-fffffffffffffffff"])[0], 0)
+        self.assertIsNone(host.filesystem_spans)
+
+    def test_filesystem_size_is_read_from_the_data_mountpoint_in_fragment_units(self) -> None:
+        usage = mock.Mock(f_frsize=4096, f_bsize=1024 ** 2, f_blocks=1_270_000, f_bfree=9, f_bavail=7)
+        with mock.patch.object(minecraft_storage.os, "statvfs", return_value=usage) as statvfs:
+            self.assertEqual(minecraft_storage.LinuxHost().filesystem_size(), 4096 * 1_270_000)
+        statvfs.assert_called_once_with("/srv/minecraft")
 
     def test_command_timeout_is_a_clear_bounded_failure(self) -> None:
         class TimedOutHost(FakeHost):
