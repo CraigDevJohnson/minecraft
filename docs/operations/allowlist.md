@@ -2,7 +2,7 @@
 
 Allowlist changes require an explicit configured instance and a running, ready session. The runtime holds the global lifecycle lock, rejects changes while the host is draining, and keeps the current session backup pending. The next successful cold backup includes `whitelist.json` and the other mutable access state.
 
-Provide one player's verified identity in a private JSON file with mode `0600`. The object has `uuid` and `name` fields: use the actual server UUID in canonical lowercase hyphenated form, and the verified Java account name or unprefixed Bedrock gamertag. The file must refer to the same account in both fields. Family identities and real join validation remain launch inputs in issues #7/#9; test fixtures do not establish those identities.
+Provide one player's verified identity in a private JSON file with mode `0600`. The object has `uuid` and `name` fields: use the actual server UUID in canonical lowercase hyphenated form, and the verified Java account name or unprefixed Bedrock gamertag. The file must refer to the same account in both fields. Identity verification remains required for each access change; test fixtures do not establish those identities. Craig resolved the console and family testing requirements on 2026-10-03; see the [current acceptance record](family-device-validation.md).
 
 ```sh
 sudo /usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json allowlist survival add --edition java --player-file /private/java-player.json

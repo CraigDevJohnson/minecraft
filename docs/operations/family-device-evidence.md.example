@@ -1,6 +1,17 @@
 # Private family device evidence
 
-Copy this blank form to ignored `operator-config/family/device-evidence.md`. Keep completed records private. An unchecked item means unverified. Share only the sanitized summary at the end in issue #9.
+Copy this form to ignored `operator-config/family/device-evidence.md` only for optional future observations. Keep completed records private and share only sanitized observations. Unperformed observations are not passed tests and do not reopen the resolved family-testing requirements.
+
+## Accepted scope
+
+- [x] Console/family-member testing requirements resolved by Craig's user acceptance/waiver on October 3, 2026; issue #9 is closed on that basis.
+- Reported joins: Craig's Java client on Mac, Bedrock on iPhone and two iPads; four simultaneous players.
+- PS5/Switch: untested. BedrockConnect: never configured.
+- Chat, interaction, reconnect, inventory, denial, six-player and console validations: not recorded as passed; family-testing acceptance was waived.
+
+Acceptance reference: [owner acceptance record](https://github.com/CraigDevJohnson/minecraft/issues/9#issuecomment-5972110637).
+
+The blank sections below are optional follow-up records. Separate #8 live recovery and #26/#27 upstream, runtime, infrastructure and technical protocol safety gates remain in their own records.
 
 Date/time and timezone:
 Operator:
@@ -18,7 +29,7 @@ Network contexts tested:
 | PlayStation | | | | | | | | | |
 | Nintendo Switch | | | | | | | | | |
 
-For each device, record the checkpoint item/slot/quantity, location and shared chest/block observation. Use private account aliases in any shared version.
+If a device check is undertaken, record its checkpoint item/slot/quantity, location and shared chest/block observation. Use private account aliases in any shared version; leave unperformed observations blank.
 
 ## Console setup and rollback
 
@@ -27,11 +38,11 @@ For each device, record the checkpoint item/slot/quantity, location and shared c
 | PlayStation | | | | | | | |
 | Nintendo Switch | | | | | | | |
 
-## Access check
+## Optional access observations
 
-- [ ] Every approved family account joined.
-- [ ] A known unapproved account was denied before entering the world.
-- [ ] An approved account still joined after the denial test.
+Approved accounts actually observed joining:
+Unapproved-account denial, if observed:
+Approved-account rejoin after denial, if observed:
 
 Private identity references, timestamps and denial result:
 
@@ -43,30 +54,29 @@ Private identity references, timestamps and denial result:
 | New chunk exploration | | | | | |
 | Shared play | | | | | |
 
-- [ ] The representative session approached six simultaneous players; actual peak recorded.
-- [ ] Exploration/chunk generation and shared play exercised.
-- [ ] Every required device completed the reconnect checkpoint.
-- [ ] Craig accepts the observed experience and measured hardware behavior, or a failure remains recorded.
+Actual peak count and optional session duration (acceptance reported four, not a six-player test):
+Exploration/chunk generation and shared play actually observed:
+Devices with a completed reconnect checkpoint, if observed:
+Optional measured behavior or reported experience (current connected clients were accepted October 3):
 
 ## Operator and recovery checks
 
-- [ ] Craig ran documented start and status without undocumented setup.
-- [ ] Craig ran clean host stop and confirmed complete backup evidence.
-- [ ] Console connection rollback passed.
-- [ ] Issue #8 separately records the required live recovery acceptance.
+Start/status and clean-stop/backup observations, if undertaken:
+Optional console rollback observation (not performed at acceptance):
+Separate issue #8 live recovery acceptance reference; user acceptance here does not satisfy that technical gate:
 
 Private backup/recovery reference and any undocumented steps:
 
-## Sanitized issue summary
+## Sanitized optional follow-up summary
 
 Installed revision:
 Device/client versions and routes, with account aliases only:
-Join/chat/interaction and reconnect results:
-Unapproved-account denial result:
+Reported joins and actually observed chat/interaction/reconnect results:
+Unapproved-account denial result, if observed:
 Peak players, session duration and TPS/MSPT/memory samples:
 User experience and hardware acceptance:
 Console rollback result:
 Operator/recovery evidence links:
-Outstanding failures and next action:
+Optional findings and requested next action; no remaining family-testing closure gate:
 
 Remove account names, UUIDs, endpoint, DNS screenshots, credentials, raw server/SSM output and private report links before publishing.

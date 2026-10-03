@@ -2,6 +2,8 @@
 
 Approved direction: 2026-09-07. The user chose to build the first survival instance and evaluate specific mods/add-ons later. GitHub issues hold implementation acceptance criteria; this document defines the shared design.
 
+Owner acceptance update, 2026-10-03: Craig accepted four simultaneous joins (Java on Mac, Bedrock on iPhone and two iPads) and resolved requirements for console or family testing. The [current acceptance record](../../operations/family-device-validation.md) supersedes the earlier mandatory device matrix and representative family play conditions. PlayStation 5 and Switch remain untested, and BedrockConnect is unset. Recovery, deployment and protocol validation remain separate.
+
 ## Delivery sequence
 
 | Order | Issue | Dependency |
@@ -12,11 +14,11 @@ Approved direction: 2026-09-07. The user chose to build the first survival insta
 | 4 | [AWS bootstrap and deployment #7](https://github.com/CraigDevJohnson/minecraft/issues/7) | #4, #5, #6; human authorization |
 | 5 | [Live recovery #8](https://github.com/CraigDevJohnson/minecraft/issues/8) and [family devices #9](https://github.com/CraigDevJohnson/minecraft/issues/9) | #7 |
 
-Both #8 and #9 must pass for the milestone to be complete. Future content selection does not block the initial vanilla-style survival instance.
+The #8 technical recovery criteria and #9 family acceptance remain separate delivery records; #9's requirement for family testing is resolved by the owner update above. Future content selection does not block the initial vanilla-style survival instance.
 
 ## Deliverable
 
-One fresh private survival instance, `survival`, for up to six simultaneous family players. Java clients on macOS/Windows and Bedrock clients on iPad/tablets, PlayStation, Switch, and Windows must be tested as applicable. Reproduce the entire machine and infrastructure, preserve world/player state, and demonstrate backup recovery.
+One fresh private survival instance, `survival`, for up to six simultaneous family players. Intended clients include Java on macOS/Windows and Bedrock on iPad/tablets, PlayStation, Switch and Windows; the owner update above resolves the mandatory family testing requirement without certifying every platform. Reproduce the entire machine and infrastructure, preserve world/player state, and demonstrate backup recovery.
 
 Long-term independent creative, experimental, and guided instances follow [ADR 0001](../../adr/0001-independent-server-instances.md). The first delivery does not deploy those instances, a proxy, or a management UI.
 
@@ -53,15 +55,15 @@ A complete disk loss during play can lose the current session. The recovery targ
 
 ## Clients and content
 
-Tablets join the Bedrock endpoint directly. Start console testing with the documented BedrockConnect DNS route, preserving rollback instructions. Craig performs device settings, sign-ins and family permissions. Tablet success does not prove PlayStation/Switch success.
+Tablets join the Bedrock endpoint directly. Console setup is optional; if used later, follow the documented BedrockConnect DNS route and preserve rollback instructions. Craig controls device settings, sign-ins and family permissions. Tablet success does not prove PlayStation/Switch success.
 
-Keep family allowlisting and normal Java/Floodgate authentication; operator privileges belong to Craig. Check real identity, inventory, join/chat and gameplay. Select compatible content per instance; Docker does not convert arbitrary Java mods or native Bedrock add-ons.
+Keep family allowlisting and normal Java/Floodgate authentication; operator privileges belong to Craig. Verified access identities and saved-world integrity remain technical requirements; the owner update above resolves the human join/chat/gameplay acceptance. Select compatible content per instance; Docker does not convert arbitrary Java mods or native Bedrock add-ons.
 
 ## Validation and delivery boundaries
 
 Foundation CI is credential-free: it may download public tools/providers but does not initialize a remote backend, plan against AWS, apply resources, or start Minecraft. Actual resources belong to the infrastructure issue; runtime pins and game tests belong to the runtime issue.
 
-Live acceptance proves stop/start persistence, host replacement using retained EBS, an isolated S3 restore, and representative family play. Archive extraction and green CI alone do not establish those outcomes.
+Live infrastructure/recovery acceptance proves stop/start persistence, host replacement using retained EBS and an isolated S3 restore. Family-play acceptance is resolved by the dated owner record above. Archive extraction and green CI alone do not establish those technical recovery outcomes.
 
 Craig authorizes PR merges, account/state bootstrap and the concrete AWS apply/test plan. EULA acceptance is needed before any real Minecraft runtime test, including local tests. It has not been inferred from design approval.
 

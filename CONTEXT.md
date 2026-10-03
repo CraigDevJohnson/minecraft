@@ -1,6 +1,8 @@
 # Family Minecraft operations
 
-Build one fresh survival server for six family players using Java and Bedrock clients, with full infrastructure provisioning, persistent data, and verified recovery. PlayStation and Switch need real device/network validation.
+Build one fresh survival server for six family players using Java and Bedrock clients, with full infrastructure provisioning, persistent data, and verified recovery. On October 3, 2026, Craig accepted the connected clients and waived requirements or validations involving consoles or family-member testing. Reported joins were Java on Mac, Bedrock on iPhone and two iPads, with four simultaneous players. PS5/Switch were untested and BedrockConnect was never configured; console guidance remains optional future help. Family-device acceptance is resolved by user acceptance/waiver, with unperformed checks recorded as unperformed rather than passed.
+
+This acceptance does not replace [#8's live recovery proof](https://github.com/CraigDevJohnson/minecraft/issues/8) or [#26](https://github.com/CraigDevJohnson/minecraft/issues/26)/[#27](https://github.com/CraigDevJohnson/minecraft/issues/27)'s upstream, runtime, infrastructure and technical protocol safety gates.
 
 ## Terms
 
