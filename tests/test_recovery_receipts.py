@@ -10,6 +10,7 @@ import unittest
 import contextlib
 import io
 import threading
+from types import SimpleNamespace
 from unittest import mock
 
 import test_restore as restore_fixture
@@ -560,6 +561,52 @@ class RecoveryReceiptTests(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(restore.main(args), 0)
             factory.assert_called_once_with('source-backups', region='us-west-2', timeout=timeout or 3000)
+
+    def test_untrusted_journal_remains_inadmissible_after_failed_same_receipt_revalidation(self):
+        for changed in ('mode', 'owner'):
+            with self.subTest(changed=changed):
+                self.setUp()
+                receipt = self.receipt()
+                self.restore(receipt)
+                machine = self.fixture.machine
+                target = machine.root / 'instances/survival'
+                journal = target / 'operation.json'
+                metadata = journal.lstat()
+                original_lstat = Path.lstat
+                original_fstat = minecraft_instance.os.fstat
+                def changed_lstat(path, *args, **kwargs):
+                    result = original_lstat(path, *args, **kwargs)
+                    if changed == 'owner' and path == journal:
+                        return SimpleNamespace(st_mode=result.st_mode, st_uid=result.st_uid + 1, st_gid=result.st_gid)
+                    return result
+                def changed_fstat(descriptor):
+                    result = original_fstat(descriptor)
+                    if changed == 'owner' and (result.st_dev, result.st_ino) == (metadata.st_dev, metadata.st_ino):
+                        return SimpleNamespace(st_mode=result.st_mode, st_uid=result.st_uid + 1, st_gid=result.st_gid)
+                    return result
+                if changed == 'mode':
+                    journal.chmod(0o644)
+                machine.desired_revision = lambda instance: receipt['manifest_sha256']
+                launches = []
+                machine.prepare = lambda instance: None
+                machine.verify_restored = lambda instance, state: None
+                machine.wait_ready = lambda instance: None
+                machine.storage_usage = lambda: {'size_bytes': 5 * 1024 ** 3, 'available_bytes': 4 * 1024 ** 3, 'used_percent': 20}
+                def launch(instance):
+                    launches.append(instance)
+                    machine.container.update(exists=True, running=True, container_id='fixture-container', started_at='fixture-start', exit_code=0)
+                machine.launch = launch
+                self.store.check_deadline = mock.Mock(side_effect=backup.BackupError('revalidation budget expired'))
+                before = {str(path.relative_to(target)): path.read_bytes() for path in target.rglob('*') if path.is_file()}
+                with mock.patch.object(Path, 'lstat', changed_lstat), mock.patch.object(minecraft_instance.os, 'fstat', changed_fstat):
+                    with self.assertRaisesRegex(backup.BackupError, 'revalidation budget expired'):
+                        self.restore(receipt, resume=True)
+                    self.assertTrue(json.loads(journal.read_text())['restore_certified'])
+                    with self.assertRaisesRegex(minecraft_instance.OperationError, 'operator file'):
+                        minecraft_instance.Manager(machine.root, machine, ['survival']).execute('start', 'survival')
+                self.assertEqual(launches, [])
+                after = {str(path.relative_to(target)): path.read_bytes() for path in target.rglob('*') if path.is_file()}
+                self.assertEqual(before, after)
 
 
 if __name__ == '__main__':
