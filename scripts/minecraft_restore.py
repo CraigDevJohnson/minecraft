@@ -91,7 +91,9 @@ def verify_restored_receipt(target, metadata, receipt, deployment, *, metadata_r
             if not stat.S_ISREG((target / name).lstat().st_mode):
                 raise BackupError('occupied restore target has untrusted metadata; preserve it for repair')
         state = read_json(target / 'operation.json')
-        if (set(state) != {'phase', 'backup', 'revision', 'session', 'restored_from', 'restore_receipt_id', 'restore_target', 'bootstrap_sha256'}
+        fields = {'phase', 'backup', 'revision', 'session', 'restored_from', 'restore_receipt_id', 'restore_target', 'bootstrap_sha256'}
+        if (set(state) not in (fields, fields | {'restore_certified'})
+                or ('restore_certified' in state and type(state['restore_certified']) is not bool)
                 or state['phase'] != 'prepared' or state['backup'] != 'not-required'
                 or state['revision'] != receipt['manifest_sha256'] or state['restored_from'] != receipt['recovery_point']
                 or state['restore_receipt_id'] != receipt['receipt_id'] or state['restore_target'] != expected_storage
@@ -132,11 +134,24 @@ def restore(machine, source_deployment, instance, recovery_point, store, *, rece
         raise BackupError("restore requires an explicit configured instance")
     target = machine.root / "instances" / instance
     with machine.lock():
-        check_budget(store)
         machine.verify_storage()
         occupied = target.exists() or target.is_symlink()
         if machine.inspect(instance)["exists"] or (occupied and not (receipt is not None and resume)):
             raise BackupError("restore requires an absent target instance directory and container")
+        if (occupied and receipt is not None and resume and not target.is_symlink()
+                and target.is_dir() and target == target.resolve()):
+            state = read_json(target / 'operation.json')
+            expected_target = {'volume_id': machine.deployment['data_volume_id'],
+                               'filesystem_uuid': machine.deployment['data_filesystem_uuid']}
+            info = (target / 'operation.json').lstat()
+            if (stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o600
+                    and isinstance(state, dict) and state.get('restore_receipt_id') == receipt.get('receipt_id')
+                    and state.get('restore_target') == expected_target and state.get('restored_from') == recovery_point
+                    and state.get('phase') == 'prepared'):
+                if state.get('restore_certified') is not False:
+                    state['restore_certified'] = False
+                    write_json(target / 'operation.json', state)
+        check_budget(store)
         with tempfile.TemporaryDirectory(prefix=".minecraft-restore-", dir=machine.root) as temporary:
             workspace = Path(temporary)
             if receipt is not None:
@@ -164,66 +179,85 @@ def restore(machine, source_deployment, instance, recovery_point, store, *, rece
                 if machine.inspect(instance)['exists']:
                     raise BackupError('restore target acquired a container; preserve it for repair')
                 check_budget(store)
-                return {'schema_version': 1, 'status': 'restored', 'instance': instance,
-                        'recovery_point': recovery_point, 'application': 'stopped', 'backup': 'not-required',
-                        'receipt_id': receipt['receipt_id'], 'resumed': True}
-            if receipt is not None:
-                capacity = os.statvfs(machine.root)
-                remaining_bytes = receipt['required_capacity_bytes'] - receipt['archive']['size_bytes']
-                if capacity.f_frsize * capacity.f_bavail < remaining_bytes:
-                    raise BackupError('restore target has insufficient available capacity for the selected receipt')
-            staged = workspace / "instance"
-            extract_recovery(metadata, archive, staged, check_deadline=budget_checker(store))
-            write_json(staged / "runtime/manifest.json", metadata["manifest"])
-            write_json(staged / "runtime/definition.json", metadata["definition"])
-            state = {
-                "phase": "prepared", "backup": "not-required", "revision": metadata["manifest_sha256"],
-                "session": str(uuid.uuid4()), "restored_from": recovery_point,
-            }
-            if receipt is not None:
-                state.update(restore_receipt_id=receipt['receipt_id'], bootstrap_sha256=receipt['bootstrap_sha256'],
-                             restore_target={'volume_id': machine.deployment['data_volume_id'],
-                                             'filesystem_uuid': machine.deployment['data_filesystem_uuid']})
-            write_json(staged / "operation.json", state)
-            ownership = getattr(machine, "restore_ownership", None)
-            if ownership is None:
-                apply_restore_ownership(staged / 'data', check_deadline=budget_checker(store))
             else:
-                ownership(staged / 'data')
-            check_budget(store)
-            for directory, _, _ in os.walk(staged, topdown=False):
+                if receipt is not None:
+                    capacity = os.statvfs(machine.root)
+                    remaining_bytes = receipt['required_capacity_bytes'] - receipt['archive']['size_bytes']
+                    if capacity.f_frsize * capacity.f_bavail < remaining_bytes:
+                        raise BackupError('restore target has insufficient available capacity for the selected receipt')
+                staged = workspace / "instance"
+                extract_recovery(metadata, archive, staged, check_deadline=budget_checker(store))
+                write_json(staged / "runtime/manifest.json", metadata["manifest"])
+                write_json(staged / "runtime/definition.json", metadata["definition"])
+                state = {
+                    "phase": "prepared", "backup": "not-required", "revision": metadata["manifest_sha256"],
+                    "session": str(uuid.uuid4()), "restored_from": recovery_point,
+                }
+                if receipt is not None:
+                    state.update(restore_receipt_id=receipt['receipt_id'], restore_certified=False, bootstrap_sha256=receipt['bootstrap_sha256'],
+                                 restore_target={'volume_id': machine.deployment['data_volume_id'],
+                                                 'filesystem_uuid': machine.deployment['data_filesystem_uuid']})
+                write_json(staged / "operation.json", state)
+                ownership = getattr(machine, "restore_ownership", None)
+                if ownership is None:
+                    apply_restore_ownership(staged / 'data', check_deadline=budget_checker(store))
+                else:
+                    ownership(staged / 'data')
                 check_budget(store)
-                descriptor = os.open(directory, os.O_RDONLY)
+                for directory, _, _ in os.walk(staged, topdown=False):
+                    check_budget(store)
+                    descriptor = os.open(directory, os.O_RDONLY)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                machine.verify_storage()
+                check_budget(store)
+                if target.exists() or target.is_symlink() or machine.inspect(instance)["exists"]:
+                    raise BackupError("restore target became occupied; no recovery data was installed")
+                created_parent = not target.parent.exists()
+                target.parent.mkdir(mode=0o700, exist_ok=True)
+                published = False
                 try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-            machine.verify_storage()
+                    os.rename(staged, target)
+                    published = True
+                    descriptor = os.open(target.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                except OSError:
+                    if published:
+                        os.rename(target, staged)
+                    if created_parent:
+                        with contextlib.suppress(OSError):
+                            target.parent.rmdir()
+                    raise
             check_budget(store)
-            if target.exists() or target.is_symlink() or machine.inspect(instance)["exists"]:
-                raise BackupError("restore target became occupied; no recovery data was installed")
-            created_parent = not target.parent.exists()
-            target.parent.mkdir(mode=0o700, exist_ok=True)
-            published = False
-            try:
-                os.rename(staged, target)
-                published = True
-                descriptor = os.open(target.parent, os.O_RDONLY)
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-            except OSError:
-                if published:
-                    os.rename(target, staged)
-                if created_parent:
-                    with contextlib.suppress(OSError):
-                        target.parent.rmdir()
-                raise
+        check_budget(store)
+        result = {"schema_version": 1, "status": "restored", "instance": instance,
+                  "recovery_point": recovery_point, "application": "stopped", "backup": "not-required"}
+        if receipt is not None:
+            certify_restore(target, read_json(target / 'operation.json'), store)
+            return {**result, 'receipt_id': receipt['receipt_id'], 'resumed': occupied}
+        return result
+
+
+def certify_restore(target, state, store):
+    """The caller holds the host lock until certification and outcome are decided."""
     check_budget(store)
-    result = {"schema_version": 1, "status": "restored", "instance": instance,
-              "recovery_point": recovery_point, "application": "stopped", "backup": "not-required"}
-    return {**result, 'receipt_id': receipt['receipt_id'], 'resumed': False} if receipt is not None else result
+    state = {**state, 'restore_certified': True}
+    try:
+        write_json(target / 'operation.json', state)
+        check_budget(store)
+    except (BackupError, OSError):
+        state['restore_certified'] = False
+        try:
+            write_json(target / 'operation.json', state)
+        except OSError:
+            # Missing lifecycle state blocks ordinary start while preserving the world.
+            (target / 'operation.json').unlink(missing_ok=True)
+        raise
 
 
 def main(argv=None):

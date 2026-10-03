@@ -162,6 +162,11 @@ class Manager:
         revision = self.machine.desired_revision(instance)
         container = self.machine.inspect(instance)
         state = self.reconcile_session(instance, state, container)
+        if state and state.get('restore_receipt_id') and (
+                state.get('restore_certified') is not True
+                or state.get('restore_target') != {'volume_id': self.machine.deployment['data_volume_id'],
+                                                  'filesystem_uuid': self.machine.deployment['data_filesystem_uuid']}):
+            raise OperationError('restored data is pending same-receipt certification; retry restore before starting')
         if not state and (container["exists"] or (self.root / "instances" / instance / "data").exists()):
             raise OperationError("untracked instance data; investigate or restore before operating")
         if state and state["revision"] != revision and not updating:
