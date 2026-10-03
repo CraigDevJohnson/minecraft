@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -76,6 +77,11 @@ class RestoreMachine:
 
     def restore_ownership(self, data):
         pass
+
+    def restore_metadata(self, path):
+        # Simulate normalized Linux ownership while retaining real file modes.
+        info = path.lstat()
+        return SimpleNamespace(st_uid=1000, st_gid=1000, st_mode=info.st_mode)
 
 
 class RestoreTests(unittest.TestCase):

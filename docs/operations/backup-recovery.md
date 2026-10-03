@@ -62,6 +62,32 @@ The result includes the recorded runtime inputs and a fresh prepared lifecycle r
 
 Finish the restored session with the normal guarded backup/stop procedure using its own configured destination. Promotion into the active family environment is a separate, explicitly reviewed operation.
 
+## Exact-version receipts for S3-only storage
+
+The approved [#24 design](https://github.com/CraigDevJohnson/minecraft/issues/24) requires a verified receipt before the live data disk can be removed. The receipt and restore foundations alone do not enable host or data-volume deletion. The separately reviewed lifecycle migration, recurring deletion policy, S3 retention and version-read permissions, and live recovery evidence are still required.
+
+`minecraft-instance host-drain-private` runs the same guarded drain under the runtime lock and adds the current `boot_id` plus a private `recovery` map containing each final session, content digest and exact recovery point. It requires a tracked, cleanly stopped session with a completed backup for every instance. The receipt records that boot identity. Keep this response in the private operator journal. The ordinary `host-drain` response and existing backup metadata stay unchanged.
+
+The operator controller calls `minecraft_backup.verify_stop_receipt` with that evidence, the source deployment, the reviewed bootstrap bundle digest and an existing operator-owned mode-0700 journal directory. It independently reads the exact completed marker and archive versions and verifies every archived file. Receipts record those version IDs and hashes, source account/host/disk/filesystem and deployment digest, content and definition digests, bootstrap digest and capacity requirements. Mode-0600 local receipts survive disk deletion. S3 stores immutable receipts under `instances/<id>/receipts/<receipt-id>.json` and advances `receipts/current.json` with a conditional write against the observed ETag. A sequence and predecessor bind successive selections. Missing or corrupt selection, a stale local selection, incomplete final-session backup, or an unavailable exact version blocks removal; catalog `latest` is never a fallback.
+
+Receipt verification accepts an explicit `timeout` of 1 to 3000 seconds, defaulting to 3000 for each configured instance. Each instance receives a fresh store operation, including when the caller injects a configured store, so earlier instances do not consume its verification budget. This bounded interval covers that instance's full marker/archive verification and receipt publication; timeout failure preserves the host and disk.
+
+`verify_stop_receipt` requires a `fresh_drain` callback that retrieves current host state directly, such as a fresh private-drain SSM call targeting the reviewed deployment host. The saved and newly retrieved boot/session/point snapshots must match before and after verification. A cached response is insufficient deletion evidence. Missing authoritative selection is checked against immutable receipt keys and current-key version/delete-marker history; it cannot silently become a new sequence-1 authority. An interrupted first publication can resume only its recorded private initialization intent and exact candidate, with no prior selector history.
+
+After the lifecycle controller creates and verifies a distinct target disk and filesystem, it transfers the selected private receipt with the existing private runtime configuration and invokes:
+
+```sh
+sudo minecraft-restore --config /etc/minecraft/operator.json \
+  --receipt /etc/minecraft/recovery-receipt.json \
+  --bootstrap-sha256 REVIEWED_BUNDLE_SHA256 --timeout 3000 --resume survival RECOVERY_POINT
+```
+
+Restore reads the recorded object versions even if the current keys change. It requires exact target content/definition compatibility and sufficient free capacity for the archive, extracted files and 1 GiB of working margin. It installs the recovery data atomically and leaves Minecraft stopped. `--resume` recognizes an occupied target only when its prepared record names the same receipt and target storage and every world/player/configuration file still matches the recorded inventory and hash. A partial, changed or ambiguous target is preserved for repair. The default restore command continues to refuse occupied targets.
+
+An authoritative sole-copy receipt must retain access to its selected versions for as long as the server is off. The existing 14-day noncurrent-version expiry can remove a pinned version after a later write or delete marker. The [phase-two retention proposal](s3-only-retention.md) protects the exact selected versions and retires only a bounded, independently verified obsolete set; its lifecycle and IAM changes remain unimplemented. Runtime credentials must not receive permanent version deletion. The existing 15-minute fresh-volume provenance wait remains required; these foundations do not establish a three-minute S3-only startup or close #24.
+
+Restore accepts a bounded `--timeout` of 1 to 3000 seconds, defaulting to 3000. The operation budget covers archive transfer, periodic file hashing, extraction, ownership, inventory checks and final success. Receipt targets publish with pending certification, which ordinary instance start refuses. Cleanup, fsync, the final budget decision and certification remain under the host lifecycle lock. A matching prior receipt or complete occupied target must pass again within the current budget; revalidation revokes its previous certification before inspecting known same-receipt data. Expiration during staging leaves the target absent. Expiration after atomic publication preserves complete files with pending admission until same-receipt retry succeeds. World and runtime files remain intact; only lifecycle certification changes. Non-receipt restore behavior remains compatible.
+
 ## Evidence and live handoff
 
 Credential-free validation covers publication/restore round trips with recognizable world/player/configuration/plugin checkpoints, missing/corrupt/incompatible input, unsafe archive paths/types, interrupted uploads, receipt loss, retention after long inactivity, prune retries, isolated target failure, and lifecycle/EC2 shutdown gates. AWS process tests verify command contracts and bounds using a fake CLI. They do not establish live S3 behavior.
