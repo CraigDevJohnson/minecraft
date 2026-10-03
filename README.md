@@ -17,6 +17,8 @@ Report suspected vulnerabilities using the [security policy](SECURITY.md).
 - [Backup commands, retention, and isolated recovery](docs/operations/backup-recovery.md)
 - [Live persistence and recovery rehearsal](docs/operations/live-recovery-rehearsal.md)
 - [Pinned content and explicit local runtime validation](docs/operations/runtime-content.md)
+- [Family device joins, console rollback, and play acceptance](docs/operations/family-device-validation.md)
+- [Client compatibility and upstream release gates](docs/operations/client-compatibility-readiness.md)
 - [Foundation issue #3](https://github.com/CraigDevJohnson/minecraft/issues/3) and [current issues](https://github.com/CraigDevJohnson/minecraft/issues)
 
 Python 3.11 or newer is the only host-language prerequisite. Install the pinned tools and run the shared gate from the repository root:
