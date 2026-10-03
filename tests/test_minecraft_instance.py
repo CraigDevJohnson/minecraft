@@ -453,6 +453,7 @@ class InstanceTests(unittest.TestCase):
         self.manager.execute('start', 'survival')
         session = self.manager.state('survival')['session']
         result = self.manager.execute('host-drain-private')
+        self.assertEqual(result['boot_id'], self.machine.boot)
         self.assertEqual(result['recovery']['survival'], {'session': session,
             'manifest_sha256': self.machine.revision, 'recovery_point': 'instances/survival/session-1'})
         self.assertEqual(self.manager.execute('host-drain'), {key: result[key] for key in ('draining', 'instances')})

@@ -148,6 +148,8 @@ class Manager:
         state = self.state(instance)
         container = self.machine.inspect(instance)
         state = self.reconcile_session(instance, state, container)
+        if state and state.get('restore_receipt_id'):
+            verify_restore_control_directories(self.root / 'instances' / instance)
         return {
             "instance": instance,
             "application": "running" if container["running"] else "stopped",
@@ -167,6 +169,8 @@ class Manager:
                 or state.get('restore_target') != {'volume_id': self.machine.deployment['data_volume_id'],
                                                   'filesystem_uuid': self.machine.deployment['data_filesystem_uuid']}):
             raise OperationError('restored data is pending same-receipt certification; retry restore before starting')
+        if state and state.get('restore_receipt_id'):
+            verify_restore_control_directories(self.root / 'instances' / instance)
         if not state and (container["exists"] or (self.root / "instances" / instance / "data").exists()):
             raise OperationError("untracked instance data; investigate or restore before operating")
         if state and state["revision"] != revision and not updating:
@@ -261,7 +265,7 @@ class Manager:
                             raise OperationError('private drain requires a completed final-session recovery point for every instance')
                         recovery[configured] = {'session': state['session'], 'manifest_sha256': state['revision'],
                                                 'recovery_point': state['recovery_point']}
-                    return {**result, 'recovery': recovery}
+                    return {**result, 'boot_id': self.machine.boot_id(), 'recovery': recovery}
                 # The drain response is completion evidence with a fixed shape; only status reports usage.
                 return {**result, "storage": self.machine.storage_usage()} if action == "host-status" else result
             if action == "start":
@@ -383,6 +387,14 @@ def private_json(path):
     if not isinstance(value, dict):
         raise OperationError("operator configuration must be a JSON object")
     return value
+
+
+def verify_restore_control_directories(target):
+    for directory in (Path(target), Path(target) / 'runtime'):
+        info = directory.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise OperationError('restore control directories must remain operator-owned private mode 0700')
 
 
 def verify_retained_paths(root: Path) -> None:
