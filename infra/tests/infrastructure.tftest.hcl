@@ -459,7 +459,7 @@ run "on_demand_off_preserves_protected_infrastructure" {
     bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   }
   assert {
-    condition     = length(aws_instance.host) == 0 && length(aws_volume_attachment.data) == 0 && aws_ebs_volume.data.size == 5 && aws_ebs_volume.data.encrypted
+    condition     = length(data.aws_ami.host) == 0 && length(aws_instance.host) == 0 && length(aws_volume_attachment.data) == 0 && aws_ebs_volume.data.size == 5 && aws_ebs_volume.data.encrypted
     error_message = "Off-state removes only session host/attachment and retains the encrypted protected disk."
   }
   assert {

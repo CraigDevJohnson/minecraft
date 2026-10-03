@@ -63,6 +63,9 @@ class FakeAWS:
         self.calls.append((operation, arguments))
         if operation == 'get-caller-identity': return {'Account': DEPLOYMENT['account_id']}
         if operation == 'describe-instances' and '--filters' in arguments:
+            filters = json.loads(arguments[arguments.index('--filters') + 1])
+            if any(value['Name'] == 'instance-id' for value in filters):
+                return {'Reservations': [] if getattr(self, 'terminated_forgotten', False) else [{'Instances': [{'InstanceId': HOST_ID, 'State': {'Name': 'terminated'}}]}]}
             inventory = lifecycle.resources(self.inventory()) if self.inventory else {}
             recorded = inventory.get('aws_instance.host[0]', {}).get('id')
             hosts = [{'InstanceId': recorded}] if recorded else []
@@ -176,7 +179,7 @@ class OnDemandTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.root.chmod(0o700)
         self.operator = self.root / 'operator.json'
         self.operator.write_text('{}')
@@ -411,6 +414,15 @@ class OnDemandTests(unittest.TestCase):
         self.tofu.current['serial'] += 1
         with self.assertRaises(host.HostError): session.start('survival')
         self.assertEqual(self.tofu.applies, 1)
+    def test_absent_terminated_instance_still_completes_removal_with_root_and_data_proof(self):
+        session = self.session()
+        self.aws.terminated_forgotten = True
+        self.assertEqual(session.stop()['host'], 'absent')
+        self.assertEqual(json.loads(session.journal_path.read_text())['phase'], 'complete')
+        queries = [arguments for operation, arguments in self.aws.calls if operation == 'describe-instances']
+        self.assertTrue(any('--filters' in arguments and json.loads(arguments[arguments.index('--filters') + 1]) ==
+                            [{'Name': 'instance-id', 'Values': [HOST_ID]}] for arguments in queries))
+
     def test_root_still_present_and_retained_data_ambiguity_preserve_journal_for_repair(self):
         for attribute in ('root_absent', 'retained_available'):
             with self.subTest(attribute=attribute), tempfile.TemporaryDirectory() as child:
@@ -471,7 +483,7 @@ class PolicyBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.directory = Path(self.temp.name)
+        self.directory = Path(self.temp.name).resolve()
         self.directory.chmod(0o700)
         self.infra = self.directory / 'infra'
         self.infra.mkdir()
@@ -503,6 +515,32 @@ class PolicyBoundaryTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.policy))
         self.path.chmod(0o600)
         return lifecycle.load_policy(self.path, lifecycle.digest_file(self.path), DEPLOYMENT)
+    def test_executed_root_rejects_other_directory_and_symlink_components(self):
+        original = self.policy['infra_root']
+        other = self.directory / 'unreviewed'
+        other.mkdir()
+        link_parent = self.directory / 'linked-parent'
+        link_parent.symlink_to(self.directory, target_is_directory=True)
+        for candidate in (other, link_parent / 'infra'):
+            self.policy['infra_root'] = str(candidate)
+            with self.subTest(candidate=candidate), self.assertRaises(host.HostError): self.validate()
+        self.policy['infra_root'] = original
+        self.assertEqual(self.validate()['infra_root'], original)
+
+    def test_root_identity_is_rechecked_before_each_tofu_command(self):
+        client = lifecycle.TofuCLI(self.policy)
+        original = self.directory / 'original-infra'
+        self.infra.rename(original)
+        self.infra.mkdir()
+        with mock.patch.object(lifecycle.subprocess, 'run') as run:
+            with self.assertRaises(host.HostError): client.run('state', 'pull')
+            run.assert_not_called()
+        self.infra.rmdir()
+        self.infra.symlink_to(original, target_is_directory=True)
+        with mock.patch.object(lifecycle.subprocess, 'run') as run:
+            with self.assertRaises(host.HostError): client.run('state', 'pull')
+            run.assert_not_called()
+
     def test_reviewed_policy_checks_exact_workstation_inputs_backend_and_release(self):
         self.assertEqual(self.validate(), self.policy)
         for field, value in (('workstation', 'another-workstation'), ('variables_sha256', 'b' * 64),
@@ -527,7 +565,7 @@ class PolicyBoundaryTests(unittest.TestCase):
         with self.assertRaises(host.HostError): self.validate()
     def test_terraform_json_source_changes_and_overrides_are_bound(self):
         with tempfile.TemporaryDirectory() as temporary:
-            checkout = Path(temporary) / 'repo'
+            checkout = Path(temporary).resolve() / 'repo'
             (checkout / 'infra').mkdir(parents=True)
             (checkout / 'scripts').mkdir()
             for name in ('host-bootstrap.sh.tftpl', 'on-demand-bootstrap.sh.tftpl', 'minecraft_storage.py', 'install_aws_cli.sh',
@@ -557,6 +595,16 @@ class PolicyBoundaryTests(unittest.TestCase):
         for name in ('TF_CLI_ARGS', 'TF_VAR_session_present', 'CLOUDFLARE_API_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'):
             self.assertNotIn(name, environment)
         self.assertEqual(environment['AWS_PROFILE'], 'workloads-admin')
+    def test_removal_accepts_only_matching_launch_lookup_state_removal(self):
+        current = state(True)
+        plan = {'resource_changes': [
+            {'address': 'aws_instance.host[0]', 'mode': 'managed', 'change': {'actions': ['delete'], 'before': HOST_ATTRIBUTES}},
+            {'address': 'aws_volume_attachment.data[0]', 'mode': 'managed', 'change': {'actions': ['delete'], 'before': ATTACHMENT_ATTRIBUTES}},
+            {'address': 'data.aws_ami.host[0]', 'mode': 'data', 'change': {'actions': ['delete'], 'before': {'id': DEPLOYMENT['ami_id']}}}]}
+        lifecycle.validate_plan(plan, present=False, state=current, deployment=DEPLOYMENT)
+        plan['resource_changes'][2]['change']['before']['id'] = 'ami-unreviewed'
+        with self.assertRaises(host.HostError): lifecycle.validate_plan(plan, present=False, state=current, deployment=DEPLOYMENT)
+
     def test_stopped_host_refresh_drift_is_narrow_and_retained_disk_drift_still_refused(self):
         current = state(True)
         before = copy.deepcopy(HOST_ATTRIBUTES)

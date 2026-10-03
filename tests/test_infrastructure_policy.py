@@ -21,6 +21,11 @@ def resource_blocks(directory):
 
 
 class ProtectedInfrastructurePolicyTests(unittest.TestCase):
+    def test_removal_does_not_lookup_a_launch_only_ami(self):
+        source = (INFRA / 'host.tf').read_text()
+        self.assertRegex(source, r'data "aws_ami" "host" \{\s*count\s*=\s*var\.session_present\s*\?\s*1\s*:\s*0')
+        self.assertRegex(resource_blocks(INFRA)['aws_instance.host'], r'ami\s*=\s*data\.aws_ami\.host\[0\]\.id')
+
     def test_retained_resources_refuse_destroy(self):
         main = resource_blocks(INFRA)
         state = resource_blocks(INFRA / "state-bootstrap")

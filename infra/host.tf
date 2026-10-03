@@ -1,4 +1,5 @@
 data "aws_ami" "host" {
+  count  = var.session_present ? 1 : 0
   owners = [var.ami_owner_account_id]
   filter {
     name   = "image-id"
@@ -34,7 +35,7 @@ moved {
 
 resource "aws_instance" "host" {
   count                       = var.session_present ? 1 : 0
-  ami                         = data.aws_ami.host.id
+  ami                         = data.aws_ami.host[0].id
   instance_type               = "m7g.large"
   availability_zone           = var.availability_zone
   subnet_id                   = aws_subnet.public.id
