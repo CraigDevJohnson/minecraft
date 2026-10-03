@@ -390,7 +390,7 @@ class OnDemandTests(unittest.TestCase):
         self.assertFalse(any(action in ('start', 'host-drain', 'stop-instances') for remote in FakeSession.instances for action,_ in remote.commands))
 
     def test_invalid_private_encoding_or_bundle_schema_precedes_journal_and_create(self):
-        for target, payload in ((self.operator,b'not JSON'), (self.operator,b'\xff'), (self.operator,b'[]'), (self.secret,b'invalid secret')):
+        for target, payload in ((self.operator,b'not JSON'), (self.operator,b'\xff'), (self.operator,b'\xef\xbb\xbf{}'), (self.operator,b'[]'), (self.secret,b'invalid secret')):
             saved = target.read_bytes()
             target.write_bytes(payload)
             self.policy['private_inputs_sha256'] = lifecycle.private_inputs_digest(self.policy)
