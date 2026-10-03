@@ -81,7 +81,9 @@ The test also checks runtime access settings, RCON's loopback listener, and that
 
 ## Recorded runtime result
 
-Current dual-transport validation evidence is recorded after the final explicit run below. Authenticated Geyser WebRTC admission, actual household joins and 26.60 compatibility remain unverified.
+The October 3 explicit ARM64 run passed for `survival-2026-10-03-dual-transport`, manifest `760f0497dabd4cea0713e2b0d73c584c887cb91519bfb732f58e723cb400affd`, using Docker Desktop Engine 29.8.1, the pinned server JRE, 5 GiB heap and two CPUs. It completed two healthy starts and clean stops, exact loopback port publication, Java 776/777 status handshakes, RakNet 2193 discovery, genuine Geyser signaling discovery and unsigned-SDP rejection before/after recreation. The separate native peer pair passed UDP 19133, ICE/DTLS/SCTP and both data-channel echoes. All three dimension fixtures and nine player/plugin/configuration files survived recreation, including the generated NetherNet identity. Managed config retained SHA-256 `961fc91c79c38f8e09fd14d1e959b06522ec72b595b933e78fef83563e4b8e42`. Its stopped containers/network were removed; synthetic retained data, classes, logs and report remain private.
+
+The report explicitly marks authenticated Geyser WebRTC admission and real Bedrock joins unverified. This run does not prove external Docker/AWS UDP reachability, household console transfers or 26.60 compatibility. No family world, player identity, live infrastructure or authentication setting was changed.
 
 ### Previous revision `survival-2026-10-02-bedrock-2650-viaversion`
 
