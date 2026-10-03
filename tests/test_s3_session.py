@@ -107,6 +107,7 @@ class S3Remote(FakeSession):
         self.commands.append((action, command))
         if action == self.failure: raise host.HostError('failed controlled remote phase')
         if action == 'runtime-attestation': return {'runtime': 'installed', 'bootstrap_sha256': DIGEST}
+        if action == 'private-input-verification': return {'private_inputs': 'verified'}
         if action == 'receipt-restore': return {'status': 'restored', 'receipt_id': RECEIPT_ID, 'application': 'stopped', 'instance': 'survival'}
         return {}
     def remote(self, action):
@@ -165,6 +166,29 @@ class S3SessionTests(unittest.TestCase):
         with self.assertRaises(host.HostError):session.stop()
         self.assertEqual(self.tofu.applies,0)
         self.assertFalse(any(action=='stop-instances' for remote in S3Remote.instances for action,_ in remote.commands))
+
+    def test_private_input_certificate_failure_refuses_existing_start_and_receipt_capture(self):
+        for action in ('start', 'stop'):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as child:
+                self.policy['journal_dir'] = str(Path(child).resolve() / 'journal')
+                session = self.create(True)
+                S3Remote.failure = 'private-input-verification'
+                with self.assertRaises(host.HostError):
+                    session.start('survival') if action == 'start' else session.stop()
+                self.assertEqual(self.tofu.applies, 0)
+                self.assertEqual(self.verifications, [])
+                self.assertFalse(any(name in ('start', 'host-drain-private', 'stop-instances')
+                                     for remote in S3Remote.instances for name,_ in remote.commands))
+                S3Remote.instances = []
+
+    def test_invalid_local_private_bundle_never_creates_cold_target_or_journal(self):
+        session = self.create(False)
+        self.operator.write_text('invalid operator JSON')
+        self.policy['private_inputs_sha256'] = base.private_inputs_digest(self.policy)
+        with self.assertRaises(host.HostError): session.start('survival')
+        self.assertEqual(self.tofu.applies, 0)
+        self.assertEqual(self.tofu.plans, [])
+        self.assertFalse(session.journal_path.exists())
 
     def test_conflicting_live_retention_policy_refuses_final_deletion(self):
         session = self.create(True)

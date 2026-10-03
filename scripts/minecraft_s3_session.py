@@ -16,7 +16,7 @@ from pathlib import Path
 from minecraft_host import HostError, HostSession
 from minecraft_on_demand import (OnDemandSession, SESSION_ADDRESSES, HOST_STOP_FIELDS, digest_file,
                                  matches_known, operation_lock, resources, save_private, validate_plan)
-from minecraft_private_transfer import build_bundle, private_file
+from minecraft_private_transfer import TransferError, build_bundle, private_file
 
 DATA_ADDRESS = 'aws_ebs_volume.session_data[0]'
 S3_ADDRESSES = SESSION_ADDRESSES | {DATA_ADDRESS}
@@ -201,6 +201,10 @@ class S3Session(OnDemandSession):
         return present
 
     def journal(self, action, instance=None):
+        try:
+            build_bundle(self.deployment, Path(self.policy['operator_file']), Path(self.policy['secret_file']))
+        except TransferError as exc:
+            raise HostError('reviewed private inputs fail transfer preflight') from exc
         if self.deployment.get('data_ownership') != 'session':
             raise HostError('reviewed session data ownership is required before S3-only lifecycle')
         current = self.tofu.state()
@@ -382,6 +386,7 @@ class S3Session(OnDemandSession):
                 if state == 'running':
                     session.wait_ssm()
                     self.attest_runtime(session)
+                    self.verify_private_inputs(session)
                     drain = session.remote('host-drain-private')
                     self.observed = {'instances': session.instance_statuses(drain)}
                     receipts = self.receipt_verifier(self.deployment, drain)
@@ -444,6 +449,7 @@ class S3Session(OnDemandSession):
                 session = self.running_session()
                 session.wait_ssm()
                 self.attest_runtime(session)
+                self.verify_private_inputs(session)
                 self.record(journal, 'starting-game')
             elif journal['phase'] == 'begun':
                 self.prepare_start(journal)
@@ -494,6 +500,7 @@ class S3Session(OnDemandSession):
                 session.execute_shell(f'/usr/local/sbin/minecraft-bootstrap stage --region {self.deployment["region"]} --bucket {self.deployment["backup_bucket_name"]} --sha256 {digest}', 'bootstrap-release')
                 bundle, bundle_digest = self.private_bundle(journal)
                 self.transfer(session, bundle, bundle_digest)
+                self.verify_private_inputs(session)
                 session.execute_shell(f'bash /opt/minecraft-bootstrap/{digest}/scripts/install_runtime.sh >/dev/null && printf \'{{"runtime":"installed"}}\\n\'', 'runtime-install')
                 self.attest_runtime(session)
                 self.record(journal, 'runtime-installed')
@@ -506,6 +513,7 @@ class S3Session(OnDemandSession):
                     receipt = journal['receipts'][name]['receipt']
                     bundle, digest = self.private_bundle(journal, receipt=receipt)
                     self.transfer(session, bundle, digest)
+                    self.verify_private_inputs(session)
                     command = ('/usr/local/sbin/minecraft-restore --config /etc/minecraft/operator.json '
                                '--receipt /etc/minecraft/recovery-receipt.json --bootstrap-sha256 ' + self.policy['bootstrap_sha256']
                                + ' --timeout 3000 --resume ' + name + ' ' + receipt['recovery_point'])
@@ -520,6 +528,7 @@ class S3Session(OnDemandSession):
                 self.record(journal, 'starting-game')
             if self.binding() != journal['binding']:
                 raise HostError('S3-only inputs changed before game start')
+            self.verify_private_inputs(session)
             try:
                 result = session.start(instance)
             finally:

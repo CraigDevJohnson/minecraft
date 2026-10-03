@@ -4,7 +4,7 @@ The approved second phase adds `lifecycle_mode="s3-only"`. A completed stop owns
 
 ## Prepare ownership and protection
 
-First complete #8's restore/failure/update proof and #23's reviewed host replacement. Keep the original data disk, world/player checkpoints and completed recovery points available throughout preparation. Update the compatible installed runtime while all instances are stopped; the S3-only controller attests public installed scripts, definitions/content, launchers and service against the pinned bootstrap archive before accepting a final-session receipt.
+First complete #8's restore/failure/update proof and #23's reviewed host replacement. Keep the original data disk, world/player checkpoints and completed recovery points available throughout preparation. Update the compatible installed runtime while all instances are stopped; the S3-only controller attests public installed scripts, definitions/content, launchers and service against the pinned bootstrap archive before accepting a final-session receipt. It also verifies actual installed operator/RCON bytes and their trusted private-input certificate against the reviewed digest before private drain, restore or game start. Existing hosts need stopped-game secure reconfiguration to establish that certificate; a new policy alone does not adopt their old files.
 
 The default `data_ownership="retained"` keeps `aws_ebs_volume.data[0]` protected with `prevent_destroy=true`. The compatibility moved block indexes the old `aws_ebs_volume.data` address without replacing the disk. Plan this as a no-change compatibility migration and inspect the unchanged physical volume/UUID/AZ/encryption/size, root, attachment, network, IAM and backup identities.
 
@@ -47,7 +47,7 @@ The actual saved removal plan can delete only the recorded session host, orderly
 
 ## Start, provenance and restore
 
-Before provisioning and again before the saved create apply, the same read-only replay check verifies existing selected protection. The controller resolves every exact receipt/current selection and downloads/verifies marker/archive content outside the target disk. The operation records immutable receipt IDs/source storage, a distinct random target UUID and a bounded capacity-sized disk, with a 2-GiB floor and 128-GiB ceiling. Capacity includes receipt data/archive requirements and filesystem reserve. Missing, corrupt, incompatible or oversized recovery data blocks provisioning and game start.
+Local private JSON/encoding/RCON bundle validation runs before an operation journal or provisioning. Before provisioning and again before the saved create apply, the same read-only replay check verifies existing selected protection. The controller resolves every exact receipt/current selection and downloads/verifies marker/archive content outside the target disk. The operation records immutable receipt IDs/source storage, a distinct random target UUID and a bounded capacity-sized disk, with a 2-GiB floor and 128-GiB ceiling. Capacity includes receipt data/archive requirements and filesystem reserve. Missing, corrupt, incompatible or oversized recovery data blocks provisioning and game start.
 
 The create plan may only create the session host, encrypted gp3 disk and orderly attachment with those recorded values. Successful apply records its actual UTC window (start floored to a second, precise end). Unknown/partial apply outcomes without a proven successful first-use window preserve resources and require explicit repair; they never create another host or disk automatically.
 

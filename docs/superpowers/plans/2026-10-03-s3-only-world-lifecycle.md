@@ -61,6 +61,6 @@
 **Interfaces:** `reconcile_retention(store,instance,journal_dir,current_selection=...,active_receipt_ids=...)` runs under the same full-operation lock and preserves latest fourteen/current/active exact versions. Runtime pruning is disabled in S3-only mode.
 
 - [x] Integrate component commits without altering their owned files; include retention/provenance/controller code in source binding and appropriate public release members.
-- [x] Run meaningful boundary tests and the combined `.tools/bin/task check` on final state; independently review and fix findings. Final gate: 444 Python tests, Go race/vet and 64 infrastructure assertions; independent bounded review found no safety blocker.
+- [x] Run meaningful boundary tests and the combined `.tools/bin/task check` on final state; independently review and fix findings. Final gate: 452 Python tests, Go race/vet and 64 infrastructure assertions; independent bounded review found no safety blocker.
 - [x] Commit the complete verified local implementation with `Refs #24`.
 - [ ] Parent publishes and integrates the reviewed PR; keep the issue open for actual no-EBS S3 round trip, failure proof, capacity/provenance and measured timing.

@@ -27,6 +27,7 @@ class BootstrapReleaseTests(unittest.TestCase):
             staged = release.stage_release(payload, digest, Path(temporary), require_root=False)
             commands = (
                 (staged / 'scripts/minecraft_restore.py', [], ('--receipt', '--bootstrap-sha256', '--resume', '--timeout')),
+                (staged / 'scripts/minecraft_private_transfer.py', ['verify-inputs'], ('--sha256',)),
                 (ROOT / 'scripts/minecraft_bootstrap_release.py', ['stage'], ('--region', '--bucket', '--sha256')),
                 (ROOT / 'scripts/minecraft_bootstrap_release.py', ['verify'], ('--sha256',)),
             )
