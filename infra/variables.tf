@@ -159,3 +159,30 @@ variable "budget_notification_email" {
     error_message = "budget_notification_email must be an email address."
   }
 }
+
+variable "idle_stop" {
+  description = "Optional scheduled function that drains and stops an idle host. package_path is the zip built by `task lambda:package`; null deploys none of its resources."
+  type = object({
+    package_path                = string
+    cloudflare_token_secret_arn = string
+    idle_minutes                = optional(number, 30)
+    permissions_boundary_arn    = optional(string)
+  })
+  default = null
+  validation {
+    condition     = var.idle_stop == null || try(can(regex("^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$", var.idle_stop.cloudflare_token_secret_arn)) && split(":", var.idle_stop.cloudflare_token_secret_arn)[3] == var.region && split(":", var.idle_stop.cloudflare_token_secret_arn)[4] == var.account_id, false)
+    error_message = "idle_stop.cloudflare_token_secret_arn must name an administrator-owned secret in the deployment account and region."
+  }
+  validation {
+    condition     = var.idle_stop == null || length(var.instance_ids) == 1
+    error_message = "idle_stop supports exactly one game instance on Java port 25565."
+  }
+  validation {
+    condition     = var.idle_stop == null || try(var.idle_stop.idle_minutes >= 10 && var.idle_stop.idle_minutes <= 240 && floor(var.idle_stop.idle_minutes) == var.idle_stop.idle_minutes, false)
+    error_message = "idle_stop.idle_minutes must be a whole number from 10 to 240."
+  }
+  validation {
+    condition     = var.idle_stop == null || try(var.idle_stop.permissions_boundary_arn == null || (can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", var.idle_stop.permissions_boundary_arn)) && split(":", var.idle_stop.permissions_boundary_arn)[4] == var.account_id), false)
+    error_message = "idle_stop.permissions_boundary_arn must name a managed policy in the target account."
+  }
+}

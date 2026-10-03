@@ -14,6 +14,13 @@ instance_ids              = ["survival"]
 monthly_budget_usd        = 25
 budget_notification_email = "operator@example.invalid"
 
+# Optional: drain and stop an idle host. Build the package with `task lambda:package`
+# and see docs/operations/idle-stop.md before enabling it.
+# idle_stop = {
+#   package_path = "/absolute/path/to/minecraft/.build/idle-stop.zip"
+#   idle_minutes = 30
+#   cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef"
+# }
 # Retained data disk size in GiB. Grow only: never decrease it for an existing disk
 # (docs/operations/data-disk-capacity.md). An existing deployment sets its current
 # size before planning.
