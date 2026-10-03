@@ -2,7 +2,7 @@
 
 Use this procedure only after issue #7 records the approved AWS account, deployment, recovery resources, and cleanup list. The commands mutate live AWS resources. Save raw output outside Git in a mode-0700 directory. Do not put account IDs, resource IDs, player data, private configuration, state, or SSM output in an issue or pull request.
 
-Issue #8 remains incomplete until a deployed `survival` instance passes every check in this guide. Archive extraction alone does not pass.
+Issue #8 requires the technical checks in its approved scope: retained-disk persistence and host replacement, isolated restore and update/recovery, visible failed backups with blocked restart/drain, source preservation, recorded measurements and exact temporary cleanup. Archive extraction alone does not pass. The optional source-bucket lifecycle-expiry section requires separate authorization and is not an issue-8 completion gate. It does not waive issue #24's separate sole-S3 retention safeguards.
 
 On October 3, 2026, Craig removed recovery authorization and maintenance windows and overall recovery time ceilings. Approved recovery work continues to completion without renewing permission because a prior window elapsed. Record actual phase and total times; the earlier 60-minute target is historical context, not a pass/fail or stop condition. Command execution timeouts, the mandatory 15-minute provenance wait, exact resource/write scope and source integrity checks remain unchanged. Recorded apply intervals below bind creation and attachment evidence; they do not expire the approved recovery scope.
 
@@ -456,9 +456,11 @@ fi
 
 Do not report cleanup as successful until every query and the state check pass. Then verify that the source host, source retained volume, state, bucket, and selected recovery point remain intact, and that the hostname's record is unchanged by the rehearsal host.
 
-## Confirm source-bucket lifecycle expiry
+## Optional separately authorized source-bucket lifecycle expiry
 
-The retained source backup bucket has the lifecycle rule; the temporary recovery bucket is destroyed with the recovery host and cannot supply delayed evidence. Use operator credentials for these checks, not the recovery host's source-read-only role. Keep the recovery resources destroyed while waiting. Record the source bucket's versioning and effective lifecycle configuration privately:
+This entire section is optional and requires its own authorization. The original October 3 issue-8 approval excluded the delayed lifecycle probe; its absence does not delay or invalidate that recovery proof. Issue #24 still requires effective protection of sole-copy recovery versions before live disk deletion.
+
+The retained source backup bucket has the lifecycle rule; the temporary recovery bucket is destroyed with the recovery host and cannot supply delayed evidence. For an authorized lifecycle investigation, use operator credentials, not the recovery host's source-read-only role. Keep the recovery resources destroyed while waiting. Record the source bucket's versioning and effective lifecycle configuration privately:
 
 ```sh
 source_bucket="$(jq -er .backup_bucket_name "$source_deployment")" || exit 1
@@ -656,7 +658,7 @@ If either ID is still present, record **pending**, allow S3 more time, and repea
 
 Add a dated result below after the live run. Keep identifiers and player data in the private evidence directory. Include hashes of the private evidence index so the result remains tied to the tested revision.
 
-Record these fields:
+Record these fields for the approved recovery scope. Distinguish original source tests from each isolated generation, and mark a phase unmeasured if it was not timed separately:
 
 - Git revision and UTC test interval;
 - clean stop, backup, clean start, replacement start, provenance wait, zero-fill, zero check, restore, and total recovery times;
@@ -668,9 +670,11 @@ Record these fields:
 - source backup integrity before and after the rehearsal;
 - stopped-state billable resource classes;
 - temporary cleanup result;
-- source-bucket lifecycle configuration and versioning check, candidate or approved probe origin, 1-day multipart and 14-day noncurrent eligibility times, observed results or pending/exception status, exact-probe cleanup result, and unchanged source backup result;
+- source-bucket versioning/lifecycle configuration if inspected, without claiming actual expiry from configuration;
 - actual total recovery time and phase breakdown, preserving dated measurements against any earlier target;
 - private evidence index filename and SHA-256.
+
+Only for a separately authorized optional lifecycle investigation, also record the candidate/probe origin, 1-day multipart and 14-day noncurrent eligibility times, observed or pending/exception outcomes, exact-probe cleanup and unchanged source backups. Otherwise record this investigation as excluded/not performed; it is not part of issue #8's required results.
 
 ### Live results
 
@@ -681,14 +685,36 @@ Historical status on 2026-09-18: no deployed run had been completed, and issue #
 
 [Issue #8](https://github.com/CraigDevJohnson/minecraft/issues/8) records completed retained-EBS stop/start and host replacement, isolated S3 restore and update, then fresh temporary host/root/data replacement and another guarded restore. Generation two restored the reviewed `62da016` runtime and selected source point. All 15 known checkpoint hashes, including 11 player files, matched. A completed 233,153,696-byte temporary backup independently passed its archive checksum and all 249 file inventory entries.
 
+The [original October 2 source tests](https://github.com/CraigDevJohnson/minecraft/issues/8#issuecomment-5961933530) used the retained disk and runtime `58643c0`; their exact UTC test interval was not recorded in the public summary. The [October 3 source migration](https://github.com/CraigDevJohnson/minecraft/issues/8#issuecomment-5967188290) used `62da016`. Isolated generation one ran from 11:24:18.918 UTC to initial readiness/checkpoint confirmation at 12:07:31.569 UTC; the later full player-file audit completed at 12:38:39.423 UTC. Generation two began at 21:33:27.178 UTC, confirmed all checkpoints at 22:11:36.747 UTC and finished independent cleanup/family-status readbacks at 22:32:39.097 UTC, all on October 3. The preserved generation-one evidence and final generation-two index separate these intervals.
+
+| Original source/generation-one measurement | Recorded result |
+| --- | --- |
+| October 2 retained-EBS stop/backup and start | Three cycles: 35 seconds stop/backup; 32–34 seconds start |
+| October 2 host stop/start | 51 seconds to ready; separate host-stop duration unmeasured |
+| October 2 retained-disk host replacement | 55 seconds drain/stop/backup; 43 seconds unattended retained mount/verify; 50 seconds replacement start |
+| October 3 source shrink/restore | 39 seconds stop/backup; 70 seconds apply; 15-minute provenance wait; 40 seconds zero-fill; 42 seconds initialization; 7 seconds restore; 54 seconds ready start; about 25 minutes downtime |
+| Isolated generation-one restore/start/update/stop-backup | 11.1 / 48.5 / 75.8 / 51.8 seconds, recorded phase timings |
+| Isolated generation-one zero-fill/initialization | 15.535 / 16.960 seconds, SSM command elapsed |
+| Isolated generation-one recovery total | 43.21 minutes initially; 74.34 minutes including the later full player-file audit, a recorded exception to the former target |
+
 | Generation-two measurement | Actual result |
 | --- | --- |
 | Recovery to checkpoint confirmation | 2,289.6 seconds, 38.16 minutes |
+| Saved replacement apply | 90.04 seconds; 92.2 seconds including output readbacks |
 | Mandatory monotonic provenance wait | 904.3 seconds |
+| Zero-fill / initialization | 15.497 / 16.274 seconds, SSM command elapsed |
 | Remote restore | 7.34 seconds |
 | Remote ready start | 46.29 seconds |
 | Remote clean stop and backup | 38.31 seconds |
 | Final temporary cleanup apply | 36.0 seconds |
+
+Initialization in both isolated generations includes the mandatory whole-device zero check. Its duration was not timed separately. Neither original source summary separates save, clean application stop and backup publication times from the combined stop/backup measurements.
+
+The selected source archive was 233,151,562 bytes with 263,673,620 uncompressed file bytes. The source data disk was 5 GiB and 9 percent used after the October 3 shrink; exact source used/available bytes during generation two were not measured. The isolated target used a 22 GiB root and 2 GiB data disk. Generation-two filesystem size was 2,040,373,248 bytes, available space 1,520,734,208 bytes and instance footprint 393,440,952 bytes. These are dated measurements, not a promise about growing family worlds or all future backups.
+
+The October 2 Elastic IP endpoint survived stop/start and retained-disk host replacement, with both game ports reachable. After the October 3 Elastic IP removal, the hostname parked on stop and followed the new address on start; both game protocols answered through it. The isolated recovery deployment had no hostname and performed no DNS update. The pre-rehearsal stopped-source audit retained the 20 GiB root, 5 GiB data disk, backup/state S3 storage and budget resource, with no project Elastic IP; actual billing totals were not measured. Final family compute and its auto-assigned address remained running for play. The temporary host/root/data/address and bucket were removed by cleanup. This is not no-EBS idle proof for #23/#24.
+
+Read-only source configuration inspection confirmed versioning enabled, one enabled lifecycle rule with 14-day noncurrent-version expiry and 1-day incomplete-upload abort, and no current-object expiration. Actual lifecycle deletion/abort was not observed: the separately authorized optional probe was excluded. No source probe writes or delayed eligibility wait are claimed.
 
 Temporary S3 write denial produced a nonzero clean stop, visible failed backup, blocked restart and blocked host-drain certification. Restoring only the original temporary write policy allowed the pending backup and drain to complete without restarting the game. Final cleanup removed the exact approved temporary resources. Independent AWS checks confirmed host termination, root/data disk deletion, absent temporary bucket and versions, security group, profile, role and inline policies; the dedicated recovery state was empty. Both family survival and creative remained running, their disks unchanged, and the selected source marker/archive exact and current versions, ETags and sizes preserved.
 
