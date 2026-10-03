@@ -30,9 +30,28 @@ def encoded(value):
     return (json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode()
 
 
-def digest_file(path):
+def budget_checker(store):
+    return getattr(store, 'check_deadline', None)
+
+
+def check_budget(store):
+    check = budget_checker(store)
+    if check is not None:
+        check()
+
+
+def digest_file(path, *, check_deadline=None):
+    if check_deadline is not None:
+        check_deadline()
     with Path(path).open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        if check_deadline is None:
+            return hashlib.file_digest(stream, 'sha256').hexdigest()
+        digest = hashlib.sha256()
+        while chunk := stream.read(1024 * 1024):
+            check_deadline()
+            digest.update(chunk)
+        check_deadline()
+        return digest.hexdigest()
 
 
 def read_json(path):
@@ -163,8 +182,9 @@ def load_recovery(store, instance, recovery_point, workspace):
     archive = metadata['archive']
     if (not store.download(archive['key'], archive_path, max_bytes=archive['size_bytes'])
             or archive_path.stat().st_size != archive['size_bytes']
-            or digest_file(archive_path) != archive['sha256']):
+            or digest_file(archive_path, check_deadline=budget_checker(store)) != archive['sha256']):
         raise BackupError('recovery archive is missing or corrupt')
+    check_budget(store)
     return metadata, archive_path
 
 
@@ -175,9 +195,10 @@ def _object_receipt(store, key, target, max_bytes, *, expected=None):
                                        version_id=expected['version_id'] if expected else None)
     if revision is None:
         raise BackupError('the selected recovery object version is unavailable')
-    result = {**revision, 'sha256': digest_file(target)}
+    result = {**revision, 'sha256': digest_file(target, check_deadline=budget_checker(store))}
     if expected is not None and result != expected:
         raise BackupError('the selected recovery object version differs from its receipt')
+    check_budget(store)
     return result
 
 
@@ -260,6 +281,7 @@ def load_receipt_recovery(store, receipt, workspace, *, bootstrap_sha256=None):
         raise BackupError('completed recovery point differs from the final-session receipt')
     archive = workspace / 'recovery.tar.gz'
     _object_receipt(store, receipt['archive']['key'], archive, receipt['archive']['size_bytes'], expected=receipt['archive'])
+    check_budget(store)
     return metadata, archive
 
 
@@ -287,7 +309,7 @@ def create_recovery_receipt(store, source_deployment, instance, evidence, bootst
     # Inspect every archived file before this receipt can authorize deletion of the only live copy.
     from minecraft_restore import extract_recovery
     with tempfile.TemporaryDirectory(prefix='.minecraft-receipt-check-', dir=workspace) as temporary:
-        extract_recovery(metadata, archive_path, Path(temporary) / 'verified')
+        extract_recovery(metadata, archive_path, Path(temporary) / 'verified', check_deadline=budget_checker(store))
     if previous is not None:
         validate_receipt(previous)
         if (previous['instance'] != instance or previous['source']['account_id'] != source_deployment.get('account_id')
@@ -305,7 +327,9 @@ def create_recovery_receipt(store, source_deployment, instance, evidence, bootst
             'required_capacity_bytes': data_bytes + archive['size_bytes'] + 1024 ** 3,
             'sequence': previous['sequence'] + 1 if previous else 1,
             'previous_receipt_id': previous['receipt_id'] if previous else None}
-    return validate_receipt({**core, 'receipt_id': hashlib.sha256(encoded(core)).hexdigest()})
+    result = validate_receipt({**core, 'receipt_id': hashlib.sha256(encoded(core)).hexdigest()})
+    check_budget(store)
+    return result
 
 
 def _selection_key(instance):
@@ -338,6 +362,7 @@ def load_current_receipt(store, instance, workspace, *, expected_receipt_id=None
         receipt = validate_receipt(read_json(receipt_path))
         if any(receipt[field] != selection[field] for field in ('instance', 'receipt_id', 'sequence', 'previous_receipt_id')):
             raise BackupError('authoritative recovery selection and its receipt disagree')
+        check_budget(store)
         return receipt, {**selection, 'revision': revision}
     except (KeyError, TypeError, ValueError, AttributeError) as error:
         raise BackupError('malformed authoritative recovery selection') from error
@@ -348,6 +373,7 @@ def publish_recovery_receipt(store, receipt, workspace, *, previous_selection=No
     workspace = Path(workspace)
     current, observed = load_current_receipt(store, receipt['instance'], workspace, allow_absent=True)
     if current and current['receipt_id'] == receipt['receipt_id']:
+        check_budget(store)
         return observed
     if observed != previous_selection:
         raise BackupError('authoritative recovery selection changed during publication')
@@ -373,6 +399,7 @@ def publish_recovery_receipt(store, receipt, workspace, *, previous_selection=No
     store.conditional_write(_selection_key(receipt['instance']), path,
                             expected_etag=previous_selection['revision']['etag'] if previous_selection else None)
     _, verified = load_current_receipt(store, receipt['instance'], workspace, expected_receipt_id=receipt['receipt_id'])
+    check_budget(store)
     return verified
 
 
@@ -432,13 +459,16 @@ def verify_stop_receipt(deployment, drain, journal_dir, bootstrap_sha256, *, sto
                 selection = publish_recovery_receipt(store, receipt, workspace, previous_selection=selection)
             write_json(journal_dir / f"receipt-{receipt['receipt_id']}.json", receipt)
             write_json(local_path, selection)
+            check_budget(store)
             result[instance] = {'receipt_id': receipt['receipt_id'], 'selection': selection, 'receipt': receipt}
     return result
 
 
-def tree_snapshot(data):
+def tree_snapshot(data, *, check_deadline=None):
     entries = {}
     def visit(path):
+        if check_deadline is not None:
+            check_deadline()
         info = path.lstat()
         if info.st_dev != data.stat().st_dev or (not stat.S_ISDIR(info.st_mode) and not stat.S_ISREG(info.st_mode)):
             raise BackupError('recovery data contains a link, mount or unsupported file')
@@ -563,6 +593,7 @@ def publish(request, store, workspace, *, now=None):
         verified_metadata, _ = load_recovery(store, instance, point, workspace)
         if verified_metadata != metadata:
             raise BackupError('logical recovery point already contains different metadata')
+    check_budget(store)
     return {'schema_version': 1, 'status': 'complete', 'instance': instance,
             'session': request['session'], 'manifest_sha256': request['manifest_sha256'],
             'recovery_point': point,

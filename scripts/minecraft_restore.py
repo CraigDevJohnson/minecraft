@@ -15,19 +15,24 @@ import tarfile
 import tempfile
 import uuid
 
-from minecraft_backup import BackupError, digest_file, load_recovery, load_receipt_recovery, read_json, tree_snapshot
+from minecraft_backup import (BackupError, budget_checker, check_budget, digest_file,
+                              load_recovery, load_receipt_recovery, read_json, tree_snapshot)
 from minecraft_content import manifest_digest
 from minecraft_instance import LinuxMachine, OperationError, private_json, write_json
 
 
-def extract_recovery(metadata, archive_path, destination):
+def extract_recovery(metadata, archive_path, destination, *, check_deadline=None):
     """Extract the validated inventory; ignore tar ownership and permissions."""
     expected = {entry["path"]: entry for entry in metadata["files"]}
+    if check_deadline is not None:
+        check_deadline()
     destination.mkdir(mode=0o700)
     seen = set()
     try:
         with tarfile.open(archive_path, mode="r:gz") as archive:
             for member in archive:
+                if check_deadline is not None:
+                    check_deadline()
                 entry = expected.get(member.name)
                 if not entry or member.name in seen:
                     raise BackupError("archive and recovery inventory differ")
@@ -46,6 +51,8 @@ def extract_recovery(metadata, archive_path, destination):
                 with archive.extractfile(member) as source, output.open("xb") as stream:
                     os.chmod(output, 0o600)
                     while chunk := source.read(1024 * 1024):
+                        if check_deadline is not None:
+                            check_deadline()
                         stream.write(chunk)
                         copied += len(chunk)
                         digest.update(chunk)
@@ -57,16 +64,22 @@ def extract_recovery(metadata, archive_path, destination):
         raise BackupError("recovery archive is invalid or incomplete") from error
     if seen != set(expected):
         raise BackupError("archive and recovery inventory differ")
+    if check_deadline is not None:
+        check_deadline()
 
 
-def apply_restore_ownership(data):
+def apply_restore_ownership(data, *, check_deadline=None):
     for directory, _, files in os.walk(data):
+        if check_deadline is not None:
+            check_deadline()
         os.chown(directory, 1000, 1000)
         for filename in files:
+            if check_deadline is not None:
+                check_deadline()
             os.chown(Path(directory) / filename, 1000, 1000)
 
 
-def verify_restored_receipt(target, metadata, receipt, deployment, *, metadata_reader=os.lstat):
+def verify_restored_receipt(target, metadata, receipt, deployment, *, metadata_reader=os.lstat, check_deadline=None):
     """Recognize only a complete, untouched install of this receipt on this target."""
     expected_storage = {'volume_id': deployment['data_volume_id'], 'filesystem_uuid': deployment['data_filesystem_uuid']}
     try:
@@ -87,10 +100,12 @@ def verify_restored_receipt(target, metadata, receipt, deployment, *, metadata_r
                 or read_json(target / 'runtime/manifest.json') != metadata['manifest']
                 or read_json(target / 'runtime/definition.json') != metadata['definition']):
             raise BackupError('occupied restore target does not belong to the same complete receipt; preserve it for repair')
-        before = tree_snapshot(target / 'data')
+        before = tree_snapshot(target / 'data', check_deadline=check_deadline)
         if set(before) != {entry['path'] for entry in metadata['files']}:
             raise BackupError('restored target inventory differs from its receipt; preserve it for repair')
         for entry in metadata['files']:
+            if check_deadline is not None:
+                check_deadline()
             path = target / entry['path']
             information = path.lstat()
             permissions = metadata_reader(path)
@@ -101,12 +116,14 @@ def verify_restored_receipt(target, metadata, receipt, deployment, *, metadata_r
             if entry['type'] == 'directory':
                 if not stat.S_ISDIR(information.st_mode):
                     raise BackupError('restored target directory differs from its receipt')
-            elif information.st_size != entry['size_bytes'] or digest_file(path) != entry['sha256']:
+            elif information.st_size != entry['size_bytes'] or digest_file(path, check_deadline=check_deadline) != entry['sha256']:
                 raise BackupError('restored target checkpoint differs from its receipt; preserve it for repair')
-        if before != tree_snapshot(target / 'data'):
+        if before != tree_snapshot(target / 'data', check_deadline=check_deadline):
             raise BackupError('restored target changed during verification; preserve it for repair')
     except (OSError, KeyError, TypeError) as error:
         raise BackupError('occupied restore target is partial or unverifiable; preserve it for repair') from error
+    if check_deadline is not None:
+        check_deadline()
 
 
 def restore(machine, source_deployment, instance, recovery_point, store, *, receipt=None,
@@ -115,6 +132,7 @@ def restore(machine, source_deployment, instance, recovery_point, store, *, rece
         raise BackupError("restore requires an explicit configured instance")
     target = machine.root / "instances" / instance
     with machine.lock():
+        check_budget(store)
         machine.verify_storage()
         occupied = target.exists() or target.is_symlink()
         if machine.inspect(instance)["exists"] or (occupied and not (receipt is not None and resume)):
@@ -141,10 +159,11 @@ def restore(machine, source_deployment, instance, recovery_point, store, *, rece
                 raise BackupError("target content manifest or definition is incompatible with the recovery point")
             if occupied:
                 verify_restored_receipt(target, metadata, receipt, machine.deployment,
-                                        metadata_reader=getattr(machine, 'restore_metadata', os.lstat))
+                                        metadata_reader=getattr(machine, 'restore_metadata', os.lstat), check_deadline=budget_checker(store))
                 machine.verify_storage()
                 if machine.inspect(instance)['exists']:
                     raise BackupError('restore target acquired a container; preserve it for repair')
+                check_budget(store)
                 return {'schema_version': 1, 'status': 'restored', 'instance': instance,
                         'recovery_point': recovery_point, 'application': 'stopped', 'backup': 'not-required',
                         'receipt_id': receipt['receipt_id'], 'resumed': True}
@@ -154,7 +173,7 @@ def restore(machine, source_deployment, instance, recovery_point, store, *, rece
                 if capacity.f_frsize * capacity.f_bavail < remaining_bytes:
                     raise BackupError('restore target has insufficient available capacity for the selected receipt')
             staged = workspace / "instance"
-            extract_recovery(metadata, archive, staged)
+            extract_recovery(metadata, archive, staged, check_deadline=budget_checker(store))
             write_json(staged / "runtime/manifest.json", metadata["manifest"])
             write_json(staged / "runtime/definition.json", metadata["definition"])
             state = {
@@ -166,15 +185,21 @@ def restore(machine, source_deployment, instance, recovery_point, store, *, rece
                              restore_target={'volume_id': machine.deployment['data_volume_id'],
                                              'filesystem_uuid': machine.deployment['data_filesystem_uuid']})
             write_json(staged / "operation.json", state)
-            ownership = getattr(machine, "restore_ownership", apply_restore_ownership)
-            ownership(staged / "data")
+            ownership = getattr(machine, "restore_ownership", None)
+            if ownership is None:
+                apply_restore_ownership(staged / 'data', check_deadline=budget_checker(store))
+            else:
+                ownership(staged / 'data')
+            check_budget(store)
             for directory, _, _ in os.walk(staged, topdown=False):
+                check_budget(store)
                 descriptor = os.open(directory, os.O_RDONLY)
                 try:
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
             machine.verify_storage()
+            check_budget(store)
             if target.exists() or target.is_symlink() or machine.inspect(instance)["exists"]:
                 raise BackupError("restore target became occupied; no recovery data was installed")
             created_parent = not target.parent.exists()
@@ -195,6 +220,7 @@ def restore(machine, source_deployment, instance, recovery_point, store, *, rece
                     with contextlib.suppress(OSError):
                         target.parent.rmdir()
                 raise
+    check_budget(store)
     result = {"schema_version": 1, "status": "restored", "instance": instance,
               "recovery_point": recovery_point, "application": "stopped", "backup": "not-required"}
     return {**result, 'receipt_id': receipt['receipt_id'], 'resumed': False} if receipt is not None else result
@@ -207,6 +233,7 @@ def main(argv=None):
     parser.add_argument("--receipt", help="private exact-version S3-only recovery receipt")
     parser.add_argument("--bootstrap-sha256", help="installed reviewed runtime bundle checksum")
     parser.add_argument("--resume", action="store_true", help="verify an occupied target restored from the same receipt")
+    parser.add_argument('--timeout', type=int, default=3000, help='bounded restore operation budget, 1 to 3000 seconds')
     parser.add_argument("instance")
     parser.add_argument("recovery_point")
     args = parser.parse_args(argv)
@@ -222,7 +249,7 @@ def main(argv=None):
         else:
             raise BackupError('the original source deployment or an exact recovery receipt is required')
         result = restore(machine, source, args.instance, args.recovery_point,
-                         S3Store(source["backup_bucket_name"], region=source.get("region")), receipt=receipt,
+                         S3Store(source["backup_bucket_name"], region=source.get("region"), timeout=args.timeout), receipt=receipt,
                          bootstrap_sha256=args.bootstrap_sha256, resume=args.resume)
         print(json.dumps(result, sort_keys=True))
         return 0

@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import contextlib
+import io
 from unittest import mock
 
 import test_restore as restore_fixture
@@ -411,6 +413,84 @@ class RecoveryReceiptTests(unittest.TestCase):
         result = backup.verify_stop_receipt(source, drain, self.journal, self.bootstrap, store=self.store, timeout=3000)
         self.assertEqual(set(result), {'survival', 'creative'})
         self.assertEqual(factory.call_args_list, [mock.call(timeout=3000), mock.call(timeout=3000)])
+
+    def test_archive_hashing_checks_budget_between_file_chunks_without_a_later_s3_call(self):
+        key = 'instances/survival/objects/point/data.tar.gz'
+        self.store.put(key, b'x' * (3 * 1024 * 1024))
+        check = mock.Mock(side_effect=[None, None, backup.BackupError('verification budget expired')])
+        self.store.check_deadline = check
+        with self.assertRaisesRegex(backup.BackupError, 'budget expired'):
+            backup._object_receipt(self.store, key, self.workspace / 'large-archive.tar.gz', 4 * 1024 * 1024)
+        self.assertEqual(check.call_count, 3)
+        self.assertEqual(self.store.reads, [(key, self.store.current[key])])
+
+    def test_matching_prior_receipt_cannot_certify_hashing_after_budget_expiry(self):
+        backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+        original = backup.digest_file
+        expired = False
+        def check():
+            if expired:
+                raise backup.BackupError('verification budget expired')
+        self.store.check_deadline = check
+        def expire_before_archive_hash(path, **kwargs):
+            nonlocal expired
+            if str(path).endswith('.tar.gz'):
+                expired = True
+            return original(path, **kwargs)
+        before = dict(self.store.objects)
+        with mock.patch.object(backup, 'digest_file', side_effect=expire_before_archive_hash), self.assertRaisesRegex(backup.BackupError, 'budget expired'):
+            backup.verify_stop_receipt(self.source, self.drain(), self.journal, self.bootstrap, store=self.store)
+        self.assertEqual(self.store.objects, before)
+
+    def test_extraction_budget_failure_leaves_target_absent_and_backups_unchanged(self):
+        receipt = self.receipt()
+        def check():
+            if list(self.fixture.target_root.glob('.minecraft-restore-*/instance/data')):
+                raise backup.BackupError('extraction budget expired')
+        self.store.check_deadline = check
+        before = dict(self.store.objects)
+        with self.assertRaisesRegex(backup.BackupError, 'extraction budget expired'):
+            self.restore(receipt)
+        self.assertFalse((self.fixture.target_root / 'instances').exists())
+        self.assertEqual(self.store.objects, before)
+
+    def test_final_budget_expiry_preserves_complete_target_for_same_receipt_retry(self):
+        receipt = self.receipt()
+        original_lock = self.fixture.machine.lock
+        expired = False
+        def check():
+            if expired:
+                raise backup.BackupError('final budget expired')
+        @contextlib.contextmanager
+        def expiring_lock():
+            nonlocal expired
+            with original_lock():
+                yield
+            expired = True
+        self.store.check_deadline = check
+        self.fixture.machine.lock = expiring_lock
+        with self.assertRaisesRegex(backup.BackupError, 'final budget expired'):
+            self.restore(receipt)
+        target = self.fixture.target_root / 'instances/survival'
+        self.assertEqual((target / 'data/world/level.dat').read_bytes(), self.fixture.checkpoints['data/world/level.dat'])
+        expired = False
+        self.fixture.machine.lock = original_lock
+        self.assertTrue(self.restore(receipt, resume=True)['resumed'])
+
+    def test_restore_cli_passes_default_and_explicit_bounded_operation_budget(self):
+        receipt = self.receipt()
+        for timeout in (None, 2500):
+            args = ['--config', 'operator.json', '--receipt', 'receipt.json', '--bootstrap-sha256', self.bootstrap,
+                    'survival', receipt['recovery_point']]
+            if timeout is not None:
+                args.extend(('--timeout', str(timeout)))
+            with mock.patch.object(restore, 'private_json', side_effect=[{}, receipt]), \
+                    mock.patch.object(restore, 'LinuxMachine', return_value=self.fixture.machine), \
+                    mock.patch('minecraft_backup_store.S3Store', return_value=self.store) as factory, \
+                    mock.patch.object(restore, 'restore', return_value={'status': 'restored'}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(restore.main(args), 0)
+            factory.assert_called_once_with('source-backups', region='us-west-2', timeout=timeout or 3000)
 
 
 if __name__ == '__main__':

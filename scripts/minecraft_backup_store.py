@@ -51,6 +51,10 @@ class S3Store:
     def for_operation(self, *, timeout: int):
         return S3Store(self.bucket, self.region, timeout=timeout, profile=self.profile)
 
+    def check_deadline(self):
+        if time.monotonic() >= self.deadline:
+            raise BackupError('S3 verification operation timed out')
+
     def _call(self, operation: str, *arguments: str, download_limit: tuple[Path, int] | None = None,
               transfer_budget: bool = False) -> dict:
         started = time.monotonic()
