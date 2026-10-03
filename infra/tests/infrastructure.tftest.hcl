@@ -25,6 +25,41 @@ mock_provider "aws" {
   }
 }
 
+run "additional_creative_listener_and_backup_namespace" {
+  command = plan
+  variables {
+    instance_ids = ["survival", "creative"]
+    additional_game_ingress = {
+      creative_java    = { protocol = "tcp", port = 25566 }
+      creative_bedrock = { protocol = "udp", port = 19134 }
+    }
+  }
+  assert {
+    condition     = length(aws_vpc_security_group_ingress_rule.game) == 6 && aws_vpc_security_group_ingress_rule.game["creative_java"].ip_protocol == "tcp" && aws_vpc_security_group_ingress_rule.game["creative_java"].from_port == 25566 && aws_vpc_security_group_ingress_rule.game["creative_bedrock"].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.game["creative_bedrock"].from_port == 19134
+    error_message = "Creative must use its own Java/RakNet listeners without replacing the existing bindings."
+  }
+  assert {
+    condition     = toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[0].Condition.StringLike["s3:prefix"]) == toset(["instances/survival/*", "instances/creative/*"])
+    error_message = "Each configured world must have its own authorized backup namespace."
+  }
+}
+
+run "refuse_duplicate_additional_game_listener" {
+  command = plan
+  variables {
+    additional_game_ingress = { duplicate_java = { protocol = "tcp", port = 25565 } }
+  }
+  expect_failures = [var.additional_game_ingress]
+}
+
+run "refuse_rcon_as_additional_game_listener" {
+  command = plan
+  variables {
+    additional_game_ingress = { rcon = { protocol = "tcp", port = 25575 } }
+  }
+  expect_failures = [var.additional_game_ingress]
+}
+
 variables {
   account_id                    = "111122223333"
   operator_role_arn             = "arn:aws:iam::111122223333:role/minecraft-operator"

@@ -46,12 +46,15 @@ def _approved_geyser(config_version: int, *, dual_transport: bool = False, webrt
 
 # This release's content policy: the exact artifact set and its approved Geyser configuration.
 CONTENT_POLICY = (frozenset(ARTIFACTS), _approved_geyser(8, dual_transport=True))
-# Earlier reviewed policies that completed recovery points may still record. They are accepted
-# only when validating recorded recovery metadata, so catalog, status and retention keep working
-# after a content upgrade; this release never stages or launches them.
+# Preserve launch support for the exact reviewed RakNet release used by the family server.
+RAKNET_CONTENT_POLICY = (frozenset(ARTIFACTS), _approved_geyser(8))
+LAUNCHABLE_LEGACY_MANIFESTS = frozenset({
+    "72f0640583a5fec446ccd299cbbf35c5aff6815a358eb251cece7975bd148c82",
+})
+# Older completed recovery points remain readable without authorizing their launch.
 RECORDED_CONTENT_POLICIES = (
     CONTENT_POLICY,
-    (frozenset(ARTIFACTS), _approved_geyser(8)),  # survival-2026-10-02-bedrock-2650-viaversion
+    RAKNET_CONTENT_POLICY,  # survival-2026-10-02-bedrock-2650-viaversion
     (frozenset({"paper", "geyser", "floodgate"}), _approved_geyser(7)),  # survival-2026-09-08-managed-config
 )
 # An earlier policy admits only the exact manifests that were reviewed under it.
@@ -78,6 +81,9 @@ def _validate_definition(definition: dict) -> None:
             raise ContentError(f"invalid instance {field}")
     if not re.fullmatch(r"[1-9][0-9]*[MG]", definition.get("memory", "")):
         raise ContentError("memory must be an explicit positive number of M or G")
+    gamemode = definition.get("gamemode", "survival")
+    if type(gamemode) is not str or gamemode not in ("survival", "creative"):
+        raise ContentError("gamemode must be survival or creative")
 
 
 def load_manifest(path: Path) -> dict:
@@ -116,7 +122,7 @@ def _validate_manifest(manifest: dict, *, recorded: bool = False) -> None:
         if (url.scheme != "https" or url.netloc != ARTIFACTS[name][1] or url.query or url.fragment
                 or "latest" in url.path.lower() or (release and url.path != release.format(version=version))):
             raise ContentError("artifact requires an exact official HTTPS download URL")
-    policies = RECORDED_CONTENT_POLICIES if recorded else (CONTENT_POLICY,)
+    policies = RECORDED_CONTENT_POLICIES if recorded else (CONTENT_POLICY, RAKNET_CONTENT_POLICY)
     approved = [geyser for names, geyser in policies if names == found]
     if not approved:
         raise ContentError("manifest must contain exactly Paper, Geyser, Floodgate and ViaVersion")
@@ -145,7 +151,8 @@ def _validate_manifest(manifest: dict, *, recorded: bool = False) -> None:
             or not any(_managed_file_bytes(managed) == _managed_file_bytes({"content": schema}) for schema in approved)):
         raise ContentError("managed configuration schema must preserve the approved Geyser "
                            "authentication, network and privacy settings")
-    if not current_policy and manifest_digest(manifest) not in EARLIER_REVIEWED_MANIFESTS:
+    earlier_manifests = EARLIER_REVIEWED_MANIFESTS if recorded else LAUNCHABLE_LEGACY_MANIFESTS
+    if not current_policy and manifest_digest(manifest) not in earlier_manifests:
         raise ContentError("recorded manifest is not an exact earlier reviewed release")
 
 
@@ -159,14 +166,16 @@ def manifest_digest(manifest: dict) -> str:
     return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def webrtc_port(manifest: dict) -> int:
-    """The validated current manifest owns the native port and its same-port publication."""
-    return manifest["managed_files"][0]["content"]["bedrock"]["webrtc-port"]
+def webrtc_port(manifest: dict) -> int | None:
+    """A validated dual manifest owns its native port; the reviewed RakNet release has none."""
+    return manifest["managed_files"][0]["content"]["bedrock"].get("webrtc-port")
 
 
 def published_game_ports(definition: dict, manifest: dict) -> frozenset[tuple[str, int]]:
-    ports = (("tcp", definition["java_port"]), ("tcp", definition["bedrock_port"]),
-             ("udp", definition["bedrock_port"]), ("udp", webrtc_port(manifest)))
+    ports = (("tcp", definition["java_port"]), ("udp", definition["bedrock_port"]))
+    native_port = webrtc_port(manifest)
+    if native_port is not None:
+        ports += (("tcp", definition["bedrock_port"]), ("udp", native_port))
     if len(set(ports)) != len(ports):
         raise ContentError("Java/signaling TCP and RakNet/WebRTC UDP ports must be distinct")
     return frozenset(ports)
@@ -249,6 +258,8 @@ def render_compose(definition: dict, manifest: dict, *, data_dir: Path, artifact
         raise ContentError("game bind address must be an IPv4 address") from error
     published_game_ports(definition, manifest)
     native_port = webrtc_port(manifest)
+    if native_port is None:
+        nethernet_advertise_address = None
     if nethernet_advertise_address is not None:
         if not isinstance(nethernet_advertise_address, str):
             raise ContentError("NetherNet advertisement must be one IPv4 address")
@@ -281,7 +292,8 @@ def render_compose(definition: dict, manifest: dict, *, data_dir: Path, artifact
             "CUSTOM_SERVER": "/runtime/paper.jar",
             "MEMORY": definition["memory"],
             "UID": "1000", "GID": "1000",
-            "MODE": "survival",
+            "MODE": definition.get("gamemode", "survival"),
+            **({"FORCE_GAMEMODE": "TRUE"} if definition.get("gamemode") == "creative" else {}),
             "DIFFICULTY": "normal",
             "MAX_PLAYERS": str(definition["max_players"]),
             "VIEW_DISTANCE": str(definition["view_distance"]),
@@ -306,9 +318,9 @@ def render_compose(definition: dict, manifest: dict, *, data_dir: Path, artifact
                if nethernet_advertise_address is not None else {}),
         },
         "ports": [f"{bind_address}:{definition['java_port']}:25565/tcp",
-                  f"{bind_address}:{definition['bedrock_port']}:19132/udp",
-                  f"{bind_address}:{definition['bedrock_port']}:19132/tcp",
-                  f"{bind_address}:{native_port}:{native_port}/udp"],
+                  f"{bind_address}:{definition['bedrock_port']}:19132/udp"] + (
+                      [f"{bind_address}:{definition['bedrock_port']}:19132/tcp",
+                       f"{bind_address}:{native_port}:{native_port}/udp"] if native_port is not None else []),
         "volumes": [bind(data_dir, "/data", False), bind(artifacts_dir / "paper.jar", "/runtime/paper.jar", True), bind(artifacts_dir / "plugins", "/plugins", True)],
         "healthcheck": {"test": ["CMD", "mc-health"], "interval": "10s", "timeout": "5s", "start_period": "180s", "retries": 6},
         "logging": {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}},

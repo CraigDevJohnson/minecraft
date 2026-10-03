@@ -235,20 +235,19 @@ class ContentTests(unittest.TestCase):
             with self.subTest(invalid=invalid["artifacts"]), self.assertRaises(content.ContentError):
                 content._validate_manifest(invalid, recorded=True)
 
-    def test_raknet_v8_is_recorded_only_and_requires_the_exact_reviewed_manifest(self):
+    def test_raknet_v8_launch_requires_the_exact_reviewed_manifest(self):
         previous = json.loads((ROOT / "tests/fixtures/content-survival-2026-10-02-bedrock-2650-viaversion.json").read_text())
         self.assertEqual(content.manifest_digest(previous),
                          "72f0640583a5fec446ccd299cbbf35c5aff6815a358eb251cece7975bd148c82")
         content._validate_manifest(previous, recorded=True)
-        with self.assertRaises(content.ContentError):
-            content._validate_manifest(previous)
+        content._validate_manifest(previous)
         changed = copy.deepcopy(previous)
         changed["revision"] = "unreviewed-raknet-copy"
         with self.assertRaisesRegex(content.ContentError, "exact earlier reviewed"):
             content._validate_manifest(changed, recorded=True)
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(content.ContentError):
-                content.stage_content(previous, Path(directory))
+                content.stage_content(changed, Path(directory))
 
     def test_custom_local_ports_publish_both_transports_without_exposing_rcon(self):
         definition = content.load_definition(ROOT / "runtime/survival.json")

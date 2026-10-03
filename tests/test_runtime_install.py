@@ -22,7 +22,7 @@ class RuntimeInstallTests(unittest.TestCase):
         for name in ("minecraft_instance.py", "minecraft_content.py", "minecraft_access.py", "minecraft_backup.py",
                      "minecraft_backup_store.py", "minecraft_restore.py", "check_runtime_install.py"):
             shutil.copy2(ROOT / "scripts" / name, source / "scripts" / name)
-        for name in ("survival.json", "content.json", "operator.json.example", "minecraft@.service"):
+        for name in ("survival.json", "content.json", "creative.json", "content-raknet.json", "operator.json.example", "minecraft@.service"):
             shutil.copy2(ROOT / "runtime" / name, source / "runtime" / name)
         script = (ROOT / "scripts/install_runtime.sh").read_text()
         # Replace only OS path boundaries; exercise the actual installer logic.

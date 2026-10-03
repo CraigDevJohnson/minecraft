@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "creative",
+  "manifest": "content-raknet.json",
+  "java_port": 25566,
+  "bedrock_port": 19134,
+  "memory": "1G",
+  "max_players": 6,
+  "view_distance": 6,
+  "simulation_distance": 4,
+  "gamemode": "creative"
+}

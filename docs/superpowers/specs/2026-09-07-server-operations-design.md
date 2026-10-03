@@ -51,7 +51,7 @@ Create cold backups after each session, before upgrades and on demand. Keep the 
 
 Back up all dimensions, player state, access/operator settings, mutable configuration, necessary plugin/Floodgate state, and the content manifest with checksums. Incomplete uploads are not recovery points. Restore rejects corrupt/incompatible input before modifying its isolated target. Validate recognizable world/player checkpoints after startup.
 
-A complete disk loss during play can lose the current session. The recovery target is the last successful session-end backup. Measure a proposed 60-minute operator-initiated recovery target for the initial world and available AWS capacity. More frequent backups are a later content/operations decision.
+A complete disk loss during play can lose the current session. The recovery target is the last successful session-end backup. Record actual operator-initiated recovery duration and phase timings. Craig removed recovery time windows and overall time ceilings on October 3, 2026; elapsed time does not expire authorized work or determine acceptance. More frequent backups are a later content/operations decision.
 
 ## Clients and content
 
