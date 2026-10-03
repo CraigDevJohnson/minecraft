@@ -34,3 +34,9 @@ host_permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-host
 # already exist. The Cloudflare API token never belongs in this file.
 public_hostname    = "mc.example.com"
 cloudflare_zone_id = "0123456789abcdef0123456789abcdef"
+
+# Match the installed runtime before planning. The default "both" includes
+# built-in signaling and WebRTC. Use "raknet" for an exact legacy RakNet runtime;
+# this omits signaling/WebRTC ingress and ICE UDP egress without changing Java,
+# RakNet or additional instance listeners.
+# bedrock_transport = "raknet"

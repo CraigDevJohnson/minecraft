@@ -28,7 +28,8 @@ mock_provider "aws" {
 run "additional_creative_listener_and_backup_namespace" {
   command = plan
   variables {
-    instance_ids = ["survival", "creative"]
+    bedrock_transport = "both"
+    instance_ids      = ["survival", "creative"]
     additional_game_ingress = {
       creative_java    = { protocol = "tcp", port = 25566 }
       creative_bedrock = { protocol = "udp", port = 19134 }
@@ -42,6 +43,84 @@ run "additional_creative_listener_and_backup_namespace" {
     condition     = toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[0].Condition.StringLike["s3:prefix"]) == toset(["instances/survival/*", "instances/creative/*"])
     error_message = "Each configured world must have its own authorized backup namespace."
   }
+}
+
+run "raknet_only_preserves_java_and_web_without_nethernet_rules" {
+  command = plan
+  variables {
+    bedrock_transport = "raknet"
+  }
+  assert {
+    condition     = toset(keys(aws_vpc_security_group_ingress_rule.game)) == toset(["java", "bedrock"]) && toset([for rule in aws_vpc_security_group_ingress_rule.game : "${rule.ip_protocol}:${rule.from_port}:${rule.to_port}"]) == toset(["tcp:25565:25565", "udp:19132:19132"]) && alltrue([for rule in aws_vpc_security_group_ingress_rule.game : rule.cidr_ipv4 == "0.0.0.0/0" && rule.security_group_id == aws_security_group.host.id])
+    error_message = "RakNet must retain exactly Java TCP 25565 and Bedrock UDP 19132, with no signaling, WebRTC, SSH or RCON ingress."
+  }
+  assert {
+    condition     = length(aws_vpc_security_group_egress_rule.webrtc) == 0 && toset([for rule in aws_vpc_security_group_egress_rule.web : "${rule.ip_protocol}:${rule.from_port}:${rule.to_port}"]) == toset(["tcp:80:80", "tcp:443:443"]) && alltrue([for rule in aws_vpc_security_group_egress_rule.web : rule.cidr_ipv4 == "0.0.0.0/0" && rule.security_group_id == aws_security_group.host.id])
+    error_message = "RakNet must omit ICE UDP egress and preserve the existing TCP 80/443 package, AWS and SSM egress."
+  }
+}
+
+run "raknet_keeps_independent_creative_listeners" {
+  command = plan
+  variables {
+    bedrock_transport = "raknet"
+    instance_ids      = ["survival", "creative"]
+    additional_game_ingress = {
+      creative_java    = { protocol = "tcp", port = 25566 }
+      creative_bedrock = { protocol = "udp", port = 19134 }
+    }
+  }
+  assert {
+    condition     = toset(keys(aws_vpc_security_group_ingress_rule.game)) == toset(["java", "bedrock", "creative_java", "creative_bedrock"]) && toset([for rule in aws_vpc_security_group_ingress_rule.game : "${rule.ip_protocol}:${rule.from_port}:${rule.to_port}"]) == toset(["tcp:25565:25565", "udp:19132:19132", "tcp:25566:25566", "udp:19134:19134"]) && length(aws_vpc_security_group_egress_rule.webrtc) == 0
+    error_message = "RakNet must preserve both instances' separate Java/Bedrock listeners without introducing NetherNet rules."
+  }
+}
+
+run "refuse_unknown_bedrock_transport" {
+  command = plan
+  variables {
+    bedrock_transport = "nethernet"
+  }
+  expect_failures = [var.bedrock_transport]
+}
+
+run "refuse_duplicate_additional_game_listener_with_raknet" {
+  command = plan
+  variables {
+    bedrock_transport       = "raknet"
+    additional_game_ingress = { duplicate_java = { protocol = "tcp", port = 25565 } }
+  }
+  expect_failures = [var.additional_game_ingress]
+}
+
+run "refuse_rcon_as_additional_game_listener_with_raknet" {
+  command = plan
+  variables {
+    bedrock_transport       = "raknet"
+    additional_game_ingress = { rcon = { protocol = "tcp", port = 25575 } }
+  }
+  expect_failures = [var.additional_game_ingress]
+}
+
+run "refuse_reserved_nethernet_name_with_raknet" {
+  command = plan
+  variables {
+    bedrock_transport       = "raknet"
+    additional_game_ingress = { signaling = { protocol = "tcp", port = 19134 } }
+  }
+  expect_failures = [var.additional_game_ingress]
+}
+
+run "refuse_duplicate_creative_protocol_port_with_raknet" {
+  command = plan
+  variables {
+    bedrock_transport = "raknet"
+    additional_game_ingress = {
+      creative_java = { protocol = "tcp", port = 25566 }
+      duplicate     = { protocol = "tcp", port = 25566 }
+    }
+  }
+  expect_failures = [var.additional_game_ingress]
 }
 
 run "refuse_duplicate_additional_game_listener" {
@@ -169,7 +248,7 @@ run "game_only_ingress_and_ssm_only_administration" {
   command = plan
 
   assert {
-    condition     = aws_vpc_security_group_egress_rule.webrtc.ip_protocol == "udp" && aws_vpc_security_group_egress_rule.webrtc.from_port == 1 && aws_vpc_security_group_egress_rule.webrtc.to_port == 65535 && aws_vpc_security_group_egress_rule.webrtc.cidr_ipv4 == "0.0.0.0/0" && aws_vpc_security_group_egress_rule.webrtc.security_group_id == aws_security_group.host.id
+    condition     = length(aws_vpc_security_group_egress_rule.webrtc) == 1 && aws_vpc_security_group_egress_rule.webrtc[0].ip_protocol == "udp" && aws_vpc_security_group_egress_rule.webrtc[0].from_port == 1 && aws_vpc_security_group_egress_rule.webrtc[0].to_port == 65535 && aws_vpc_security_group_egress_rule.webrtc[0].cidr_ipv4 == "0.0.0.0/0" && aws_vpc_security_group_egress_rule.webrtc[0].security_group_id == aws_security_group.host.id
     error_message = "The full ICE agent needs UDP egress to arbitrary client/NAT candidate ports, with no extra TCP egress."
   }
 

@@ -967,4 +967,21 @@ class PolicyBoundaryTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(host.HostError):
                 lifecycle.validate_plan(plan, present=True, state=prior, deployment=DEPLOYMENT)
 
+    def test_transport_rules_remain_protected_in_recurring_session_plans(self):
+        prior = state(False)
+        base = {'resource_changes': [
+            {'address': 'aws_instance.host[0]', 'change': {'actions': ['create'], 'after': HOST_ATTRIBUTES}},
+            {'address': 'aws_volume_attachment.data[0]', 'change': {'actions': ['create'], 'after': ATTACHMENT_ATTRIBUTES}}]}
+        for address in ('aws_vpc_security_group_egress_rule.webrtc',
+                        'aws_vpc_security_group_egress_rule.webrtc[0]',
+                        'aws_vpc_security_group_ingress_rule.game["signaling"]',
+                        'aws_vpc_security_group_ingress_rule.game["webrtc"]'):
+            plan = copy.deepcopy(base)
+            plan['resource_changes'].append({'address': address, 'mode': 'managed', 'change': {'actions': ['no-op']}})
+            lifecycle.validate_plan(plan, present=True, state=prior, deployment=DEPLOYMENT)
+            for actions in (['create'], ['update'], ['delete']):
+                plan['resource_changes'][-1]['change']['actions'] = actions
+                with self.subTest(address=address, actions=actions), self.assertRaises(host.HostError):
+                    lifecycle.validate_plan(plan, present=True, state=prior, deployment=DEPLOYMENT)
+
 if __name__ == '__main__': unittest.main()
