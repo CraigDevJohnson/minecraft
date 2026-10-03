@@ -122,6 +122,28 @@ variable "instance_ids" {
   }
 }
 
+variable "additional_game_ingress" {
+  description = "Named game listeners for additional independent server instances on this host."
+  type        = map(object({ protocol = string, port = number }))
+  default     = {}
+  validation {
+    condition = alltrue([for name, listener in var.additional_game_ingress :
+      can(regex("^[a-z][a-z0-9_-]{0,31}$", name)) &&
+      !contains(["java", "bedrock", "signaling", "webrtc"], name) &&
+      contains(["tcp", "udp"], listener.protocol) &&
+      listener.port >= 1024 && listener.port <= 65535 && floor(listener.port) == listener.port && listener.port != 25575
+    ])
+    error_message = "Additional listeners require distinct names, TCP/UDP and integer game ports 1024-65535, excluding RCON."
+  }
+  validation {
+    condition = length(toset(concat(
+      ["tcp:25565", "udp:19132", "tcp:19132", "udp:19133"],
+      [for listener in values(var.additional_game_ingress) : "${listener.protocol}:${listener.port}"]
+    ))) == 4 + length(var.additional_game_ingress)
+    error_message = "Additional game listeners must not duplicate existing or additional protocol/port bindings."
+  }
+}
+
 variable "public_hostname" {
   description = "Private DNS hostname that players use. The operator command points its existing Cloudflare A record at the running host and parks it while the host is stopped."
   type        = string

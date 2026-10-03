@@ -531,7 +531,7 @@ class LinuxMachine:
                 "started_at": state["StartedAt"]}
 
     def prepare(self, instance):
-        from minecraft_content import published_game_ports, render_compose, stage_content
+        from minecraft_content import published_game_ports, render_compose, stage_content, webrtc_port
         if self.config.get("eula_accepted") is not True:
             raise OperationError("explicit private operator EULA acceptance is required")
         requested = published_game_ports(self.definitions[instance], self.manifests[instance])
@@ -539,8 +539,8 @@ class LinuxMachine:
             if configured != instance and requested & self.active_game_ports(configured):
                 raise OperationError("requested game ports overlap another running configured instance; stop it or choose distinct ports")
         password = private_text(self.config["rcon_password_file"]).strip()
-        public_address = self.nethernet_advertise_address()
         manifest = self.manifests[instance]
+        public_address = self.nethernet_advertise_address() if webrtc_port(manifest) is not None else None
         runtime = self.runtime(instance)
         artifacts = stage_content(manifest, runtime / "content")
         command(["docker", "pull", "--platform", "linux/arm64", manifest["image"]], timeout=600)

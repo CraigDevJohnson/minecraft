@@ -42,12 +42,12 @@ resource "aws_security_group" "host" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "game" {
-  for_each = {
+  for_each = merge({
     java      = { protocol = "tcp", port = 25565 }
     bedrock   = { protocol = "udp", port = 19132 }
     signaling = { protocol = "tcp", port = 19132 }
     webrtc    = { protocol = "udp", port = 19133 }
-  }
+  }, var.additional_game_ingress)
   security_group_id = aws_security_group.host.id
   description       = "${each.key} clients; runtime family allowlist is required"
   cidr_ipv4         = "0.0.0.0/0"

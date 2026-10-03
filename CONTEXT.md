@@ -1,14 +1,18 @@
 # Family Minecraft operations
 
-Build one fresh survival server for six family players using Java and Bedrock clients, with full infrastructure provisioning, persistent data, and verified recovery. On October 3, 2026, Craig accepted the connected clients and waived requirements or validations involving consoles or family-member testing. Reported joins were Java on Mac, Bedrock on iPhone and two iPads, with four simultaneous players. PS5/Switch were untested and BedrockConnect was never configured; console guidance remains optional future help. Family-device acceptance is resolved by user acceptance/waiver, with unperformed checks recorded as unperformed rather than passed.
+Operate independent `survival` and `creative` instances for six family players using Java and Bedrock clients, with full infrastructure provisioning, persistent data, and verified recovery. On October 3, 2026, Craig directed that a separate creative world be stood up, advancing the original ongoing hobby scope of two or three instances. Each instance owns separate world data, ports, backups and lifecycle; further content can be selected as needed.
+
+On October 3, 2026, Craig accepted the connected clients and waived requirements or validations involving consoles or family-member testing. Reported joins were Java on Mac, Bedrock on iPhone and two iPads, with four simultaneous players. PS5/Switch were untested and BedrockConnect was never configured; console guidance remains optional future help. Family-device acceptance is resolved by user acceptance/waiver, with unperformed checks recorded as unperformed rather than passed.
 
 This acceptance does not replace [#8's live recovery proof](https://github.com/CraigDevJohnson/minecraft/issues/8) or [#26](https://github.com/CraigDevJohnson/minecraft/issues/26)/[#27](https://github.com/CraigDevJohnson/minecraft/issues/27)'s upstream, runtime, infrastructure and technical protocol safety gates.
+
+Craig also removed recovery authorization and maintenance windows and overall recovery time ceilings on October 3, 2026. Continue the approved recovery scope without renewing permission because time elapsed. Record actual durations; command execution timeouts, the mandatory 15-minute fresh-disk provenance check, write safety and source integrity remain in force. See the [recovery procedure](docs/operations/live-recovery-rehearsal.md).
 
 ## Terms
 
 - **Host:** the replaceable EC2 machine. Its running/stopped state controls compute billing.
 - **Endpoint:** the DNS hostname players use to reach the host. Its IPv4 address changes on every host start and is parked on a never-routed address while the host is stopped.
-- **Server instance:** one independently configured Minecraft runtime and content set, initially `survival`. It owns its world data, ports, backup namespace, and lifecycle.
+- **Server instance:** one independently configured Minecraft runtime and content set, such as `survival` or `creative`. It owns its world data, ports, backup namespace, and lifecycle.
 - **World:** a playable map/dimension within an instance. An instance can include its Overworld, Nether, and End; those do not require separate machines.
 - **Content manifest:** the exact runtime, plugins/mods, resource packs, mappings, versions, and integrity metadata needed to recreate an instance.
 - **Recovery point:** a verified, completed backup of the data and content configuration needed to recover an instance.

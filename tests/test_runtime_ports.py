@@ -34,6 +34,24 @@ def machine(root):
 
 
 class RuntimePortTests(unittest.TestCase):
+    def test_legacy_creative_prepares_without_native_metadata_or_touching_survival(self):
+        with tempfile.TemporaryDirectory() as directory:
+            selected = machine(directory)
+            selected.definitions["creative"] = content.load_definition(ROOT / "runtime/creative.json")
+            selected.manifests["creative"] = content.load_manifest(ROOT / "runtime/content-raknet.json")
+            selected.inspect = mock.Mock(return_value={"running": False})
+            selected.nethernet_advertise_address = mock.Mock(side_effect=AssertionError("legacy should not request native metadata"))
+            with mock.patch.object(runtime, "command", return_value=""), \
+                    mock.patch.object(runtime, "private_text", return_value="a-private-fixture-password"), \
+                    mock.patch.object(runtime.os, "chown"), \
+                    mock.patch.object(content, "stage_content", return_value=Path(directory) / "artifacts"):
+                selected.prepare("creative")
+            selected.nethernet_advertise_address.assert_not_called()
+            compose = json.loads((selected.runtime("creative") / "compose.json").read_text())
+            self.assertEqual(compose["services"]["minecraft"]["environment"]["MODE"], "creative")
+            self.assertEqual(compose["services"]["minecraft"]["ports"], ["0.0.0.0:25566:25565/tcp", "0.0.0.0:19134:19132/udp"])
+            self.assertFalse((Path(directory) / "instances/survival").exists())
+
     def test_active_binding_projection_uses_actual_ports_and_ignores_unpublished_entries(self):
         selected = machine("/private/fixture")
         selected.inspect = mock.Mock(return_value={"running": True, "container_id": "fixture-creative"})
