@@ -14,6 +14,16 @@ instance_ids              = ["survival"]
 monthly_budget_usd        = 25
 budget_notification_email = "operator@example.invalid"
 
+# Retained data disk size in GiB. Grow only: never decrease it for an existing disk
+# (docs/operations/data-disk-capacity.md). An existing deployment sets its current
+# size before planning.
+data_volume_size_gib = 5
+
 # Administrator-created boundary policy, named outside the resource prefix and
 # created before the operator role is used.
 host_permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-host-boundary"
+
+# Hostname that players use and the ID of its Cloudflare zone. The A record must
+# already exist. The Cloudflare API token never belongs in this file.
+public_hostname    = "mc.example.com"
+cloudflare_zone_id = "0123456789abcdef0123456789abcdef"

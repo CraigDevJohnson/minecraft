@@ -25,7 +25,9 @@ python3 scripts/bootstrap_tools.py
 
 Prepare private backend configuration in the work area. The creation commands below copy `infra/recovery-rehearsal` and its sibling `scripts` directory, preserving the module depth so `../../scripts` resolves to `$evidence_dir/scripts`. Start `recovery.tfvars` from `deployment.tfvars.example` and fill its restore-size fields after the final source backup below. Use the source deployment's account, region, AZ, AMI, VPC, subnet, backup bucket, and administrator-created `host_permissions_boundary_arn` as inputs. The updated operator role deletes inline policies only from roles carrying that boundary, so it cannot clean up a recovery stack created before the boundary existed; the administrator must handle that case. The recovery root must create its own temporary security group with no ingress; do not reuse the source game security group. Generate a new filesystem UUID. It must differ from the source UUID.
 
-Record the approved scope in `authorization.txt`. Include the issue comment or approval reference, approved plan hashes, temporary resource classes, and exact cleanup boundary. Do not continue if issue #7 is open or the approved scope omits host replacement, the recovery host and disk, the recovery EIP, or cleanup.
+Record the approved scope in `authorization.txt`. Include the issue comment or approval reference, approved plan hashes, temporary resource classes, and exact cleanup boundary. Do not continue if issue #7 is open or the approved scope omits host replacement, the recovery host and disk, or cleanup.
+
+The source deployment has a [public hostname](host-commands.md#public-hostname), so its `stop` and `start` commands below set the Cloudflare token for that one command. Without it they finish the lifecycle step but exit 1 with `dns: failed`, which ends this `set -e` session. The recovery deployment has no hostname: host commands against it never change DNS.
 
 ## Record the source baseline
 
@@ -42,9 +44,6 @@ aws ec2 describe-instances \
 aws ec2 describe-volumes \
   --volume-ids "$(jq -r .data_volume_id "$source_deployment")" \
   >"$evidence_dir/source-volume-before.json"
-aws ec2 describe-addresses \
-  --allocation-ids "$(jq -r .elastic_ip_id "$source_deployment")" \
-  >"$evidence_dir/source-address-before.json"
 ```
 
 Through SSM, run these commands on the source host and retain the command IDs and private output:
@@ -72,8 +71,13 @@ sudo /usr/bin/time -p -o /root/source-backup-time.txt \
 
 Copy `source-backup-time.txt` through SSM. Record the completed archive size from `minecraft-backup status` and `s3api head-object`. Then time the host stop and start. `minecraft_host.py` reports the host, application, and backup separately.
 
+`cloudflare_env` is the private secret-reference file from [host commands](host-commands.md#cloudflare-token).
+
 ```sh
-/usr/bin/time -p -o "$evidence_dir/clean-stop-time.txt" \
+public_hostname="$(jq -er .public_hostname "$source_deployment")"
+
+op run --env-file="$cloudflare_env" -- \
+  /usr/bin/time -p -o "$evidence_dir/clean-stop-time.txt" \
   python3 scripts/minecraft_host.py \
   --deployment "$source_deployment" stop \
   | tee "$evidence_dir/clean-stop.json"
@@ -81,20 +85,27 @@ Copy `source-backup-time.txt` through SSM. Record the completed archive size fro
 python3 scripts/minecraft_host.py \
   --deployment "$source_deployment" status \
   | tee "$evidence_dir/stopped-status.json"
+dig +short "$public_hostname" @1.1.1.1 | tee "$evidence_dir/hostname-stopped.txt"
 
-/usr/bin/time -p -o "$evidence_dir/clean-start-time.txt" \
+op run --env-file="$cloudflare_env" -- \
+  /usr/bin/time -p -o "$evidence_dir/clean-start-time.txt" \
   python3 scripts/minecraft_host.py \
   --deployment "$source_deployment" start --instance survival \
   | tee "$evidence_dir/clean-start.json"
+aws ec2 describe-instances \
+  --instance-ids "$(jq -r .host_id "$source_deployment")" \
+  --query 'Reservations[0].Instances[0].PublicIpAddress' --output text \
+  >"$evidence_dir/source-address-after-start.txt"
+dig +short "$public_hostname" @1.1.1.1 | tee "$evidence_dir/hostname-started.txt"
 ```
 
-Require the stop result to show `host: stopped`, `draining: true`, `instances.survival.application: stopped`, and `instances.survival.backup: complete`. The stopped status must report the application and backup as unavailable or unverified instead of claiming fresh runtime evidence. Require the start result to show `host: running`, `application: running`, and `ready: true`.
+Require the stop result to show `host: stopped`, `draining: true`, `instances.survival.application: stopped`, `instances.survival.backup: complete`, and `dns: parked`. The stopped status must report the application and backup as unavailable or unverified instead of claiming fresh runtime evidence. Require the start result to show `host: running`, `application: running`, `ready: true`, and `dns: updated`.
 
-Compare the source instance, volume, address, filesystem, manifest, and checkpoint evidence. The EC2 instance ID, EBS volume ID, filesystem UUID, EIP allocation ID, public address, manifest digest, and checkpoints must match the baseline.
+Compare the source instance, volume, filesystem, manifest, and checkpoint evidence. The EC2 instance ID, EBS volume ID, filesystem UUID, manifest digest, and checkpoints must match the baseline. The public address changes on every start by design: the hostname must resolve to `192.0.2.1` after `stop` and to the host's current `PublicIpAddress` after `start`. Record whether that address differs from the baseline; it normally does. Allow about a minute for the 60-second TTL before each lookup.
 
 ## Replace the host and retain the data disk
 
-Drain and stop the source host again. Create a saved replacement plan from the same private infrastructure directory and state used by issue #7.
+Drain and stop the source host again, with the token set as above. Create a saved replacement plan from the same private infrastructure directory and state used by issue #7.
 
 ```sh
 "$repo_dir/.tools/bin/tofu" -chdir="$source_dir/infra" plan \
@@ -108,7 +119,7 @@ shasum -a 256 "$evidence_dir/host-replacement.tfplan" \
   >"$evidence_dir/host-replacement.tfplan.sha256"
 ```
 
-Stop if the plan replaces or deletes the data volume, filesystem identity, EIP allocation, backup bucket, state bucket, network, or IAM role. The plan may replace the host, its root disk, the volume attachment, and the EIP association. Apply only the exact saved plan that Craig approved.
+Stop if the plan replaces or deletes the data volume, filesystem identity, backup bucket, state bucket, network, or IAM role. The plan may replace the host, its root disk, and the volume attachment. The replacement host must be planned with an auto-assigned address; stop otherwise. The text plan hides that flag when it does not change, so use the plan JSON check in [infrastructure operations](infrastructure.md#normal-replacement-and-explicit-destructive-workflow). Apply only the exact saved plan that Craig approved.
 
 ```sh
 set -o pipefail || exit 1
@@ -124,13 +135,14 @@ source_deployment="$source_dir/deployment-after-replacement.json"
 Wait for SSM on the new host ID in `$source_deployment`. Verify the retained mount. Through the approved private transfer path, install this refreshed handoff on the replacement host as `/etc/minecraft/deployment.json`, a root-owned regular file with mode 0600 inside root-owned mode-0700 `/etc/minecraft`. Compare its SHA-256 with `$source_deployment` privately before running `scripts/install_runtime.sh`; the installer reads this on-host file during preflight. Install the same reviewed revision on the new root disk, restore the private operator configuration, and use `$source_deployment` for every subsequent source-host command. Time the normal host start and record the checkpoints:
 
 ```sh
-/usr/bin/time -p -o "$evidence_dir/replacement-start-time.txt" \
+op run --env-file="$cloudflare_env" -- \
+  /usr/bin/time -p -o "$evidence_dir/replacement-start-time.txt" \
   python3 scripts/minecraft_host.py \
   --deployment "$source_deployment" start --instance survival \
   | tee "$evidence_dir/replacement-start.json"
 ```
 
-Require a new EC2 instance ID. Require the original EBS volume ID, filesystem UUID, EIP allocation ID, public address, backup bucket, manifest digest, and checkpoint values.
+Require a new EC2 instance ID. Require the original EBS volume ID, filesystem UUID, backup bucket, manifest digest, and checkpoint values. Require `dns: updated`, and repeat the two lookups above: the hostname must resolve to the replacement host's `PublicIpAddress`.
 
 Before creating the isolated recovery host, perform the final source backup that will supply the restore. Wait for its completed marker, then select that completed 64-character recovery point. Record its marker and archive object keys, sizes, ETags, and current version IDs with `aws s3api head-object` and `aws s3api list-object-versions`; hash each JSON evidence file after capture. Selecting the point after the final source backup keeps it recent if retention is run before restore.
 
@@ -166,7 +178,7 @@ archive, uncompressed, maximum_backup = (int(value) for value in sys.argv[1:])
 total = archive + uncompressed
 required_bytes = (total * 11 + 9) // 10
 gib = 1 << 30
-data_gib = max(40, (required_bytes + gib - 1) // gib)
+data_gib = max(2, (required_bytes + gib - 1) // gib)
 root_gib = 20 + (22 * maximum_backup + 10 * gib - 1) // (10 * gib)
 print(f"Minimum recovery data volume GiB: {data_gib}")
 print(f"Minimum recovery root volume GiB: {root_gib}")
@@ -197,7 +209,7 @@ shasum -a 256 "$evidence_dir/recovery-create.tfplan" \
   >"$evidence_dir/recovery-create.tfplan.sha256"
 ```
 
-The plan may create only the temporary host, root disk, data disk, attachment, temporary no-ingress security group and its reviewed outbound web rules, EIP and association, instance role and profile, inline policies, and temporary backup bucket with its protection settings. The source VPC, subnet, bucket, data disk, host, EIP, and state are inputs; the source game security group must not be attached to the recovery host. The recovery security group must have no ingress and only the approved TCP 80/443 egress needed for package, AWS API, and SSM access. Stop if the plan manages any source resource. Source S3 access must remain read-only. Write, delete, and multipart access must name only the temporary recovery bucket.
+The plan may create only the temporary host, root disk, data disk, attachment, temporary no-ingress security group and its reviewed outbound web rules, instance role and profile, inline policies, and temporary backup bucket with its protection settings. The recovery host takes its own auto-assigned public IPv4 address; the plan creates no Elastic IP. The source VPC, subnet, bucket, data disk, host, and state are inputs; the source game security group must not be attached to the recovery host. The recovery security group must have no ingress and only the approved TCP 80/443 egress needed for package, AWS API, and SSM access. Stop if the plan manages any source resource. Source S3 access must remain read-only. Write, delete, and multipart access must name only the temporary recovery bucket.
 
 Apply only the exact saved plan that Craig approved. Record its UTC window and caller for the disk provenance check, and save both sensitive outputs with mode 0600.
 
@@ -219,7 +231,7 @@ chmod 0600 "$evidence_dir/recovery-deployment.json" \
   "$evidence_dir/recovery-cleanup-inventory.json"
 ```
 
-Cloud-init waits up to 300 seconds for the separately associated EIP to appear through IMDSv2 before package installation. If that wait fails, inspect the EIP association and subnet rather than bypassing bootstrap. The first cloud-init run then stops at the blank-disk storage gate. Through SSM, read `DATA_VOLUME_ID` and `DATA_FILESYSTEM_UUID` from root-only `/etc/minecraft/storage.conf` and compare both with the approved recovery deployment output. Stop if either value differs. A new encrypted EBS volume does not read back as zeros, so it must be zero-filled. This is first setup: the recovery apply created both this volume and this host. Apply every zero-fill rule in [infrastructure operations](infrastructure.md#disk-setup-and-readiness-handoff-to-5-and-7), using `data_volume_id`, `host_id`, and `backup_bucket_name` from `recovery-deployment.json` and the newest `apply-start`/`apply-end` pair in `recovery-apply-window.txt` (a recreation appends a new pair; earlier pairs never qualify).
+Cloud-init waits up to 300 seconds for the host's public IPv4 address to appear through IMDSv2 before package installation. The address is assigned at launch, so the wait normally passes at once. If it fails, inspect the instance's public address and the subnet route rather than bypassing bootstrap. The first cloud-init run then stops at the blank-disk storage gate. Through SSM, read `DATA_VOLUME_ID` and `DATA_FILESYSTEM_UUID` from root-only `/etc/minecraft/storage.conf` and compare both with the approved recovery deployment output. Stop if either value differs. A new encrypted EBS volume does not read back as zeros, so it must be zero-filled. This is first setup: the recovery apply created both this volume and this host. Apply every zero-fill rule in [infrastructure operations](infrastructure.md#disk-setup-and-readiness-handoff-to-5-and-7), using `data_volume_id`, `host_id`, and `backup_bucket_name` from `recovery-deployment.json` and the newest `apply-start`/`apply-end` pair in `recovery-apply-window.txt` (a recreation appends a new pair; earlier pairs never qualify).
 
 Wait at least 15 minutes after the recovery volume's `AttachTime` before trusting an empty or partial history. This provenance wait runs from `apply-end` to the passing provenance section. Then, from the operator computer, append a timestamped provenance section and review it:
 
@@ -257,7 +269,7 @@ Stop if any command fails or is denied. In the newest section, require an empty 
 
 Through SSM, run the host-side check from infrastructure operations on the recovery host and retain its command ID and private output. Any evidence of prior storage or runtime use is a stop. Transfer the deployment handoffs and install the runtime only after initialization below. Immediately before zero-fill, rerun the provenance block and the host-side check together and require the same single attachment with an identical `AttachTime`; if more than 10 minutes pass before zero-fill starts, rerun both again.
 
-The recovery disk can exceed 40 GiB, so compute its zero-fill and zero-check bounds from its size. Session Manager ends an interactive session after 20 idle minutes by default, so run both as transient systemd units, as below, or through Run Command with `executionTimeout` above the combined bounds of the commands in that invocation. Then, through SSM, zero-fill and initialize that exact disk:
+The recovery disk is sized from the marker, so compute its zero-fill and zero-check bounds from that size. Session Manager ends an interactive session after 20 idle minutes by default, so run both as transient systemd units, as below, or through Run Command with `executionTimeout` above the combined bounds of the commands in that invocation. Then, through SSM, zero-fill and initialize that exact disk:
 
 ```sh
 # Set both from the reviewed recovery-deployment.json, the volume the provenance block passed.
@@ -340,7 +352,7 @@ Require the target stop to finish with `application: stopped` and `backup: compl
 
 ## Prove failed backups remain visible
 
-After the update rehearsal and checkpoint verification, remove only the temporary backup write policy. Save and inspect the plan before applying it. The source read policy, host, disk, endpoint, and both buckets must remain unchanged.
+After the update rehearsal and checkpoint verification, remove only the temporary backup write policy. Save and inspect the plan before applying it. The source read policy, host, disk, and both buckets must remain unchanged.
 
 ```sh
 "$repo_dir/.tools/bin/tofu" -chdir="$recovery_dir" plan \
@@ -382,15 +394,14 @@ Inspect private SSM output for the expected S3 authorization failure. Do not edi
 
 ## Record stopped costs and clean up
 
-Stop the source host through `minecraft_host.py --deployment "$source_deployment" stop`. Inventory the resources that continue to incur charges while compute is stopped:
+Stop the source host through `minecraft_host.py --deployment "$source_deployment" stop`, with the token set as above, and require `dns: parked`. Inventory the resources that continue to incur charges while compute is stopped:
 
 - the source root and retained data EBS volumes;
-- the allocated source EIP;
 - current and noncurrent S3 backup objects;
 - the versioned state bucket and lock objects;
 - the account budget resource.
 
-Record actual sizes and current region pricing. Do not copy the estimates from the design as measured cost evidence.
+A stopped host has no public IPv4 address and no address charge. Confirm that `aws ec2 describe-addresses` lists no project Elastic IP. Record actual sizes and current region pricing. Do not copy the estimates from the design as measured cost evidence.
 
 Compare the recovery state with `recovery-cleanup-inventory.json`. Create a destroy plan and inspect every resource address and ID.
 
@@ -421,7 +432,6 @@ Check every entry in the private cleanup inventory against AWS after destroy, an
 | --- | --- | --- |
 | Host | `aws ec2 describe-instances --instance-ids <host_id>` | Absent or `terminated`; no running or stopped instance. |
 | Root and data disks | `aws ec2 describe-volumes --volume-ids <root_volume_id> <data_volume_id>` | Both absent. Check each ID separately if the combined request fails. |
-| EIP | `aws ec2 describe-addresses --allocation-ids <elastic_ip_id>` | Allocation absent. |
 | No-ingress security group and its rules | `aws ec2 describe-security-groups --group-ids <security_group_id>` | Group absent; its ingress and egress rules cannot remain attached. |
 | Temporary backup bucket and all versions | `aws s3api head-bucket --bucket <backup_bucket_name>` | Bucket absent (`404` or `NoSuchBucket`); `403` is inconclusive. |
 | Instance profile | `aws iam get-instance-profile --instance-profile-name <instance_profile_name>` | `NoSuchEntity`. |
@@ -442,7 +452,7 @@ if test -s "$evidence_dir/recovery-state-after-destroy.txt"; then
 fi
 ```
 
-Do not report cleanup as successful until every query and the state check pass. Then verify that the source host, source retained volume, source EIP, state, bucket, and selected recovery point remain intact.
+Do not report cleanup as successful until every query and the state check pass. Then verify that the source host, source retained volume, state, bucket, and selected recovery point remain intact, and that the hostname's record is unchanged by the rehearsal host.
 
 ## Confirm source-bucket lifecycle expiry
 
@@ -473,7 +483,7 @@ if ! jq -e '
 
 Configuration proves that the rule is installed, not that S3 has carried out either action. For each action, first look for a previously recorded, safe candidate: an exact noncurrent version ID with its successor version or delete-marker ID and successor creation time, or an already abandoned multipart upload with its exact upload ID and initiation time. Save successful `list-object-versions --prefix <exact-key>` or `list-multipart-uploads --prefix <exact-key>` output before waiting. Do not select an active production upload or infer noncurrent age from the old version's `LastModified`. Record both candidates in a mode-0600 `$evidence_dir/lifecycle-targets.json` with the source `bucket`, `noncurrent` fields `key`, `version_id`, `successor_version_id`, and `successor_created_at`, and `multipart` fields `key`, `upload_id`, and `initiated_at`. A candidate that was not observed before expiry cannot prove an actual lifecycle deletion.
 
-If either safe candidate is unavailable, obtain separate concrete approval before creating a complete probe in the **retained source bucket**, outside `instances/`. Add the approval reference, unique `lifecycle-probe/<run-id>/` prefix, exact allowed S3 write/list/delete/abort actions, cost bound, delayed observation period, and cleanup of exact version and upload IDs to `authorization.txt`. The recovery role must not gain source write access. A probe adds S3 request and object storage charges, including one 5 MiB multipart part until S3 aborts it; use [current S3 pricing](https://aws.amazon.com/s3/pricing/) for the approved estimate. Do not keep EC2, EBS, an EIP, or the temporary bucket for the 14-day observation. If this extra scope is not approved, leave actual expiry **pending** and do not claim Issue #8 complete.
+If either safe candidate is unavailable, obtain separate concrete approval before creating a complete probe in the **retained source bucket**, outside `instances/`. Add the approval reference, unique `lifecycle-probe/<run-id>/` prefix, exact allowed S3 write/list/delete/abort actions, cost bound, delayed observation period, and cleanup of exact version and upload IDs to `authorization.txt`. The recovery role must not gain source write access. A probe adds S3 request and object storage charges, including one 5 MiB multipart part until S3 aborts it; use [current S3 pricing](https://aws.amazon.com/s3/pricing/) for the approved estimate. Do not keep EC2, EBS, or the temporary bucket for the 14-day observation. If this extra scope is not approved, leave actual expiry **pending** and do not claim Issue #8 complete.
 
 For an approved probe, use a fresh prefix and save every response privately. The two writes to the same tiny key make the first exact version noncurrent; the incomplete upload has one part and is never completed or manually aborted before the observation:
 
@@ -649,7 +659,8 @@ Record these fields:
 - Git revision and UTC test interval;
 - clean stop, backup, clean start, replacement start, provenance wait, zero-fill, zero check, restore, and total recovery times;
 - compressed backup bytes, restored bytes, and source and target disk use;
-- old and new host distinction plus unchanged EBS, filesystem, EIP, manifest, and checkpoint results;
+- old and new host distinction plus unchanged EBS, filesystem, manifest, and checkpoint results;
+- hostname results: parked on `192.0.2.1` after each stop, and on the host's current address after each start and after replacement;
 - recovery-disk provenance and host-side check results;
 - failed-backup result and blocked restart/drain results;
 - source backup integrity before and after the rehearsal;

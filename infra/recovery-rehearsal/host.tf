@@ -28,7 +28,7 @@ resource "aws_instance" "recovery" {
   availability_zone           = var.availability_zone
   subnet_id                   = var.source_subnet_id
   vpc_security_group_ids      = [aws_security_group.recovery.id]
-  associate_public_ip_address = false
+  associate_public_ip_address = true
   iam_instance_profile        = aws_iam_instance_profile.recovery.name
   monitoring                  = false
   user_data_replace_on_change = true
@@ -47,7 +47,8 @@ resource "aws_instance" "recovery" {
   }
 
   lifecycle {
-    # EC2 reports a public IPv4 association once the separate Elastic IP is attached.
+    # EC2 releases the auto-assigned address when the host stops, and the provider then
+    # reads false: without this, any plan taken while the host is stopped replaces it.
     ignore_changes = [associate_public_ip_address]
     precondition {
       condition     = var.recovery_root_volume_size_gib * 1073741824 * 10 >= 20 * 1073741824 * 10 + var.max_recovery_backup_archive_size_bytes * 22
@@ -110,14 +111,4 @@ resource "aws_volume_attachment" "recovery" {
   instance_id  = aws_instance.recovery.id
   force_detach = false
   skip_destroy = false
-}
-
-resource "aws_eip" "recovery" {
-  domain = "vpc"
-  tags   = { Name = "${var.resource_prefix}-address", Purpose = "recovery-rehearsal" }
-}
-
-resource "aws_eip_association" "recovery" {
-  allocation_id = aws_eip.recovery.id
-  instance_id   = aws_instance.recovery.id
 }

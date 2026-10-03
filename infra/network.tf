@@ -63,14 +63,3 @@ resource "aws_vpc_security_group_egress_rule" "web" {
   from_port         = tonumber(each.value)
   to_port           = tonumber(each.value)
 }
-
-resource "aws_eip" "host" {
-  domain = "vpc"
-  tags   = { Name = "${var.resource_prefix}-address", Purpose = "endpoint" }
-}
-
-resource "aws_eip_association" "host" {
-  allocation_id = aws_eip.host.id
-  instance_id   = aws_instance.host.id
-  depends_on    = [aws_internet_gateway.public, aws_route.internet, aws_route_table_association.public]
-}

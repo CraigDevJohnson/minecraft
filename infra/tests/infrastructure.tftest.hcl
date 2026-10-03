@@ -9,17 +9,20 @@ variables {
   ami_id                        = "ami-0123456789abcdef0"
   ami_owner_account_id          = "099720109477"
   data_filesystem_uuid          = "12345678-1234-4234-8234-123456789abc"
+  data_volume_size_gib          = 5
   backup_bucket_name            = "minecraft-test-example-backups"
   budget_notification_email     = "operator@example.invalid"
   host_permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-host-boundary"
+  public_hostname               = "mc.example.com"
+  cloudflare_zone_id            = "0123456789abcdef0123456789abcdef"
 }
 
 run "retained_encrypted_data_and_replaceable_root" {
   command = plan
 
   assert {
-    condition     = aws_ebs_volume.data.encrypted && aws_ebs_volume.data.type == "gp3" && aws_ebs_volume.data.size == 40
-    error_message = "The retained data disk must be encrypted 40 GiB gp3."
+    condition     = aws_ebs_volume.data.encrypted && aws_ebs_volume.data.type == "gp3" && aws_ebs_volume.data.size == 5
+    error_message = "The retained data disk must be encrypted gp3 at the configured 5 GiB."
   }
 
   assert {
@@ -30,6 +33,17 @@ run "retained_encrypted_data_and_replaceable_root" {
   assert {
     condition     = aws_volume_attachment.data.force_detach == false && aws_volume_attachment.data.skip_destroy == false
     error_message = "Normal host replacement must use an orderly detach of the independent retained disk."
+  }
+}
+
+run "retained_data_disk_size_follows_the_private_input" {
+  command = plan
+  variables {
+    data_volume_size_gib = 8
+  }
+  assert {
+    condition     = aws_ebs_volume.data.size == 8 && aws_instance.host.root_block_device[0].volume_size == 20
+    error_message = "The retained data disk must take its size from data_volume_size_gib and leave the root disk at 20 GiB."
   }
 }
 
@@ -105,8 +119,8 @@ run "game_only_ingress_and_ssm_only_administration" {
   }
 
   assert {
-    condition     = !aws_subnet.public.map_public_ip_on_launch && !aws_instance.host.associate_public_ip_address && aws_eip.host.domain == "vpc" && aws_route.internet.destination_cidr_block == "0.0.0.0/0"
-    error_message = "The host must use the independently owned Elastic IP and public internet route."
+    condition     = !aws_subnet.public.map_public_ip_on_launch && aws_instance.host.associate_public_ip_address && aws_route.internet.destination_cidr_block == "0.0.0.0/0"
+    error_message = "Only the host may take a public IPv4 address, assigned at launch and on each start, with a public internet route."
   }
 }
 
@@ -121,6 +135,11 @@ run "budget_notifies_on_account_cost_and_output_uses_instance_paths" {
   assert {
     condition     = output.deployment.region == "us-west-2" && output.deployment.mount_path == "/srv/minecraft" && output.deployment.instances.survival.data_path == "/srv/minecraft/instances/survival/data" && output.deployment.instances.survival.backup_prefix == "instances/survival/" && output.deployment.data_filesystem_uuid == "12345678-1234-4234-8234-123456789abc"
     error_message = "The private deployment contract must preserve filesystem identity and separate named-instance directories and backup prefixes."
+  }
+
+  assert {
+    condition     = output.deployment.public_hostname == "mc.example.com" && output.deployment.cloudflare_zone_id == "0123456789abcdef0123456789abcdef" && !contains(keys(output.deployment), "elastic_ip") && !contains(keys(output.deployment), "elastic_ip_id")
+    error_message = "The private deployment contract must name the hostname and zone the operator command updates, and no Elastic IP."
   }
 }
 
@@ -197,4 +216,76 @@ run "reject_ambiguous_filesystem_identity" {
     data_filesystem_uuid = "auto"
   }
   expect_failures = [var.data_filesystem_uuid]
+}
+
+run "reject_a_data_disk_too_small_to_restore_onto" {
+  command = plan
+  variables {
+    data_volume_size_gib = 1
+  }
+  expect_failures = [var.data_volume_size_gib]
+}
+
+run "reject_a_fractional_data_disk_size" {
+  command = plan
+  variables {
+    data_volume_size_gib = 2.5
+  }
+  expect_failures = [var.data_volume_size_gib]
+}
+
+run "reject_a_data_disk_larger_than_backups_can_protect" {
+  command = plan
+  variables {
+    data_volume_size_gib = 129
+  }
+  expect_failures = [var.data_volume_size_gib]
+}
+
+run "reject_a_public_hostname_given_as_a_url" {
+  command = plan
+  variables {
+    public_hostname = "https://mc.example.com"
+  }
+  expect_failures = [var.public_hostname]
+}
+
+run "reject_a_public_hostname_without_a_domain" {
+  command = plan
+  variables {
+    public_hostname = "mc"
+  }
+  expect_failures = [var.public_hostname]
+}
+
+run "reject_an_uppercase_public_hostname" {
+  command = plan
+  variables {
+    public_hostname = "MC.example.com"
+  }
+  expect_failures = [var.public_hostname]
+}
+
+run "reject_an_overlong_public_hostname" {
+  command = plan
+  variables {
+    public_hostname = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+  expect_failures = [var.public_hostname]
+}
+
+run "reject_an_ip_address_as_public_hostname" {
+  command = plan
+  variables {
+    public_hostname = "192.0.2.1"
+  }
+  expect_failures = [var.public_hostname]
+}
+
+run "reject_a_malformed_cloudflare_zone_id" {
+  command = plan
+  variables {
+    cloudflare_zone_id = "0123456789ABCDEF0123456789ABCDEF"
+  }
+  expect_failures = [var.cloudflare_zone_id]
 }

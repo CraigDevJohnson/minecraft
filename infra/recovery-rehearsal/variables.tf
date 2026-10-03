@@ -166,11 +166,11 @@ variable "recovery_root_volume_size_gib" {
 }
 
 variable "recovery_data_volume_size_gib" {
-  description = "Temporary target disk size in GiB; the recovery plan requires 10 percent staging headroom beyond the measured archive and extracted files."
+  description = "Temporary target disk size in GiB, at least the 2 GiB floor of a retained data disk; the recovery plan requires 10 percent staging headroom beyond the measured archive and extracted files."
   type        = number
   validation {
-    condition     = var.recovery_data_volume_size_gib >= 40 && floor(var.recovery_data_volume_size_gib) == var.recovery_data_volume_size_gib
-    error_message = "recovery_data_volume_size_gib must be a whole number of at least 40 GiB."
+    condition     = var.recovery_data_volume_size_gib >= 2 && floor(var.recovery_data_volume_size_gib) == var.recovery_data_volume_size_gib
+    error_message = "recovery_data_volume_size_gib must be a whole number of at least 2 GiB."
   }
 }
 

@@ -37,17 +37,43 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
             with self.subTest(resource=name):
                 self.assertRegex(body, r"lifecycle\s*\{\s*prevent_destroy\s*=\s*true\s*\}")
 
-    def test_elastic_ip_association_does_not_force_host_replacement(self):
-        # EC2 reports associate_public_ip_address=true once the separately associated
-        # Elastic IP is attached, so without this every later plan replaces the host.
+    def test_retained_data_disk_size_is_an_explicit_private_input(self):
+        # A default would let an existing deployment silently plan a smaller disk. EBS cannot
+        # shrink: the provider plans a smaller size as an in-place update that AWS then rejects.
+        self.assertRegex(resource_blocks(INFRA)["aws_ebs_volume.data"], r"(?m)^\s*size\s*=\s*var\.data_volume_size_gib$")
+        variable = re.search(
+            r'^variable "data_volume_size_gib" \{\n(.*?)^\}', (INFRA / "variables.tf").read_text(), re.M | re.S)
+        self.assertIsNotNone(variable, "data_volume_size_gib is not declared")
+        self.assertRegex(variable.group(1), r"(?m)^\s*type\s*=\s*number$")
+        self.assertRegex(variable.group(1), r"(?m)^\s*nullable\s*=\s*false$")
+        self.assertNotRegex(variable.group(1), r"(?m)^\s*default\s*=")
+
+    def test_auto_assigned_public_ip_does_not_force_host_replacement(self):
+        # EC2 releases an auto-assigned address when the host stops, and the provider then
+        # reads associate_public_ip_address=false. Without ignore_changes every plan taken
+        # while the host is stopped, which is most of the time, would replace it.
         hosts = {
             "infra": resource_blocks(INFRA)["aws_instance.host"],
             "recovery-rehearsal": resource_blocks(INFRA / "recovery-rehearsal")["aws_instance.recovery"],
         }
         for root, body in hosts.items():
             with self.subTest(root=root):
-                self.assertRegex(body, r"associate_public_ip_address\s*=\s*false")
+                self.assertRegex(body, r"associate_public_ip_address\s*=\s*true")
                 self.assertRegex(body, r"lifecycle\s*\{[^}]*ignore_changes\s*=\s*\[\s*associate_public_ip_address\s*\]")
+
+    def test_no_root_declares_an_elastic_ip(self):
+        # An allocated address bills all month; the hosts use an address billed only while running.
+        for root in (INFRA, INFRA / "state-bootstrap", INFRA / "recovery-rehearsal"):
+            with self.subTest(root=root.name):
+                source = "\n".join(path.read_text() for path in root.glob("*.tf"))
+                self.assertNotRegex(source, r"\baws_eip(?:_association)?\b")
+        self.assertRegex(resource_blocks(INFRA)["aws_subnet.public"], r"map_public_ip_on_launch\s*=\s*false")
+
+    def test_host_launch_waits_for_its_internet_route(self):
+        # The address exists from first boot, so cloud-init reaches packages and SSM at once;
+        # the Elastic IP association used to order this after the route.
+        host = resource_blocks(INFRA)["aws_instance.host"]
+        self.assertRegex(host, r"depends_on\s*=\s*\[[^\]]*\baws_route\.internet\b[^\]]*\baws_route_table_association\.public\b")
 
     def test_storage_identity_has_no_dependency_on_replaceable_compute(self):
         for directory in [INFRA, INFRA / "state-bootstrap"]:
