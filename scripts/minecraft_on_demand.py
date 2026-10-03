@@ -24,7 +24,7 @@ HOST_STOP_FIELDS = frozenset(('instance_state', 'public_ip', 'public_dns', 'asso
 SESSION_ADDRESSES = frozenset(('aws_instance.host[0]', 'aws_volume_attachment.data[0]'))
 SHA256 = re.compile('[0-9a-f]{64}')
 POLICY_FIELDS = frozenset(('schema_version', 'workstation', 'aws_profile', 'infra_root', 'variables_file', 'variables_sha256',
-                          'source_sha256', 'backend', 'bootstrap_sha256', 'operator_file', 'secret_file', 'journal_dir'))
+                          'source_sha256', 'backend', 'backend_sha256', 'tofu_sha256', 'tofu_file_identity', 'private_inputs_sha256', 'bootstrap_sha256', 'operator_file', 'secret_file', 'journal_dir'))
 
 
 def digest_file(path: Path) -> str:
@@ -107,13 +107,70 @@ def operation_lock(directory: Path):
             os.close(descriptor)
 
 
+def nonempty(value):
+    if isinstance(value, dict):
+        return any(nonempty(item) for item in value.values())
+    if isinstance(value, list):
+        return any(nonempty(item) for item in value)
+    return value not in (None, '', False)
+
+
+def backend_digest(root, policy):
+    try:
+        path = root / '.terraform/terraform.tfstate'
+        if path.is_symlink() or (root / '.terraform').is_symlink():
+            raise HostError('initialized backend metadata must not be symlinked')
+        metadata = json.loads(path.read_text())['backend']
+        actual = metadata['config']
+        forbidden = ('endpoints', 'endpoint', 's3_endpoint', 'sts_endpoint', 'iam_endpoint', 'dynamodb_endpoint',
+                     'access_key', 'secret_key', 'token', 'shared_credentials_file', 'shared_credentials_files', 'shared_config_files',
+                     'custom_ca_bundle', 'insecure', 'skip_credentials_validation', 'skip_region_validation',
+                     'skip_requesting_account_id', 'skip_s3_checksum', 'force_path_style', 'use_path_style')
+        if any(nonempty(actual.get(name)) for name in forbidden) or actual.get('profile') not in (None, '', policy['aws_profile']):
+            raise HostError('initialized backend uses unreviewed endpoints, credentials or insecure settings')
+        role = actual.get('assume_role_with_web_identity')
+        if nonempty(role):
+            raise HostError('initialized backend has an unreviewed alternate credential path')
+        workspace = root / '.terraform/environment'
+        if workspace.is_symlink() or workspace.exists() and workspace.read_text().strip() != 'default':
+            raise HostError('initialized backend workspace differs from reviewed default')
+        return hashlib.sha256(json.dumps(metadata, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise HostError('cannot establish reviewed backend configuration identity') from exc
+
+
+def tool_identity(root, policy):
+    path = root.parent / '.tools/bin/tofu'
+    try:
+        if any(value.is_symlink() for value in [path, *path.parents]):
+            raise HostError('reviewed OpenTofu executable must have no symlinked path component')
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.geteuid())
+                    or stat.S_IMODE(info.st_mode) & 0o022 or not stat.S_IMODE(info.st_mode) & 0o111):
+                raise HostError('reviewed OpenTofu executable is not trusted and executable')
+            digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+        expected = policy['tofu_file_identity']
+        if (set(expected) != {'device', 'inode'} or any(type(expected[name]) is not int for name in expected)
+                or expected != {'device': info.st_dev, 'inode': info.st_ino} or digest != policy['tofu_sha256']):
+            raise HostError('OpenTofu executable identity or digest differs from reviewed policy')
+        return info.st_dev, info.st_ino
+    except (OSError, KeyError, TypeError) as exc:
+        raise HostError('cannot validate reviewed OpenTofu executable') from exc
+
+
+def private_inputs_digest(policy):
+    return hashlib.sha256(private_file(Path(policy['operator_file'])) + b'\0' + private_file(Path(policy['secret_file']))).hexdigest()
+
+
 def load_policy(path: Path, expected_sha256: str, deployment: dict) -> dict:
     try:
         data = private_file(path)
         if not SHA256.fullmatch(expected_sha256 or '') or hashlib.sha256(data).hexdigest() != expected_sha256:
             raise HostError('lifecycle policy does not match its reviewed SHA-256')
         policy = json.loads(data)
-        if set(policy) != POLICY_FIELDS or policy['schema_version'] != 1:
+        if set(policy) != POLICY_FIELDS or policy['schema_version'] != 2:
             raise HostError('lifecycle policy schema is invalid')
         if not isinstance(policy['aws_profile'], str) or not re.fullmatch('[A-Za-z0-9_-]{1,64}', policy['aws_profile']):
             raise HostError('lifecycle AWS profile must be explicit and valid')
@@ -143,6 +200,11 @@ def load_policy(path: Path, expected_sha256: str, deployment: dict) -> dict:
             raise HostError('initialized backend account or operator role differs from deployment')
         if metadata['type'] != 's3' or any(actual.get(name) != value for name, value in policy['backend'].items()) or actual.get('encrypt') is not True or actual.get('use_lockfile') is not True:
             raise HostError('initialized backend differs from the reviewed lifecycle policy')
+        if backend_digest(root, policy) != policy['backend_sha256']:
+            raise HostError('initialized backend security configuration differs from reviewed policy')
+        tool_identity(root, policy)
+        if private_inputs_digest(policy) != policy['private_inputs_sha256']:
+            raise HostError('private operator inputs differ from reviewed policy')
         if digest_file(Path(policy['variables_file'])) != policy['variables_sha256'] or source_digest(root.parent) != policy['source_sha256']:
             raise HostError('lifecycle infrastructure source or private variables changed')
         if not SHA256.fullmatch(policy['bootstrap_sha256']) or deployment.get('bootstrap_sha256') != policy['bootstrap_sha256']:
@@ -286,18 +348,24 @@ class TofuCLI:
         metadata = self.root.stat()
         self.root_identity = (metadata.st_dev, metadata.st_ino)
         self.binary = self.root.parent / '.tools/bin/tofu'
+        tool_identity(self.root, self.policy)
 
     def run(self, *arguments: str, timeout=600) -> dict | None:
         root = canonical_infra_root(self.root)
         metadata = root.stat()
         if (metadata.st_dev, metadata.st_ino) != self.root_identity or str(root) != self.policy['infra_root']:
             raise HostError('lifecycle infrastructure directory identity changed before execution')
+        tool_identity(root, self.policy)
+        if backend_digest(root, self.policy) != self.policy['backend_sha256']:
+            raise HostError('backend security configuration changed before infrastructure execution')
+        if private_inputs_digest(self.policy) != self.policy['private_inputs_sha256']:
+            raise HostError('private inputs changed before infrastructure execution')
         if digest_file(Path(self.policy['variables_file'])) != self.policy['variables_sha256'] or source_digest(self.root.parent) != self.policy['source_sha256']:
             raise HostError('reviewed lifecycle source or variables changed before infrastructure execution')
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(('TF_', 'TOFU_')) and key not in ('CLOUDFLARE_API_TOKEN', 'AWS_DEBUG')}
         environment.update(TF_IN_AUTOMATION='true', TF_LOG='OFF', AWS_PROFILE=self.policy['aws_profile'])
-        for name in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_SECURITY_TOKEN'):
+        for name in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_SECURITY_TOKEN', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE'):
             environment.pop(name, None)
         try:
             result = subprocess.run([str(self.binary), f'-chdir={self.root}', *arguments], capture_output=True,
@@ -332,7 +400,8 @@ class TofuCLI:
 
 
 class OnDemandSession:
-    def __init__(self, deployment: dict, aws, cloudflare, policy: dict, deployment_path: Path, *, tofu=None, transfer=None):
+    def __init__(self, deployment: dict, aws, cloudflare, policy: dict, deployment_path: Path, *, tofu=None, transfer=None, started_at=None):
+        self.command_started_at = time.time() if started_at is None else started_at
         self.deployment = deployment
         self.aws = aws
         self.cloudflare = cloudflare
@@ -362,10 +431,13 @@ class OnDemandSession:
         source = source_digest(Path(self.policy['infra_root']).parent)
         if variables != self.policy['variables_sha256'] or source != self.policy['source_sha256']:
             raise HostError('reviewed lifecycle source or variables changed during the operation')
+        private_digest = private_inputs_digest(self.policy)
+        if private_digest != self.policy['private_inputs_sha256']:
+            raise HostError('private operator inputs differ from the reviewed policy')
         return {'account_id': self.deployment['account_id'], 'aws_profile': self.policy['aws_profile'], 'backend': self.policy['backend'],
                 'variables_sha256': variables, 'source_sha256': source,
                 'bootstrap_sha256': self.policy['bootstrap_sha256'],
-                'private_inputs_sha256': hashlib.sha256(private_file(Path(self.policy['operator_file'])) + b'\0' + private_file(Path(self.policy['secret_file']))).hexdigest(),
+                'private_inputs_sha256': private_digest,
                 'data_volume_id': self.deployment['data_volume_id'], 'data_filesystem_uuid': self.deployment['data_filesystem_uuid']}
 
     def journal(self, action: str, instance=None):
@@ -399,7 +471,7 @@ class OnDemandSession:
             raise HostError('off-state deployment has unexpected or partial session resources')
         journal = {'schema_version': 1, 'operation_id': str(uuid.uuid4()), 'action': action, 'instance': instance,
                    'binding': self.binding(), 'initial_state': state, 'phase': 'begun', 'source_deployment': self.deployment,
-                   'started_at': time.time()}
+                   'started_at': self.command_started_at}
         save_private(self.journal_path, journal)
         return journal
 
@@ -697,6 +769,8 @@ class OnDemandSession:
             return {'host': 'absent', 'root_disk': 'absent', 'data_disk': 'retained', 'backup': journal.get('backup', 'unverified')}
 
     def verify_handoff_inventory(self) -> bool:
+        if self.tofu.deployment() != self.deployment:
+            raise HostError('complete deployment handoff differs from authoritative infrastructure output')
         inventory = resources(self.tofu.state())
         if {'aws_instance.host', 'aws_volume_attachment.data'}.intersection(inventory):
             raise HostError('session ownership migration is incomplete; DNS and status require the current handoff')

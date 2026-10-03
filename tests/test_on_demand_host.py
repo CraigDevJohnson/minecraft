@@ -195,6 +195,7 @@ class OnDemandTests(unittest.TestCase):
         self.addCleanup(self.source_patch.stop)
         self.policy = {'variables_file': str(self.variables), 'infra_root': str(self.root / 'infra'), 'aws_profile': 'workloads-admin', 'journal_dir': str(self.root / 'journal'), 'operator_file': str(self.operator), 'secret_file': str(self.secret),
                        'backend': {'bucket': 'private-state', 'key': 'infrastructure/terraform.tfstate', 'region': 'us-west-2'},
+                       'private_inputs_sha256': __import__('hashlib').sha256(self.operator.read_bytes() + b'\0' + self.secret.read_bytes()).hexdigest(),
                        'source_sha256': DIGEST, 'variables_sha256': lifecycle.digest_file(self.variables), 'bootstrap_sha256': DIGEST}
         self.aws = FakeAWS()
         FakeSession.instances = []
@@ -441,6 +442,24 @@ class OnDemandTests(unittest.TestCase):
         self.assertEqual(output['host'], 'absent')
         self.assertEqual(session.dns, {'dns': 'failed'})
         self.assertEqual(json.loads(session.journal_path.read_text())['phase'], 'complete')
+    def test_full_handoff_fields_must_match_authoritative_output_before_dns_or_status(self):
+        for present in (False, True):
+            for key, value in (('public_hostname','other.example.com'), ('cloudflare_zone_id','f'*32), ('data_volume_id','vol-2123456789abcdef0')):
+                with self.subTest(present=present,key=key):
+                    session = self.session(present)
+                    session.deployment[key] = value
+                    with self.assertRaises(host.HostError): session.repair_dns()
+                    with self.assertRaises(host.HostError): session.status()
+                    self.assertEqual(FakeSession.instances, [])
+
+    def test_journal_start_clock_includes_validation_and_initial_state_pull(self):
+        session = self.session(False)
+        session.command_started_at = 100.0
+        with mock.patch.object(lifecycle.time, 'time', return_value=180.0):
+            with lifecycle.operation_lock(session.directory):
+                journal = session.journal('start','survival')
+        self.assertEqual(journal['started_at'],100.0)
+
     def test_dns_repair_refuses_stale_handoffs_in_both_directions_and_partial_session(self):
         for declared, actual in ((False, True), (True, False)):
             with self.subTest(declared=declared), tempfile.TemporaryDirectory() as child:
@@ -501,12 +520,20 @@ class PolicyBoundaryTests(unittest.TestCase):
         self.secret = self.directory / 'rcon.secret'
         self.secret.write_text('PRIVATE_SECRET_DONT_DISCLOSE')
         self.secret.chmod(0o600)
-        self.policy = {'schema_version': 1, 'workstation': socket.gethostname(), 'aws_profile': 'workloads-admin',
+        self.policy = {'schema_version': 2, 'workstation': socket.gethostname(), 'aws_profile': 'workloads-admin',
                        'infra_root': str(self.infra), 'variables_file': str(self.variables),
                        'variables_sha256': lifecycle.digest_file(self.variables), 'source_sha256': DIGEST,
                        'backend': {name: self.backend[name] for name in ('bucket', 'key', 'region')},
                        'bootstrap_sha256': DIGEST, 'operator_file': str(self.operator), 'secret_file': str(self.secret),
                        'journal_dir': str(self.directory / 'journal')}
+        binary = self.directory / '.tools/bin/tofu'
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b'reviewed-project-executable')
+        binary.chmod(0o755)
+        info = binary.stat()
+        self.policy.update(tofu_sha256=lifecycle.digest_file(binary), tofu_file_identity={'device': info.st_dev, 'inode': info.st_ino},
+                           backend_sha256=lifecycle.backend_digest(self.infra, self.policy),
+                           private_inputs_sha256=lifecycle.private_inputs_digest(self.policy))
         self.path = self.directory / 'lifecycle.json'
         self.mock_digest = mock.patch.object(lifecycle, 'source_digest', return_value=DIGEST)
         self.mock_digest.start()
@@ -515,6 +542,43 @@ class PolicyBoundaryTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.policy))
         self.path.chmod(0o600)
         return lifecycle.load_policy(self.path, lifecycle.digest_file(self.path), DEPLOYMENT)
+    def test_reviewed_private_bytes_are_pinned_across_completed_operations(self):
+        self.validate()
+        self.secret.write_text('changed-private-secret-content')
+        with self.assertRaises(host.HostError): self.validate()
+
+    def test_executable_digest_identity_and_symlink_are_checked_before_subprocess(self):
+        self.validate()
+        client = lifecycle.TofuCLI(self.policy)
+        binary = self.directory / '.tools/bin/tofu'
+        binary.write_bytes(b'unreviewed-replacement')
+        with mock.patch.object(lifecycle.subprocess,'run') as run:
+            with self.assertRaises(host.HostError): client.run('state','pull')
+            run.assert_not_called()
+        binary.write_bytes(b'reviewed-project-executable')
+        target = self.directory / 'same-bytes'
+        target.write_bytes(binary.read_bytes()); target.chmod(0o755)
+        binary.unlink(); binary.symlink_to(target)
+        with self.assertRaises(host.HostError): self.validate()
+
+    def test_backend_custom_endpoints_credentials_and_insecure_settings_are_refused(self):
+        for field,value in (('endpoints',{'s3':'https://unreviewed.invalid'}),('endpoint','https://unreviewed.invalid'),
+                            ('insecure',True),('access_key','unreviewed'),('shared_credentials_files',['/other']),('skip_credentials_validation',True)):
+            with self.subTest(field=field):
+                original = copy.deepcopy(self.backend)
+                self.backend[field] = value
+                self.metadata.write_text(json.dumps({'backend':{'type':'s3','config':self.backend}}))
+                with self.assertRaises(host.HostError): self.validate()
+                self.backend = original
+        self.metadata.write_text(json.dumps({'backend':{'type':'s3','config':self.backend}}))
+        self.validate()
+        client = lifecycle.TofuCLI(self.policy)
+        changed = {**self.backend,'endpoints':{'s3':'https://unreviewed.invalid'}}
+        self.metadata.write_text(json.dumps({'backend':{'type':'s3','config':changed}}))
+        with mock.patch.object(lifecycle.subprocess,'run') as run:
+            with self.assertRaises(host.HostError): client.run('state','pull')
+            run.assert_not_called()
+
     def test_executed_root_rejects_other_directory_and_symlink_components(self):
         original = self.policy['infra_root']
         other = self.directory / 'unreviewed'
@@ -588,11 +652,12 @@ class PolicyBoundaryTests(unittest.TestCase):
         policy = {**self.policy}
         client = lifecycle.TofuCLI(policy)
         with mock.patch.dict(os.environ, {'TF_CLI_ARGS': '-destroy', 'TF_VAR_session_present': 'false', 'CLOUDFLARE_API_TOKEN': 'PRIVATE_TOKEN',
-                                         'AWS_ACCESS_KEY_ID': 'PRIVATE_AWS_ACCESS', 'AWS_SECRET_ACCESS_KEY': 'PRIVATE_AWS_SECRET'}), \
+                                         'AWS_ACCESS_KEY_ID': 'PRIVATE_AWS_ACCESS', 'AWS_SECRET_ACCESS_KEY': 'PRIVATE_AWS_SECRET',
+                                         'AWS_CONFIG_FILE': '/unreviewed/config', 'AWS_SHARED_CREDENTIALS_FILE': '/unreviewed/credentials'}), \
                 mock.patch.object(lifecycle.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{}')) as run:
             client.run('state', 'pull')
         environment = run.call_args.kwargs['env']
-        for name in ('TF_CLI_ARGS', 'TF_VAR_session_present', 'CLOUDFLARE_API_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'):
+        for name in ('TF_CLI_ARGS', 'TF_VAR_session_present', 'CLOUDFLARE_API_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE'):
             self.assertNotIn(name, environment)
         self.assertEqual(environment['AWS_PROFILE'], 'workloads-admin')
     def test_removal_accepts_only_matching_launch_lookup_state_removal(self):

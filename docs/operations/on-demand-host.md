@@ -20,13 +20,17 @@ Prepare an owner-only JSON controller policy with exactly these fields:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "workstation": "the-output-of-socket.gethostname",
   "aws_profile": "reviewed-local-profile",
   "infra_root": "/absolute/reviewed/checkout/infra",
   "variables_file": "/absolute/private/deployment.tfvars",
   "variables_sha256": "sha256-of-the-exact-private-tfvars-bytes",
   "source_sha256": "computed-authored-source-digest",
+  "backend_sha256": "computed-initialized-backend-security-digest",
+  "tofu_sha256": "sha256-of-reviewed-project-local-tofu",
+  "tofu_file_identity": {"device": 0, "inode": 0},
+  "private_inputs_sha256": "sha256-of-operator-bytes-nul-secret-bytes",
   "backend": {
     "bucket": "private-state-bucket",
     "key": "infrastructure/terraform.tfstate",
@@ -39,7 +43,7 @@ Prepare an owner-only JSON controller policy with exactly these fields:
 }
 ```
 
-Compute `source_sha256` with `minecraft_on_demand.source_digest(Path(checkout_root))`; it covers the Terraform source/lock and authored bootstrap/controller files. Compute the variables digest with SHA-256 over the exact private file. The policy fixes the designated hostname, explicit AWS profile, paths, backend, inputs and runtime release. Automatic unreviewed `.auto.tfvars`, overrides and a non-default workspace refuse operation. The initialized backend must match bucket/key/region with encryption, native locking, the same allowed account and the recorded operator role. The configured profile supplies credentials only to assume that reviewed operator role temporarily. Operational AWS calls and the SSM tunnel use in-memory short-lived role credentials; no machine-wide profile is created. Review this concrete policy, initial migration and rollback together, including recurring authority to create/delete only the host/attachment and root-on-termination. Record the SHA-256 of the exact policy bytes. A changed policy/input/source/release needs a new review; an incomplete operation cannot silently adopt it.
+Compute `source_sha256` with `minecraft_on_demand.source_digest(Path(checkout_root))`; it covers the Terraform source/lock and authored bootstrap/controller files. Compute the variables digest with SHA-256 over the exact private file. Use `minecraft_on_demand.backend_digest(Path(infra_root), policy)` for the initialized backend digest and `private_inputs_digest(policy)` for the exact operator/RCON bytes. Record SHA-256 plus the actual `st_dev`/`st_ino` of the reviewed regular `.tools/bin/tofu`; the example zeroes are placeholders to replace with those values. The controller rejects symlinked tool paths and rechecks its identity/hash before each invocation. The version-2 policy fixes the designated hostname, explicit AWS profile, canonical infra directory, backend security settings, executable identity, exact private input bytes and runtime release. Source-profile AWS and OpenTofu commands strip ambient credential-file overrides; custom backend endpoints, credential paths and insecure validation/TLS settings are rejected. Private input or executable replacement between completed operations needs a newly reviewed policy. Automatic unreviewed `.auto.tfvars`, overrides and a non-default workspace refuse operation. The initialized backend must match bucket/key/region with encryption, native locking, the same allowed account and the recorded operator role. The configured profile supplies credentials only to assume that reviewed operator role temporarily. Operational AWS calls and the SSM tunnel use in-memory short-lived role credentials; no machine-wide profile is created. Review this concrete policy, initial migration and rollback together, including recurring authority to create/delete only the host/attachment and root-on-termination. Record the SHA-256 of the exact policy bytes. A changed policy/input/source/release needs a new review; an incomplete operation cannot silently adopt it.
 
 The operator needs existing infrastructure administration plus scoped `ssm:StartSession` access to the intended host and `AWS-StartPortForwardingSession`, and permission to terminate its own sessions. The host role never gets infrastructure ownership, operator credentials, or secret storage access. Install the Session Manager plugin locally through the reviewed official workflow; the controller does not change global workstation tooling.
 
@@ -56,7 +60,7 @@ python3 scripts/minecraft_host.py --deployment /absolute/private/deployment.json
   --lifecycle /absolute/private/lifecycle.json --policy-sha256 "$approved_policy_sha256" stop
 ```
 
-Use the existing one-command Cloudflare token injection from [host commands](host-commands.md). `status` and `dns` accept the same policy options. Off-state `status` reports an absent host and retained disk, with application unavailable and backup unverified. `dns` parks the existing A record when absent.
+Use the existing one-command Cloudflare token injection from [host commands](host-commands.md). `status` and `dns` accept the same policy options. Both `status` and `dns` compare the full handoff with authoritative OpenTofu output and actual session inventory before using it. Off-state `status` reports an absent host and retained disk, with application unavailable and backup unverified. `dns` parks the existing A record when absent.
 
 Start plans and applies only missing session resources, verifies the handoff against actual infrastructure state, waits for SSM/cloud-init, retries the existing storage-gated bootstrap if attachment visibility delayed it, fetches and verifies the pinned public release, stages private configuration over the short-lived loopback receiver and installs the reviewed runtime. Only then does the normal instance start run. A retry after interrupted installation repeats identical setup. A retry after runtime installation resumes normal idempotent instance start without reinstalling. An already-present host with an installed runtime uses the existing normal game start path. A migration-created host without a runtime automatically receives the same reviewed setup before game start. Failed transfer, installation or readiness never reports a ready game.
 
@@ -68,6 +72,6 @@ No force-detach, force-format, automatic data deletion or root recovery shortcut
 
 ## Live acceptance
 
-The controller records `start_to_ready_seconds` through its application/DNS-API milestone and `controller_ready_within_target` against 180 seconds. `startup_target_met` stays null within that bound until independent live endpoint verification; it is false when the controller itself misses the target or DNS fails. `host_recreated` distinguishes a full cold start from an already-present host start. Timer evidence covers the saved operation, including interruptions. Confirm endpoint availability through actual network/client checks and record the elapsed time against the target. A slower cold start fails that target and calls for a measured optimization proposal; do not count an already-running start or Paper-only boot time as cold-start proof.
+The controller records `start_to_ready_seconds` through its application/DNS-API milestone and `controller_ready_within_target` against 180 seconds. `startup_target_met` stays null within that bound until independent live endpoint verification; it is false when the controller itself misses the target or DNS fails. `host_recreated` distinguishes a full cold start from an already-present host start. The timestamp starts at command entry before policy validation, role assumption or initial state access. Timer evidence covers the saved operation, including interruptions. Confirm endpoint availability through actual network/client checks and record the elapsed time against the target. A slower cold start fails that target and calls for a measured optimization proposal; do not count an already-running start or Paper-only boot time as cold-start proof.
 
 Demonstrate a completed stop with no session host/root volume, preserved source disk/UUID/checkpoints, then a start with no manual host setup and intact world/player state. Exercise failed drain/restore/readiness, interruption and DNS repair on the reviewed live boundary. Offline tests prove controller/refusal behavior and mocked resource boundaries, without AWS mutation, real SSM transfer, host/root deletion, family-client readiness or timing. Keep #23 open until that live evidence meets its criteria. The separate S3-only phase requires #24's independent exact-version receipt and ownership/protection migration; this mode deliberately keeps the data disk.
