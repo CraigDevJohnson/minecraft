@@ -45,13 +45,13 @@ def free_port(kind: int) -> int:
         return listener.getsockname()[1]
 
 
-def free_signaling_port() -> int:
+def free_signaling_port(webrtc_port: int = 19133, java_port: int | None = None) -> int:
     """One loopback host port carries both RakNet UDP and HTTP signaling TCP."""
     for _ in range(20):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
             tcp.bind(("127.0.0.1", 0))
             port = tcp.getsockname()[1]
-            if port == 19133:
+            if port in (webrtc_port, java_port):
                 continue
             try:
                 udp.bind(("127.0.0.1", port))
@@ -61,12 +61,12 @@ def free_signaling_port() -> int:
     raise RuntimeError("cannot allocate one free TCP/UDP signaling port")
 
 
-def require_local_webrtc_port() -> None:
+def require_local_webrtc_port(port: int = 19133) -> None:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-            probe.bind(("127.0.0.1", 19133))
+            probe.bind(("127.0.0.1", port))
     except OSError as error:
-        raise RuntimeError("local UDP 19133 is occupied; preserve the other runtime and retry validation later") from error
+        raise RuntimeError(f"local UDP {port} is occupied; preserve the other runtime and retry validation later") from error
 
 
 def check_nethernet_metadata(value: dict) -> dict:
@@ -119,10 +119,11 @@ def native_transport_probe(manifest: dict, artifacts: Path, output: Path) -> dic
     run([*isolated, *mounts, "--mount", f"type=bind,source={ROOT / 'scripts/NetherNetNativeProbe.java'},target=/probe/NetherNetNativeProbe.java,readonly",
          "--entrypoint", "javac", NATIVE_PROBE_COMPILER, "--release", "17", "-cp", "/probe/geyser.jar",
          "-d", "/probe/classes", "/probe/NetherNetNativeProbe.java"], timeout=300)
+    port = content.webrtc_port(manifest)
     result = json.loads(run([*isolated, *mounts, "--entrypoint", "java", manifest["image"],
         "--enable-native-access=ALL-UNNAMED", "-cp", "/probe/classes:/probe/geyser.jar",
-        "NetherNetNativeProbe", "19133"], timeout=45))
-    expected = {"status": "passed", "scope": "isolated_bundled_native_transport", "udp_port": 19133,
+        "NetherNetNativeProbe", str(port)], timeout=45))
+    expected = {"status": "passed", "scope": "isolated_bundled_native_transport", "udp_port": port,
                 "reliable_echo": True, "unreliable_echo": True,
                 "geyser_admission_verified": False, "bedrock_join_verified": False}
     if result != expected or any(type(result.get(key)) is not type(value) for key, value in expected.items()):
@@ -259,10 +260,11 @@ def validate(operator_config: Path, output: Path) -> dict:
     data.mkdir(mode=0o755)
     manifest = content.load_manifest(ROOT / "runtime/content.json")
     definition = content.load_definition(ROOT / "runtime/survival.json")
+    native_port = content.webrtc_port(manifest)
     definition["java_port"] = free_port(socket.SOCK_STREAM)
-    definition["bedrock_port"] = free_signaling_port()
-    # The pinned native API advertises same-port NAT only. Keep WebRTC 19133 on both sides.
-    require_local_webrtc_port()
+    definition["bedrock_port"] = free_signaling_port(native_port, definition["java_port"])
+    # The pinned native API advertises same-port NAT only.
+    require_local_webrtc_port(native_port)
     artifacts = content.stage_content(manifest, output / "artifacts")
     compose = content.render_compose(definition, manifest, data_dir=data, artifacts_dir=artifacts,
         rcon_password=secrets.token_urlsafe(32), eula_accepted=True, bind_address="127.0.0.1",
@@ -273,7 +275,7 @@ def validate(operator_config: Path, output: Path) -> dict:
     project = "minecraft-verify-" + secrets.token_hex(5)
     base = ["docker", "compose", "-p", project, "-f", str(compose_file)]
     report = {"platform": platform, "manifest_sha256": content.manifest_digest(manifest),
-              "image": manifest["image"], "project": project, "status": "incomplete"}
+              "image": manifest["image"], "project": project, "webrtc_port": native_port, "status": "incomplete"}
     container = ""
 
     def rcon(command):
@@ -342,7 +344,7 @@ def validate(operator_config: Path, output: Path) -> dict:
             "25565/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(definition["java_port"])}],
             "19132/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(definition["bedrock_port"])}],
             "19132/udp": [{"HostIp": "127.0.0.1", "HostPort": str(definition["bedrock_port"])}],
-            "19133/udp": [{"HostIp": "127.0.0.1", "HostPort": "19133"}],
+            f"{native_port}/udp": [{"HostIp": "127.0.0.1", "HostPort": str(native_port)}],
         }
         if bindings != expected_bindings:
             raise RuntimeError("runtime smoke ports did not preserve the isolated dual-transport mapping")

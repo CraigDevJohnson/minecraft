@@ -25,7 +25,63 @@ def write_manifest(directory: str, manifest: dict) -> Path:
     return path
 
 
+def with_webrtc_port(manifest: dict, port) -> dict:
+    changed = copy.deepcopy(manifest)
+    managed = changed["managed_files"][0]
+    managed["content"]["bedrock"]["webrtc-port"] = port
+    managed["sha256"] = hashlib.sha256(content._managed_file_bytes(managed)).hexdigest()
+    return changed
+
+
 class ContentTests(unittest.TestCase):
+    def test_two_instances_own_non_overlapping_same_port_webrtc_bindings(self):
+        survival = content.load_definition(ROOT / "runtime/survival.json")
+        creative = dict(survival, id="creative", java_port=25566, bedrock_port=19135)
+        manifest = content.load_manifest(ROOT / "runtime/content.json")
+        creative_manifest = with_webrtc_port(manifest, 19134)
+        content._validate_manifest(creative_manifest)
+        content._validate_manifest(creative_manifest, recorded=True)
+        ports = []
+        for definition, selected in ((survival, manifest), (creative, creative_manifest)):
+            rendered = content.render_compose(definition, selected,
+                data_dir=Path("/private") / definition["id"] / "data", artifacts_dir=Path("/private/artifacts"),
+                rcon_password="a-private-fixture-password", eula_accepted=True)
+            ports.append(content.published_game_ports(definition, selected))
+            port = content.webrtc_port(selected)
+            self.assertIn(f"0.0.0.0:{port}:{port}/udp", rendered["services"]["minecraft"]["ports"])
+        self.assertFalse(ports[0] & ports[1])
+        self.assertEqual(content.webrtc_port(manifest), 19133)
+
+    def test_manifest_port_variation_preserves_every_other_typed_configuration_value(self):
+        manifest = content.load_manifest(ROOT / "runtime/content.json")
+        for port in (1, 19134, 65535):
+            custom = with_webrtc_port(manifest, port)
+            content._validate_manifest(custom)
+            content._validate_manifest(custom, recorded=True)
+        for port in (0, -1, 65536, 19132, True, False, 19134.0, "19134", None):
+            custom = with_webrtc_port(manifest, port)
+            with self.subTest(port=port), self.assertRaisesRegex(content.ContentError, "configuration schema"):
+                content._validate_manifest(custom)
+        for mutate in (lambda c: c["bedrock"]["signaling"].update(mode="nxs"),
+                       lambda c: c["java"].update({"auth-type": "offline"}),
+                       lambda c: c.update({"log-player-ip-addresses": True})):
+            custom = with_webrtc_port(manifest, 19134)
+            managed = custom["managed_files"][0]
+            mutate(managed["content"])
+            managed["sha256"] = hashlib.sha256(content._managed_file_bytes(managed)).hexdigest()
+            with self.assertRaisesRegex(content.ContentError, "configuration schema"):
+                content._validate_manifest(custom, recorded=True)
+
+    def test_custom_webrtc_port_rejects_udp_collision_but_may_share_a_tcp_number(self):
+        definition = content.load_definition(ROOT / "runtime/survival.json")
+        manifest = content.load_manifest(ROOT / "runtime/content.json")
+        parameters = dict(data_dir=Path("/private/data"), artifacts_dir=Path("/private/artifacts"),
+                          rcon_password="a-private-fixture-password", eula_accepted=True)
+        with self.assertRaises(content.ContentError):
+            content.render_compose(dict(definition, bedrock_port=19134), with_webrtc_port(manifest, 19134), **parameters)
+        rendered = content.render_compose(definition, with_webrtc_port(manifest, 25565), **parameters)
+        self.assertIn("0.0.0.0:25565:25565/udp", rendered["services"]["minecraft"]["ports"])
+
     def test_managed_configuration_is_recoverable_from_the_exact_manifest(self):
         manifest = content.load_manifest(ROOT / "runtime/content.json")
         expected = (b'{"bedrock":{"address":"0.0.0.0","clone-remote-port":false,"port":19132,'

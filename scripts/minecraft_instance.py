@@ -504,9 +504,13 @@ class LinuxMachine:
                 "started_at": state["StartedAt"]}
 
     def prepare(self, instance):
-        from minecraft_content import render_compose, stage_content
+        from minecraft_content import published_game_ports, render_compose, stage_content
         if self.config.get("eula_accepted") is not True:
             raise OperationError("explicit private operator EULA acceptance is required")
+        requested = published_game_ports(self.definitions[instance], self.manifests[instance])
+        for configured in self.definitions:
+            if configured != instance and requested & self.active_game_ports(configured):
+                raise OperationError("requested game ports overlap another running configured instance; stop it or choose distinct ports")
         password = private_text(self.config["rcon_password_file"]).strip()
         public_address = self.nethernet_advertise_address()
         manifest = self.manifests[instance]
@@ -531,6 +535,33 @@ class LinuxMachine:
 
     def nethernet_advertise_address(self):
         return ec2_public_ipv4()
+
+    def active_game_ports(self, instance):
+        container = self.inspect(instance)
+        if not container["running"]:
+            return frozenset()
+        # Project only actual bindings; the full inspect document contains RCON credentials.
+        output = command(["docker", "inspect", "--format", "{{json .HostConfig.PortBindings}}", container["container_id"]])
+        try:
+            bindings = json.loads(output)
+            if not isinstance(bindings, dict):
+                raise ValueError("invalid active port bindings")
+            ports = set()
+            for target, entries in bindings.items():
+                if entries is None or entries == []:
+                    continue  # Exposed but unpublished ports do not occupy the host.
+                if not re.fullmatch(r"[0-9]{1,5}/(?:tcp|udp)", target) or not 1 <= int(target.split("/")[0]) <= 65535:
+                    raise ValueError("invalid container port")
+                if not isinstance(entries, list):
+                    raise ValueError("invalid published bindings")
+                for entry in entries:
+                    port = entry.get("HostPort") if isinstance(entry, dict) else None
+                    if not isinstance(port, str) or not re.fullmatch(r"[0-9]{1,5}", port) or not 1 <= int(port) <= 65535:
+                        raise ValueError("invalid published port")
+                    ports.add((target.split("/")[1], int(port)))
+            return frozenset(ports)
+        except (ValueError, TypeError) as error:
+            raise OperationError("cannot verify another running instance's active port bindings") from error
 
     def verify_restored(self, instance, state):
         from minecraft_content import load_definition, load_manifest, manifest_digest

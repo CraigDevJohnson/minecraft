@@ -91,12 +91,14 @@ def validate(operator_config: Path, output: Path) -> dict:
     local_root = output / "retained-fixture"
     local_root.mkdir()
     instance = "lifecycle-" + secrets.token_hex(5)
+    manifest = content.load_manifest(ROOT / "runtime/content.json")
+    native_port = content.webrtc_port(manifest)
     definition = content.load_definition(ROOT / "runtime/survival.json")
-    definition.update(id=instance, java_port=free_port(socket.SOCK_STREAM), bedrock_port=free_signaling_port())
-    require_local_webrtc_port()
+    definition.update(id=instance, java_port=free_port(socket.SOCK_STREAM))
+    definition["bedrock_port"] = free_signaling_port(native_port, definition["java_port"])
+    require_local_webrtc_port(native_port)
     definition_path = output / "definition.json"
     runtime.write_json(definition_path, definition)
-    manifest = content.load_manifest(ROOT / "runtime/content.json")
     runtime.write_json(output / definition["manifest"], manifest)
     deployment_path = output / "deployment.json"
     runtime.write_json(deployment_path, {

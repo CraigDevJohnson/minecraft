@@ -95,7 +95,7 @@ public final class NetherNetNativeProbe {
         int result = 0;
         try {
             int port = args.length == 0 ? 19133 : Integer.parseInt(args[0]);
-            if (args.length > 1 || port < 1025 || port > 65535) throw new IllegalArgumentException();
+            if (args.length > 1 || port < 1 || port > 65535) throw new IllegalArgumentException();
             probe(port);
         } catch (Throwable failure) {
             System.out.println("{\"status\":\"failed\",\"scope\":\"isolated_bundled_native_transport\"}");

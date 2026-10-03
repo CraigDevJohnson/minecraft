@@ -30,7 +30,7 @@ ARTIFACTS = {
 RELEASE_ASSETS = {"viaversion": "/ViaVersion/ViaVersion/releases/download/{version}/ViaVersion-{version}.jar"}
 
 
-def _approved_geyser(config_version: int, *, dual_transport: bool = False) -> dict:
+def _approved_geyser(config_version: int, *, dual_transport: bool = False, webrtc_port: int = 19133) -> dict:
     configuration = {
         "config-version": config_version,
         "bedrock": {"address": "0.0.0.0", "port": 19132, "clone-remote-port": False},
@@ -39,7 +39,7 @@ def _approved_geyser(config_version: int, *, dual_transport: bool = False) -> di
         "saved-user-logins": [],
     }
     if dual_transport:
-        configuration["bedrock"].update({"transport": "both", "webrtc-port": 19133,
+        configuration["bedrock"].update({"transport": "both", "webrtc-port": webrtc_port,
                                          "signaling": {"mode": "builtin"}})
     return configuration
 
@@ -133,14 +133,19 @@ def _validate_manifest(manifest: dict, *, recorded: bool = False) -> None:
             or hashlib.sha256(_managed_file_bytes(managed)).hexdigest() != managed["sha256"]):
         raise ContentError("managed configuration checksum mismatch")
     configuration = managed["content"]
+    bedrock = configuration.get("bedrock") if isinstance(configuration, dict) else None
+    port = bedrock.get("webrtc-port") if isinstance(bedrock, dict) else None
+    current_schema = (_approved_geyser(8, dual_transport=True, webrtc_port=port)
+                      if type(port) is int and 1 <= port <= 65535 and port != 19132 else None)
+    current_policy = (found == CONTENT_POLICY[0] and current_schema is not None
+                      and _managed_file_bytes(managed) == _managed_file_bytes({"content": current_schema}))
     # Policy validation only: staged bytes always come from the manifest payload.
     # JSON equality keeps scalar types distinct (8.0/8 and false/0 differ).
-    if (not isinstance(configuration, dict)
+    if not current_policy and (not isinstance(configuration, dict)
             or not any(_managed_file_bytes(managed) == _managed_file_bytes({"content": schema}) for schema in approved)):
         raise ContentError("managed configuration schema must preserve the approved Geyser "
                            "authentication, network and privacy settings")
-    if ((found, configuration) != CONTENT_POLICY
-            and manifest_digest(manifest) not in EARLIER_REVIEWED_MANIFESTS):
+    if not current_policy and manifest_digest(manifest) not in EARLIER_REVIEWED_MANIFESTS:
         raise ContentError("recorded manifest is not an exact earlier reviewed release")
 
 
@@ -152,6 +157,19 @@ def _managed_file_bytes(managed: dict) -> bytes:
 
 def manifest_digest(manifest: dict) -> str:
     return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def webrtc_port(manifest: dict) -> int:
+    """The validated current manifest owns the native port and its same-port publication."""
+    return manifest["managed_files"][0]["content"]["bedrock"]["webrtc-port"]
+
+
+def published_game_ports(definition: dict, manifest: dict) -> frozenset[tuple[str, int]]:
+    ports = (("tcp", definition["java_port"]), ("tcp", definition["bedrock_port"]),
+             ("udp", definition["bedrock_port"]), ("udp", webrtc_port(manifest)))
+    if len(set(ports)) != len(ports):
+        raise ContentError("Java/signaling TCP and RakNet/WebRTC UDP ports must be distinct")
+    return frozenset(ports)
 
 
 def stage_content(manifest: dict, cache_dir: Path) -> Path:
@@ -229,8 +247,8 @@ def render_compose(definition: dict, manifest: dict, *, data_dir: Path, artifact
         ipaddress.IPv4Address(bind_address)
     except ipaddress.AddressValueError as error:
         raise ContentError("game bind address must be an IPv4 address") from error
-    if definition["java_port"] == definition["bedrock_port"] or definition["bedrock_port"] == 19133:
-        raise ContentError("Java/signaling TCP and RakNet/WebRTC UDP ports must be distinct")
+    published_game_ports(definition, manifest)
+    native_port = webrtc_port(manifest)
     if nethernet_advertise_address is not None:
         if not isinstance(nethernet_advertise_address, str):
             raise ContentError("NetherNet advertisement must be one IPv4 address")
@@ -290,7 +308,7 @@ def render_compose(definition: dict, manifest: dict, *, data_dir: Path, artifact
         "ports": [f"{bind_address}:{definition['java_port']}:25565/tcp",
                   f"{bind_address}:{definition['bedrock_port']}:19132/udp",
                   f"{bind_address}:{definition['bedrock_port']}:19132/tcp",
-                  f"{bind_address}:19133:19133/udp"],
+                  f"{bind_address}:{native_port}:{native_port}/udp"],
         "volumes": [bind(data_dir, "/data", False), bind(artifacts_dir / "paper.jar", "/runtime/paper.jar", True), bind(artifacts_dir / "plugins", "/plugins", True)],
         "healthcheck": {"test": ["CMD", "mc-health"], "interval": "10s", "timeout": "5s", "start_period": "180s", "retries": 6},
         "logging": {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}},
