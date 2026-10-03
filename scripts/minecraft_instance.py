@@ -234,19 +234,29 @@ class Manager:
         return path.exists() and json.loads(path.read_text())["boot_id"] == self.machine.boot_id()
 
     def execute(self, action, instance=None, *, operation=None, edition=None, player=None):
-        if action not in ("host-drain", "host-status") and (
+        if action not in ("host-drain", "host-drain-private", "host-status") and (
                 not instance or not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", instance) or instance not in self.instances):
             raise OperationError("an explicit configured instance ID is required")
         with self.machine.lock():
             self.machine.verify_storage()
-            if action in ("host-drain", "host-status"):
-                if action == "host-drain":
+            if action in ("host-drain", "host-drain-private", "host-status"):
+                if action in ("host-drain", "host-drain-private"):
                     write_json(self.root / "host-drain.json", {"boot_id": self.machine.boot_id()})
                     self.machine.verify_inventory()
                     for configured in self.instances:
                         self.stop(configured)
                 result = {"draining": self.draining(), "instances": {
                     configured: self.status(configured) for configured in self.instances}}
+                if action == 'host-drain-private':
+                    recovery = {}
+                    for configured in self.instances:
+                        state = self.state(configured)
+                        if (not state or state.get('phase') != 'stopped' or state.get('backup') != 'complete'
+                                or result['instances'][configured]['application'] != 'stopped'):
+                            raise OperationError('private drain requires a completed final-session recovery point for every instance')
+                        recovery[configured] = {'session': state['session'], 'manifest_sha256': state['revision'],
+                                                'recovery_point': state['recovery_point']}
+                    return {**result, 'recovery': recovery}
                 # The drain response is completion evidence with a fixed shape; only status reports usage.
                 return {**result, "storage": self.machine.storage_usage()} if action == "host-status" else result
             if action == "start":
@@ -643,7 +653,7 @@ class LinuxMachine:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    parser.add_argument("action", choices=("start", "stop", "backup", "status", "update", "host-status", "host-drain", "allowlist"))
+    parser.add_argument("action", choices=("start", "stop", "backup", "status", "update", "host-status", "host-drain", "host-drain-private", "allowlist"))
     parser.add_argument("instance", nargs="?")
     parser.add_argument("operation", nargs="?", choices=("add", "remove"))
     parser.add_argument("--edition", choices=("java", "bedrock"))

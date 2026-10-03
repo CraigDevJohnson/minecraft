@@ -62,6 +62,26 @@ The result includes the recorded runtime inputs and a fresh prepared lifecycle r
 
 Finish the restored session with the normal guarded backup/stop procedure using its own configured destination. Promotion into the active family environment is a separate, explicitly reviewed operation.
 
+## Exact-version receipts for S3-only storage
+
+The approved [#24 design](https://github.com/CraigDevJohnson/minecraft/issues/24) requires a verified receipt before the live data disk can be removed. The receipt and restore foundations alone do not enable host or data-volume deletion. The separately reviewed lifecycle migration, recurring deletion policy, S3 retention and version-read permissions, and live recovery evidence are still required.
+
+`minecraft-instance host-drain-private` runs the same guarded drain under the runtime lock and adds a private `recovery` map containing each final session, content digest and exact recovery point. It requires a tracked, cleanly stopped session with a completed backup for every instance. Keep this response in the private operator journal. The ordinary `host-drain` response stays unchanged.
+
+The operator controller calls `minecraft_backup.verify_stop_receipt` with that evidence, the source deployment, the reviewed bootstrap bundle digest and an existing operator-owned mode-0700 journal directory. It independently reads the exact completed marker and archive versions and verifies every archived file. Receipts record those version IDs and hashes, source account/host/disk/filesystem and deployment digest, content and definition digests, bootstrap digest and capacity requirements. Mode-0600 local receipts survive disk deletion. S3 stores immutable receipts under `instances/<id>/receipts/<receipt-id>.json` and advances `receipts/current.json` with a conditional write against the observed ETag. A sequence and predecessor bind successive selections. Missing or corrupt selection, a stale local selection, incomplete final-session backup, or an unavailable exact version blocks removal; catalog `latest` is never a fallback.
+
+After the lifecycle controller creates and verifies a distinct target disk and filesystem, it transfers the selected private receipt with the existing private runtime configuration and invokes:
+
+```sh
+sudo minecraft-restore --config /etc/minecraft/operator.json \
+  --receipt /etc/minecraft/recovery-receipt.json \
+  --bootstrap-sha256 REVIEWED_BUNDLE_SHA256 --resume survival RECOVERY_POINT
+```
+
+Restore reads the recorded object versions even if the current keys change. It requires exact target content/definition compatibility and sufficient free capacity for the archive, extracted files and 1 GiB of working margin. It installs the recovery data atomically and leaves Minecraft stopped. `--resume` recognizes an occupied target only when its prepared record names the same receipt and target storage and every world/player/configuration file still matches the recorded inventory and hash. A partial, changed or ambiguous target is preserved for repair. The default restore command continues to refuse occupied targets.
+
+An authoritative sole-copy receipt must retain access to its selected versions for as long as the server is off. The existing 14-day noncurrent-version expiry can remove a pinned version after a later write or delete marker. The S3-only migration must address that policy before activation. Runtime credentials must not receive permanent version deletion. The existing 15-minute fresh-volume provenance wait remains required; these foundations do not establish a three-minute S3-only startup or close #24.
+
 ## Evidence and live handoff
 
 Credential-free validation covers publication/restore round trips with recognizable world/player/configuration/plugin checkpoints, missing/corrupt/incompatible input, unsafe archive paths/types, interrupted uploads, receipt loss, retention after long inactivity, prune retries, isolated target failure, and lifecycle/EC2 shutdown gates. AWS process tests verify command contracts and bounds using a fake CLI. They do not establish live S3 behavior.

@@ -30,12 +30,22 @@ class _AWSError(BackupError):
         self.code = code
 
 
+def valid_version(version):
+    if (not isinstance(version, str) or not re.fullmatch(r"[\x21-\x7e]{1,1024}", version)
+            or version == "null"):
+        raise BackupError("a non-null S3 object version is required")
+    return version
+
+
 class S3Store:
-    def __init__(self, bucket: str, region: str | None = None, *, timeout: int = 900):
+    def __init__(self, bucket: str, region: str | None = None, *, timeout: int = 900, profile: str | None = None):
         if type(timeout) is not int or not 0 < timeout <= 3000:
             raise BackupError("backup operation timeout must be between 1 and 3000 seconds")
         self.bucket = bucket
         self.region = region
+        if profile is not None and (not isinstance(profile, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}', profile)):
+            raise BackupError('invalid configured AWS CLI profile')
+        self.profile = profile
         self.deadline = time.monotonic() + timeout
 
     def _call(self, operation: str, *arguments: str, download_limit: tuple[Path, int] | None = None) -> dict:
@@ -48,6 +58,8 @@ class S3Store:
                    "--cli-connect-timeout", "10", "--cli-read-timeout", "60"]
         if self.region:
             command.extend(("--region", self.region))
+        if self.profile:
+            command.extend(("--profile", self.profile))
         command.extend(arguments)
         environment = dict(os.environ, AWS_PAGER="", AWS_CLI_AUTO_PROMPT="off",
                            AWS_RETRY_MODE="standard", AWS_MAX_ATTEMPTS="3", LC_ALL="C")
@@ -116,13 +128,30 @@ class S3Store:
             raise BackupError("cannot read backup upload source") from error
 
     def download(self, key: str, target: Path, *, max_bytes: int) -> bool:
+        return self._download(key, target, max_bytes=max_bytes) is not None
+
+    def download_revision(self, key: str, target: Path, *, max_bytes: int,
+                          version_id: str | None = None) -> dict | None:
+        """Read one immutable version, including when selecting the current key."""
+        if version_id is not None:
+            valid_version(version_id)
+        return self._download(key, target, max_bytes=max_bytes, version_id=version_id, versioned=True)
+
+    def _download(self, key, target, *, max_bytes, version_id=None, versioned=False):
         if type(max_bytes) is not int or not 0 <= max_bytes <= MAX_ARCHIVE_BYTES:
             raise BackupError("invalid backup download size limit")
+        target = Path(target)
+        version_arguments = ("--version-id", version_id) if version_id is not None else ()
         try:
-            metadata = self._call("head-object", "--key", key)
+            metadata = self._call("head-object", "--key", key, *version_arguments)
         except _AWSError as error:
+            if version_id is not None:
+                # An exact version cannot be substituted with the current key.
+                if error.code in ("NoSuchVersion", "NoSuchKey"):
+                    return None
+                raise
             if error.code == "NoSuchKey":
-                return False
+                return None
             if error.code in ("404", "NotFound"):
                 # HEAD hides the difference between a missing key and a missing bucket.
                 listing = self._call("list-objects-v2", "--prefix", key, "--max-keys", "1", "--no-paginate")
@@ -132,24 +161,51 @@ class S3Store:
                             or not isinstance(item.get("Key"), str) or not item["Key"].startswith(key)
                             or item["Key"] == key for item in contents)):
                     raise BackupError("S3 object absence could not be confirmed")
-                return False
+                return None
             raise
         size = metadata.get("ContentLength")
         etag = metadata.get("ETag")
         if type(size) is not int or not 0 <= size <= max_bytes or not isinstance(etag, str) or not etag:
             raise BackupError("S3 object size or revision is invalid or exceeds the download limit")
+        selected_version = valid_version(metadata.get("VersionId")) if versioned else None
+        if version_id is not None and selected_version != version_id:
+            raise BackupError("S3 returned a different object version")
+        if versioned:
+            version_arguments = ("--version-id", selected_version)
         try:
             with tempfile.TemporaryDirectory(prefix=".minecraft-download-", dir=target.parent) as directory:
                 temporary = Path(directory) / "object"
-                result = self._call("get-object", "--key", key, "--if-match", etag, str(temporary),
+                result = self._call("get-object", "--key", key, *version_arguments,
+                                    "--if-match", etag, str(temporary),
                                     download_limit=(temporary, max_bytes))
                 if (not temporary.is_file() or temporary.stat().st_size != size
-                        or type(result.get("ContentLength")) is not int or result["ContentLength"] != size):
+                        or type(result.get("ContentLength")) is not int or result["ContentLength"] != size
+                        or (versioned and (result.get("VersionId") != selected_version or result.get("ETag") != etag))):
                     raise BackupError("S3 download size differs from the selected object")
                 os.replace(temporary, target)
-            return True
+            return {"key": key, "version_id": selected_version, "etag": etag, "size_bytes": size}
         except OSError as error:
             raise BackupError("cannot write the verified S3 download") from error
+
+    def conditional_write(self, key: str, source: Path, *, expected_etag: str | None) -> dict:
+        """Advance a pointer only if its independently observed current revision matches."""
+        if expected_etag is not None and (not isinstance(expected_etag, str) or not expected_etag):
+            raise BackupError("invalid expected S3 selection revision")
+        try:
+            if not source.is_file() or not 0 < source.stat().st_size <= MAX_OUTPUT_BYTES:
+                raise BackupError("selection publication exceeds its safety limit")
+            with source.open("rb") as stream:
+                checksum = base64.b64encode(hashlib.file_digest(stream, "sha256").digest()).decode("ascii")
+            condition = ("--if-match", expected_etag) if expected_etag is not None else ("--if-none-match", "*")
+            result = self._call("put-object", "--key", key, "--body", str(source),
+                                *condition, "--checksum-sha256", checksum)
+            version = valid_version(result.get("VersionId"))
+            etag = result.get("ETag")
+            if not isinstance(etag, str) or not etag:
+                raise BackupError("S3 did not identify the published selection")
+            return {"key": key, "version_id": version, "etag": etag, "size_bytes": source.stat().st_size}
+        except OSError as error:
+            raise BackupError("cannot read the selection publication") from error
 
     def _list_objects(self, prefix: str, *, include_last_modified: bool):
         objects = []
