@@ -16,7 +16,7 @@ from pathlib import Path
 from minecraft_host import HostError, HostSession
 from minecraft_on_demand import (OnDemandSession, SESSION_ADDRESSES, HOST_STOP_FIELDS, digest_file,
                                  matches_known, operation_lock, resources, save_private, validate_plan,
-                                 owned_resource_matches, owned_inventory_matches)
+                                 owned_resource_matches, owned_inventory_matches, state_matches)
 from minecraft_private_transfer import TransferError, build_bundle, private_file
 
 DATA_ADDRESS = 'aws_ebs_volume.session_data[0]'
@@ -316,7 +316,7 @@ class S3Session(OnDemandSession):
                              data_volume_size_gib=journal['target_storage']['size_gib'])
         plan = self.tofu.plan(path, present, variables=variables)
         validate_s3_plan(plan, present=present, state=current, deployment=journal['source_deployment'], journal=journal)
-        if self.tofu.state() != current or self.binding() != journal['binding']:
+        if not state_matches(self.tofu.state(), current) or self.binding() != journal['binding']:
             raise HostError('S3-only state or inputs changed while planning; apply forbidden')
         digest = digest_file(path)
         started = dt.datetime.now(dt.timezone.utc)
