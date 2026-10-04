@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 import unittest
@@ -200,6 +201,107 @@ class RetentionTests(unittest.TestCase):
             self.store.put(source_fixture.marker_key, source_fixture.store.objects[source_fixture.marker_key])
             self.store.put(source_fixture.archive_key, source_fixture.store.objects[source_fixture.archive_key])
         return [{'key': key, 'version_id': version} for key, version in self.store.versions]
+
+    def other_world_fixture(self):
+        source = fixture_module.restore_fixture.RestoreTests()
+        source.setUp()
+        self.addCleanup(source.doCleanups)
+        source.definition = json.loads((fixture_module.restore_fixture.ROOT / 'runtime/creative.json').read_text())
+        source.manifest = json.loads((fixture_module.restore_fixture.ROOT / 'runtime/content-raknet.json').read_text())
+        source.metadata.update(instance='creative', definition=source.definition, manifest=source.manifest,
+                               definition_sha256=backup.manifest_digest(source.definition),
+                               manifest_sha256=backup.manifest_digest(source.manifest))
+        return source
+
+    def publish_other_world_point(self, source, session, created_at):
+        point = backup.point_identity('creative', session, source.metadata['manifest_sha256'])
+        source.metadata.update(session=session, recovery_point=point, created_at=created_at)
+        source.marker_key = backup.marker_key('creative', point)
+        source.archive_key = f'instances/creative/objects/{point}/data.tar.gz'
+        source.publish()
+        return [{'key': key, 'version_id': self.store.put(key, source.store.objects[key])}
+                for key in (source.marker_key, source.archive_key)]
+
+    def shared_legacy_catalog(self):
+        retention.import_legacy_points(self.store, 'survival', self.fixture.journal,
+                                       reviewed_versions=self.legacy_versions(1))
+        source = self.other_world_fixture()
+        reviewed = self.publish_other_world_point(source, 'creative-legacy', '2026-09-08T18:00:00Z')
+        retention.import_legacy_points(self.store, 'creative', self.fixture.journal, reviewed_versions=reviewed)
+        self.preserve_legacy = True
+        self.publish(1)
+        path = self.fixture.journal / f"legacy-{source.metadata['recovery_point']}.json"
+        return source, path
+
+    def test_shared_two_world_legacy_catalog_reconciles_only_each_requested_namespace(self):
+        source, _ = self.shared_legacy_catalog()
+        self.publish_other_world_point(source, 'creative-current', '2026-10-03T12:01:00Z')
+        deployment = {**self.fixture.source, 'instances': {'creative': source.definition}}
+        evidence = {**self.fixture.evidence, 'session': source.metadata['session'],
+                    'recovery_point': source.metadata['recovery_point'],
+                    'manifest_sha256': source.metadata['manifest_sha256']}
+        selected = backup.create_recovery_receipt(self.store, deployment, 'creative', evidence,
+                                                  self.fixture.bootstrap, self.fixture.workspace)
+        selection = backup.publish_recovery_receipt(self.store, selected, self.fixture.workspace)
+        from minecraft_instance import write_json
+        write_json(self.fixture.journal / f"receipt-{selected['receipt_id']}.json", selected)
+        for rule in copy.deepcopy(self.store.lifecycle['Rules']):
+            rule['ID'] = rule['ID'].replace('survival', 'creative')
+            filter_value = rule['Filter'].get('And', rule['Filter'])
+            filter_value['Prefix'] = 'instances/creative/'
+            self.store.lifecycle['Rules'].append(rule)
+        for instance, current in (('survival', self.current), ('creative', selection)):
+            with self.subTest(instance=instance):
+                self.store.events.clear()
+                result = retention.reconcile_retention(self.store, instance, self.fixture.journal,
+                                                       current_selection=current, active_receipt_ids=())
+                self.assertEqual(result['retention'], 'verified')
+                self.assertEqual(result['keep_versions'], 6)
+                self.assertEqual(result['retired_versions'], 0)
+                self.assertEqual(len(self.store.events), 6)
+                self.assertTrue(all(key.startswith(f'instances/{instance}/')
+                                    for key, _, _ in self.store.events))
+
+    def test_malformed_other_world_legacy_record_blocks_reconciliation_before_tags(self):
+        _, path = self.shared_legacy_catalog()
+        original = json.loads(path.read_text())
+        from minecraft_instance import OperationError, write_json
+        mutations = {
+            'not-an-object': [],
+            'missing-instance': {key: value for key, value in original.items() if key != 'instance'},
+            'invalid-instance': {**original, 'instance': '../creative'},
+            'unknown-instance': {**original, 'instance': None},
+            'wrong-checksum': {**original, 'inventory_sha256': '0' * 64},
+            'foreign-marker': {**original, 'marker': {**original['marker'],
+                              'key': original['marker']['key'].replace('/creative/', '/survival/')}},
+            'foreign-archive': {**original, 'archive': {**original['archive'],
+                               'key': original['archive']['key'].replace('/creative/', '/survival/')}},
+        }
+        for scenario, source in (('malformed-source', None), ('missing-source-fields', {}),
+                                 ('invalid-source-volume', {**original['source'], 'volume_id': 'unknown'}),
+                                 ('invalid-source-filesystem', {**original['source'], 'filesystem_uuid': None})):
+            core = {**original, 'source': source}
+            del core['inventory_sha256']
+            mutations[scenario] = {**core, 'inventory_sha256': hashlib.sha256(backup.encoded(core)).hexdigest()}
+        for scenario, record in mutations.items():
+            with self.subTest(scenario=scenario):
+                write_json(path, record)
+                self.store.events.clear()
+                before = copy.deepcopy(self.store.tags)
+                with self.assertRaises((backup.BackupError, OperationError)):
+                    self.reconcile()
+                self.assertEqual(self.store.tags, before)
+                self.assertEqual(self.store.events, [])
+                self.assertFalse((self.fixture.journal / 'retention-survival.json').exists())
+
+    def test_other_world_legacy_filename_must_match_its_recorded_point(self):
+        _, path = self.shared_legacy_catalog()
+        path.rename(self.fixture.journal / f"legacy-{'0' * 64}.json")
+        self.store.events.clear()
+        with self.assertRaisesRegex(backup.BackupError, 'filename'):
+            self.reconcile()
+        self.assertEqual(self.store.events, [])
+        self.assertFalse((self.fixture.journal / 'retention-survival.json').exists())
 
     def test_reviewed_legacy_fourteen_points_join_new_receipt_and_bounded_retirement(self):
         reviewed = self.legacy_versions(14)
