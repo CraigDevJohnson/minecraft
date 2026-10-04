@@ -15,7 +15,8 @@ from pathlib import Path
 
 from minecraft_host import HostError, HostSession
 from minecraft_on_demand import (OnDemandSession, SESSION_ADDRESSES, HOST_STOP_FIELDS, digest_file,
-                                 matches_known, operation_lock, resources, save_private, validate_plan)
+                                 matches_known, operation_lock, resources, save_private, validate_plan,
+                                 owned_resource_matches, owned_inventory_matches)
 from minecraft_private_transfer import TransferError, build_bundle, private_file
 
 DATA_ADDRESS = 'aws_ebs_volume.session_data[0]'
@@ -29,7 +30,7 @@ def reconcile(previous, current):
     before, after = resources(previous), resources(current)
     if previous['lineage'] != current['lineage'] or current['serial'] < previous['serial']:
         raise HostError('S3-only state lineage or serial changed unexpectedly')
-    if {key: value for key, value in before.items() if key not in S3_ADDRESSES} != {key: value for key, value in after.items() if key not in S3_ADDRESSES}:
+    if not owned_inventory_matches(before, after, excluded=S3_ADDRESSES):
         raise HostError('protected infrastructure changed during S3-only operation')
 
 
@@ -58,7 +59,8 @@ def validate_s3_plan(plan, *, present, state, deployment, journal):
                'resource_drift': [value for value in plan.get('resource_drift', []) if value.get('address') != DATA_ADDRESS]}
     expected_deployment = {**deployment, 'data_volume_id': None if present else deployment['data_volume_id']}
     validate_plan(reduced, present=present, state=without_data(state), deployment=expected_deployment,
-                  stopped_host=journal.get('host_stop_requested', False), removal_started=journal.get('removal_started', False))
+                  stopped_host=journal.get('host_stop_requested', False), removal_started=journal.get('removal_started', False),
+                  ownership_state=state)
     changes = [value for value in plan.get('resource_changes', []) if value.get('address') == DATA_ADDRESS
                and value.get('change', {}).get('actions') != ['no-op']]
     expected = DATA_ADDRESS not in inventory if present else DATA_ADDRESS in inventory
@@ -282,9 +284,10 @@ class S3Session(OnDemandSession):
         for key in S3_ADDRESSES:
             if key in inventory and key in original:
                 ignore = HOST_STOP_FIELDS if key == 'aws_instance.host[0]' and journal.get('host_stop_requested') else set()
-                if {name: value for name, value in inventory[key].items() if name not in ignore} != {name: value for name, value in original[key].items() if name not in ignore}:
+                if not owned_resource_matches(key, original[key], inventory[key], inventory, ignore=ignore):
                     raise HostError('source session identity or configuration changed during S3-only operation')
-        if journal.get('session_inventory') is not None and journal['session_inventory'] != {key: value for key, value in inventory.items() if key in S3_ADDRESSES}:
+        if journal.get('session_inventory') is not None and not owned_inventory_matches(journal['session_inventory'],
+                {key: value for key, value in inventory.items() if key in S3_ADDRESSES}, ownership=inventory):
             raise HostError('applied session ownership changed before S3-only completion')
         for value in journal.get('planned_changes', []):
             change, key = value['change'], value['address']

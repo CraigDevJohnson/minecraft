@@ -301,11 +301,93 @@ def resources(state: dict) -> dict:
     return result
 
 
+def owned_resource_matches(address, before, after, inventory, *, ignore=(), require_refresh=False) -> bool:
+    """Accept only refreshed computed metadata proven by separately owned resources."""
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    old = {key: value for key, value in before.items() if key not in ignore}
+    new = {key: value for key, value in after.items() if key not in ignore}
+    if old == new and not require_refresh:
+        return True
+    try:
+        if address == 'aws_iam_role.host':
+            if {key: value for key, value in old.items() if key != 'inline_policy'} != {key: value for key, value in new.items() if key != 'inline_policy'}:
+                return False
+            known = {'aws_iam_role_policy.ssm': 'session-manager', 'aws_iam_role_policy.backups': 'instance-backups',
+                     'aws_iam_role_policy.bootstrap[0]': 'read-pinned-bootstrap'}
+            if not isinstance(after.get('name'), str) or after.get('id') != after['name']:
+                return False
+            managed = {}
+            for key, value in inventory.items():
+                if key.startswith('aws_iam_role_policy.') and value.get('role') == after['name']:
+                    if key not in known or value.get('name') != known[key]:
+                        return False
+                    document = json.loads(value['policy'])
+                    if not isinstance(document, dict):
+                        return False
+                    managed[value['name']] = document
+            if not {'session-manager', 'instance-backups'} <= set(managed):
+                return False
+            def inline(value):
+                result = {}
+                if not isinstance(value, list):
+                    raise ValueError()
+                for item in value:
+                    if set(item) != {'name', 'policy'} or item['name'] in result or item['name'] not in managed:
+                        raise ValueError()
+                    result[item['name']] = json.loads(item['policy'])
+                    if not isinstance(result[item['name']], dict):
+                        raise ValueError()
+                return result
+            # BEFORE is pinned cached provider state, possibly predating an owned
+            # policy update. Only the fully refreshed AFTER may establish its body.
+            inline(before.get('inline_policy', []))
+            return inline(after.get('inline_policy', [])) == managed
+        if address == 'aws_instance.host[0]':
+            if {key: value for key, value in old.items() if key != 'ebs_block_device'} != {key: value for key, value in new.items() if key != 'ebs_block_device'}:
+                return False
+            attachment = inventory.get('aws_volume_attachment.data[0]', {})
+            disks = [inventory[key] for key in ('aws_ebs_volume.data', 'aws_ebs_volume.data[0]', 'aws_ebs_volume.session_data[0]') if key in inventory]
+            if (len(disks) != 1 or attachment.get('instance_id') != after.get('id')
+                    or attachment.get('volume_id') != disks[0].get('id') or attachment.get('device_name') != '/dev/sdf'
+                    or attachment.get('force_detach') is not False or attachment.get('skip_destroy') is not False):
+                return False
+            disk = disks[0]
+            if (disk.get('encrypted') is not True or disk.get('type') != 'gp3'
+                    or type(disk.get('size')) is not int or disk['size'] < 1
+                    or disk.get('availability_zone') != after.get('availability_zone')):
+                return False
+            block = {'delete_on_termination': False, 'device_name': attachment['device_name'],
+                     'volume_id': disk['id'], 'encrypted': disk['encrypted'], 'volume_type': disk['type'], 'volume_size': disk['size'],
+                     # Both computed instance maps report the data volume's
+                     # effective tags, including provider default tags.
+                     'tags': disk['tags_all'],
+                     **{key: disk[key] for key in ('iops', 'kms_key_id', 'snapshot_id', 'tags_all', 'throughput')}}
+            if not isinstance(block['tags'], dict):
+                return False
+            def valid_block(value):
+                if (not isinstance(value, dict) or value.get('delete_on_termination') is not False
+                        or value.get('encrypted') is not True or type(value.get('volume_size')) is not int):
+                    return False
+                return value == block
+            old_blocks, new_blocks = before.get('ebs_block_device', []), after.get('ebs_block_device')
+            return (old_blocks == [] or isinstance(old_blocks, list) and len(old_blocks) == 1 and valid_block(old_blocks[0])) and isinstance(new_blocks, list) and len(new_blocks) == 1 and valid_block(new_blocks[0])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+    return False
+
+
+def owned_inventory_matches(before, after, *, excluded=(), ownership=None) -> bool:
+    old = {key: value for key, value in before.items() if key not in excluded}
+    new = {key: value for key, value in after.items() if key not in excluded}
+    return set(old) == set(new) and all(owned_resource_matches(key, value, new[key], after if ownership is None else ownership) for key, value in old.items())
+
+
 def reconcile_state(previous: dict, current: dict) -> None:
     before, after = resources(previous), resources(current)
     if previous['lineage'] != current['lineage'] or current['serial'] < previous['serial']:
         raise HostError('infrastructure state lineage or serial changed unexpectedly')
-    if {name: value for name, value in before.items() if name not in SESSION_ADDRESSES} != {name: value for name, value in after.items() if name not in SESSION_ADDRESSES}:
+    if not owned_inventory_matches(before, after, excluded=SESSION_ADDRESSES):
         raise HostError('protected infrastructure changed during this lifecycle operation')
 
 
@@ -327,10 +409,11 @@ def verify_resumed_sessions(journal: dict, current: dict) -> None:
     inventory = resources(current)
     initial = resources(journal['initial_state'])
     for address in SESSION_ADDRESSES:
-        if address in initial and address in inventory and {key: value for key, value in initial[address].items() if not (address == 'aws_instance.host[0]' and journal.get('host_stop_requested') and key in HOST_STOP_FIELDS)} != {key: value for key, value in inventory[address].items() if not (address == 'aws_instance.host[0]' and journal.get('host_stop_requested') and key in HOST_STOP_FIELDS)}:
+        ignore = HOST_STOP_FIELDS if address == 'aws_instance.host[0]' and journal.get('host_stop_requested') else ()
+        if address in initial and address in inventory and not owned_resource_matches(address, initial[address], inventory[address], inventory, ignore=ignore):
             raise HostError('original session resource identity or configuration changed during the operation')
     observed = journal.get('session_inventory')
-    if observed is not None and observed != {name: value for name, value in inventory.items() if name in SESSION_ADDRESSES}:
+    if observed is not None and not owned_inventory_matches(observed, {name: value for name, value in inventory.items() if name in SESSION_ADDRESSES}, ownership=inventory):
         raise HostError('applied session inventory changed before operation completion')
     for change in journal.get('planned_changes', []):
         address = change['address']
@@ -340,10 +423,11 @@ def verify_resumed_sessions(journal: dict, current: dict) -> None:
 
 
 def validate_plan(plan: dict, *, present: bool, state: dict, deployment: dict, stopped_host=False,
-                  removal_started=False) -> None:
+                  removal_started=False, ownership_state=None) -> None:
     if not isinstance(plan, dict) or plan.get('errored') or plan.get('applyable') is False:
         raise HostError('session plan is invalid or cannot be applied')
     inventory = resources(state)
+    ownership = resources(state if ownership_state is None else ownership_state)
     drift_seen = set()
     for drift in plan.get('resource_drift', []):
         change = drift.get('change', {})
@@ -354,6 +438,10 @@ def validate_plan(plan: dict, *, present: bool, state: dict, deployment: dict, s
         if address in drift_seen:
             raise HostError('session plan repeats resource drift')
         drift_seen.add(address)
+        if (address in ('aws_iam_role.host', 'aws_instance.host[0]') and change.get('actions') == ['update'] and before == inventory.get(address) and isinstance(after, dict)
+                and owned_resource_matches(address, before, after, ownership, require_refresh=address == 'aws_iam_role.host')):
+            inventory[address] = after
+            continue
         if (not present and stopped_host is True and removal_started is True
                 and address in SESSION_ADDRESSES and change.get('actions') == ['delete']
                 and isinstance(before, dict) and before == inventory.get(address) and after is None):
@@ -368,8 +456,7 @@ def validate_plan(plan: dict, *, present: bool, state: dict, deployment: dict, s
                 or before != inventory.get(address) or not isinstance(after, dict)
                 or after.get('instance_state') != 'stopped'
                 or after.get('public_ip') not in ('', None) or after.get('associate_public_ip_address') is not False
-                or {key: value for key, value in before.items() if key not in HOST_STOP_FIELDS}
-                   != {key: value for key, value in after.items() if key not in HOST_STOP_FIELDS}):
+                or not owned_resource_matches(address, before, after, ownership, ignore=HOST_STOP_FIELDS)):
             raise HostError('session plan contains unreviewed resource drift')
         inventory[address] = after
     seen = set()
