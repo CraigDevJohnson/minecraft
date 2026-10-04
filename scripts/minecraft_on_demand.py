@@ -439,6 +439,17 @@ def matches_known(expected, actual, unknown=None) -> bool:
     return expected == actual
 
 
+def created_resource_matches(address, change, actual) -> bool:
+    """Resolve only the omitted EC2 default-disabled hibernation value."""
+    expected, unknown = change.get('after'), change.get('after_unknown')
+    if address == 'aws_instance.host[0]' and isinstance(expected, dict) and isinstance(actual, dict):
+        if any(value is not None and value is not False for value in (expected.get('hibernation'), actual.get('hibernation'))):
+            return False
+        if 'hibernation' in expected and expected['hibernation'] is None and actual.get('hibernation') is False:
+            expected = {**expected, 'hibernation': False}
+    return matches_known(expected, actual, unknown)
+
+
 def verify_resumed_sessions(journal: dict, current: dict) -> None:
     inventory = resources(current)
     initial = resources(journal['initial_state'])
@@ -452,7 +463,7 @@ def verify_resumed_sessions(journal: dict, current: dict) -> None:
     for change in journal.get('planned_changes', []):
         address = change['address']
         if change['change']['actions'] == ['create'] and address in inventory:
-            if not matches_known(change['change'].get('after'), inventory[address], change['change'].get('after_unknown')):
+            if not created_resource_matches(address, change['change'], inventory[address]):
                 raise HostError('partially created session does not match its pinned saved plan')
 
 
@@ -515,6 +526,7 @@ def validate_plan(plan: dict, *, present: bool, state: dict, deployment: dict, s
                 roots = after.get('root_block_device', [])
                 metadata = after.get('metadata_options', [])
                 if (after.get('ami') != deployment['ami_id'] or after.get('instance_type') != 'm7g.large'
+                        or after.get('hibernation') is not None and after.get('hibernation') is not False
                         or after.get('iam_instance_profile') != deployment['host_instance_profile']
                         or after.get('availability_zone') != deployment['availability_zone']
                         or after.get('subnet_id') != deployment['subnet_id'] or after.get('vpc_security_group_ids') != [deployment['security_group_id']]
