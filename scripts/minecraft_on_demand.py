@@ -13,6 +13,7 @@ import selectors
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -31,6 +32,50 @@ POLICY_FIELDS = frozenset(('schema_version', 'workstation', 'aws_profile', 'aws_
 
 def digest_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def workstation_identity() -> str:
+    """Hash the trusted platform identity without exposing its raw hardware ID."""
+    try:
+        if sys.platform == 'darwin':
+            result = subprocess.run(['/usr/sbin/ioreg', '-rd1', '-c', 'IOPlatformExpertDevice'],
+                                    capture_output=True, text=True, check=True, timeout=5,
+                                    env={'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LC_ALL': 'C'})
+            matches = re.findall(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', result.stdout)
+            if len(matches) != 1 or not re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', matches[0]):
+                raise ValueError()
+            identifier = uuid.UUID(matches[0]).hex
+        elif sys.platform.startswith('linux'):
+            descriptor = os.open('/etc/machine-id', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, 'r', encoding='ascii') as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                    raise ValueError()
+                identifier = stream.read(34)
+            if not re.fullmatch('[0-9a-f]{32}\n?', identifier):
+                raise ValueError()
+            identifier = identifier.removesuffix('\n')
+        else:
+            raise ValueError()
+        if identifier == '0' * 32:
+            raise ValueError()
+        digest = hashlib.sha256(('minecraft-workstation-v1\0' + sys.platform + '\0' + identifier).encode('ascii')).hexdigest()
+        return 'device-sha256:' + digest
+    except (OSError, ValueError, UnicodeError, subprocess.SubprocessError):
+        raise HostError('cannot establish stable operator workstation identity') from None
+
+
+def verify_workstation(expected):
+    if not isinstance(expected, str) or not expected:
+        raise HostError('lifecycle workstation identity is invalid')
+    if expected.startswith('device-sha256:'):
+        if not SHA256.fullmatch(expected.removeprefix('device-sha256:')):
+            raise HostError('lifecycle workstation device digest is invalid')
+        actual = workstation_identity()
+    else:
+        actual = socket.gethostname()
+    if expected != actual:
+        raise HostError('lifecycle policy is assigned to another operator workstation')
 
 
 def canonical_infra_root(path: Path) -> Path:
@@ -191,8 +236,7 @@ def load_policy(path: Path, expected_sha256: str, deployment: dict) -> dict:
                 'UserId':identity['principal_id'] + (':reviewed-session' if assumed else '')}
         if source_principal(caller)!=identity:
             raise HostError('reviewed source principal representation is invalid')
-        if policy['workstation'] != socket.gethostname():
-            raise HostError('lifecycle policy is assigned to another operator workstation')
+        verify_workstation(policy['workstation'])
         for name in ('infra_root', 'variables_file', 'operator_file', 'secret_file', 'journal_dir'):
             if not isinstance(policy[name], str) or not Path(policy[name]).is_absolute():
                 raise HostError('lifecycle paths must be explicit absolute paths')

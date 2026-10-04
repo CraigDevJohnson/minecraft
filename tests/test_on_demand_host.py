@@ -708,6 +708,38 @@ class PolicyBoundaryTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.policy))
         self.path.chmod(0o600)
         return lifecycle.load_policy(self.path, lifecycle.digest_file(self.path), DEPLOYMENT)
+    def test_device_policy_accepts_same_workstation_after_hostname_changes(self):
+        self.policy['workstation'] = 'device-sha256:' + DIGEST
+        with mock.patch.object(lifecycle, 'workstation_identity', return_value=self.policy['workstation']), \
+                mock.patch.object(lifecycle.socket, 'gethostname', return_value='changed-network-hostname'):
+            self.assertEqual(self.validate(), self.policy)
+
+    def test_device_policy_refuses_another_device_even_if_hostname_matches(self):
+        self.policy['workstation'] = 'device-sha256:' + DIGEST
+        with mock.patch.object(lifecycle, 'workstation_identity', return_value='device-sha256:' + 'b' * 64), \
+                mock.patch.object(lifecycle.socket, 'gethostname', return_value=self.policy['workstation']):
+            with self.assertRaises(host.HostError): self.validate()
+
+    def test_legacy_hostname_policy_remains_exact_without_device_lookup(self):
+        with mock.patch.object(lifecycle, 'workstation_identity', side_effect=host.HostError('unavailable device identity')) as identity:
+            self.assertEqual(self.validate(), self.policy)
+            with mock.patch.object(lifecycle.socket, 'gethostname', return_value='another-workstation'):
+                with self.assertRaises(host.HostError): self.validate()
+            identity.assert_not_called()
+
+    def test_device_policy_fails_closed_when_platform_identity_is_unavailable(self):
+        self.policy['workstation'] = 'device-sha256:' + DIGEST
+        with mock.patch.object(lifecycle, 'workstation_identity', side_effect=host.HostError('unavailable device identity')), \
+                mock.patch.object(lifecycle.socket, 'gethostname', return_value=self.policy['workstation']):
+            with self.assertRaises(host.HostError): self.validate()
+
+    def test_malformed_device_policy_is_not_a_hostname_fallback(self):
+        self.policy['workstation'] = 'device-sha256:invalid'
+        with mock.patch.object(lifecycle, 'workstation_identity') as identity, \
+                mock.patch.object(lifecycle.socket, 'gethostname', return_value=self.policy['workstation']):
+            with self.assertRaises(host.HostError): self.validate()
+            identity.assert_not_called()
+
     def test_reviewed_private_bytes_are_pinned_across_completed_operations(self):
         self.validate()
         self.secret.write_text('changed-private-secret-content')
