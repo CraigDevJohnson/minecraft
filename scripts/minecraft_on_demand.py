@@ -301,6 +301,40 @@ def resources(state: dict) -> dict:
     return result
 
 
+def state_matches(before: dict, after: dict) -> bool:
+    """Compare full state, canonicalizing only unordered check-result identities."""
+    def ordered(items, identity):
+        if not isinstance(items, list):
+            raise ValueError()
+        names = []
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get(identity), str) or not item[identity]:
+                raise ValueError()
+            names.append(item[identity])
+        if len(set(names)) != len(names):
+            raise ValueError()
+        return sorted(items, key=lambda item: item[identity])
+
+    def canonical(state):
+        if not isinstance(state, dict):
+            raise ValueError()
+        if 'check_results' not in state or state['check_results'] is None:
+            return state
+        checks = []
+        for item in ordered(state['check_results'], 'config_addr'):
+            value = dict(item)
+            if 'objects' in value and value['objects'] is not None:
+                value['objects'] = ordered(value['objects'], 'object_addr')
+            checks.append(value)
+        return {**state, 'check_results': checks}
+
+    try:
+        return json.dumps(canonical(before), sort_keys=True, separators=(',', ':'), allow_nan=False) == json.dumps(
+            canonical(after), sort_keys=True, separators=(',', ':'), allow_nan=False)
+    except (TypeError, ValueError):
+        raise HostError('infrastructure state has malformed or duplicate check-result identities') from None
+
+
 def owned_resource_matches(address, before, after, inventory, *, ignore=(), require_refresh=False) -> bool:
     """Accept only refreshed computed metadata proven by separately owned resources."""
     if not isinstance(before, dict) or not isinstance(after, dict):
@@ -727,7 +761,7 @@ class OnDemandSession:
                       removal_started=journal.get('removal_started', False))
         # The workstation lock does not serialize another Terraform client; compare state
         # again and let the saved-plan/backend lock reject a race after this check.
-        if self.tofu.state() != current:
+        if not state_matches(self.tofu.state(), current):
             raise HostError('infrastructure state changed after the plan; preserve the operation for review')
         if self.binding() != journal['binding']:
             raise HostError('reviewed lifecycle inputs changed while planning; apply forbidden')
