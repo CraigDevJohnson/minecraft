@@ -10,7 +10,7 @@ import tempfile
 
 from minecraft_backup import (BackupError, MAX_METADATA_BYTES, RETAIN, _validate_object_receipt,
                               MAX_ARCHIVE_BYTES, check_digest, digest_file, encoded,
-                              budget_checker, check_budget,
+                              budget_checker, check_budget, check_instance,
                               load_current_receipt, load_receipt_recovery, marker_key,
                               read_json, validate_metadata, validate_receipt)
 from minecraft_backup_store import valid_version
@@ -46,10 +46,17 @@ def _validate_legacy(record, instance):
     if (not isinstance(record, dict) or set(record) != fields or type(record['schema_version']) is not int
             or record['schema_version'] != 1 or record['status'] != 'verified-legacy' or record['instance'] != instance):
         raise BackupError('legacy inventory record is malformed')
+    check_instance(instance)
     for field in ('recovery_point', 'manifest_sha256', 'definition_sha256', 'inventory_sha256'):
         check_digest(record[field])
     _validate_object_receipt(record['marker'], marker_key(instance, record['recovery_point']), MAX_METADATA_BYTES)
     _validate_object_receipt(record['archive'], f"instances/{instance}/objects/{record['recovery_point']}/data.tar.gz", MAX_ARCHIVE_BYTES)
+    source = record['source']
+    if (not isinstance(source, dict) or set(source) != {'volume_id', 'filesystem_uuid'}
+            or not all(isinstance(value, str) for value in source.values())
+            or not re.fullmatch(r'vol-[a-f0-9]{8,17}', source['volume_id'])
+            or not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', source['filesystem_uuid'])):
+        raise BackupError('legacy source storage identity is malformed')
     from minecraft_backup import timestamp
     timestamp(record['created_at'])
     timestamp(record['published_at'])
@@ -285,14 +292,17 @@ def reconcile_retention(store, instance, journal_dir, *, current_selection, acti
     if len({receipt['sequence'] for receipt in receipts.values()}) != len(receipts):
         raise BackupError('private receipt sequence contains conflicting candidates')
     legacy = {}
-    for path in journal_dir.glob('legacy-*.json'):
+    paths = list(journal_dir.glob('legacy-*.json'))
+    if len(paths) > 10000:
+        raise BackupError('legacy inventory exceeds its safety limit')
+    for path in paths:
         check_budget(store)
-        record = _validate_legacy(private_json(path), instance)
+        record = private_json(path)
+        record = _validate_legacy(record, record.get('instance'))
         if path.name != f"legacy-{record['recovery_point']}.json":
             raise BackupError('legacy inventory filename differs from its point')
-        legacy[record['recovery_point']] = record
-        if len(legacy) > 10000:
-            raise BackupError('legacy inventory exceeds its safety limit')
+        if record['instance'] == instance:
+            legacy[record['recovery_point']] = record
     inventory = store.list_versions(f'instances/{instance}/')
     objects = {identity(item): item for item in inventory if not item['delete_marker']}
     ledger_path = journal_dir / f'retired-points-{instance}.json'
