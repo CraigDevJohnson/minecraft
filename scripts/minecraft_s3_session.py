@@ -16,7 +16,7 @@ from pathlib import Path
 from minecraft_host import HostError, HostSession
 from minecraft_on_demand import (OnDemandSession, SESSION_ADDRESSES, HOST_STOP_FIELDS, digest_file,
                                  matches_known, operation_lock, resources, save_private, validate_plan,
-                                 owned_resource_matches, owned_inventory_matches, state_matches)
+                                 owned_resource_matches, owned_inventory_matches, state_matches, created_resource_matches)
 from minecraft_private_transfer import TransferError, build_bundle, private_file
 
 DATA_ADDRESS = 'aws_ebs_volume.session_data[0]'
@@ -291,7 +291,7 @@ class S3Session(OnDemandSession):
             raise HostError('applied session ownership changed before S3-only completion')
         for value in journal.get('planned_changes', []):
             change, key = value['change'], value['address']
-            if change['actions'] == ['create'] and key in inventory and not matches_known(change.get('after'), inventory[key], change.get('after_unknown')):
+            if change['actions'] == ['create'] and key in inventory and not created_resource_matches(key, change, inventory[key]):
                 raise HostError('created session differs from its receipt-bound saved plan')
 
     def apply_session(self, journal, present):

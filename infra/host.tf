@@ -52,6 +52,7 @@ resource "aws_instance" "host" {
   associate_public_ip_address = true
   iam_instance_profile        = aws_iam_instance_profile.host.name
   monitoring                  = false
+  hibernation                 = false
   user_data_replace_on_change = true
   user_data_base64 = base64gzip(join("", [templatefile("${path.module}/../scripts/host-bootstrap.sh.tftpl", {
     storage_script_base64 = filebase64("${path.module}/../scripts/minecraft_storage.py")
