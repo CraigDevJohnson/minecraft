@@ -171,7 +171,11 @@ def verify_protection_lifecycle(store, instance):
         if 'And' in filter_value:
             conjunction = filter_value['And']
             if (set(filter_value) != {'And'} or not isinstance(conjunction, dict)
-                    or set(conjunction) - {'Prefix', 'Tags'}):
+                    or set(conjunction) - {'Prefix', 'Tags', 'ObjectSizeGreaterThan'}
+                    or ('ObjectSizeGreaterThan' in conjunction
+                        and (type(conjunction['ObjectSizeGreaterThan']) is not int
+                             or conjunction['ObjectSizeGreaterThan'] != 0
+                             or conjunction.get('Tags') != [{'Key': 'minecraft-retention', 'Value': 'retired'}]))):
                 raise BackupError('live recovery lifecycle has an unsupported filter')
             selected_prefix = conjunction.get('Prefix', '')
             tags = conjunction.get('Tags', [])
