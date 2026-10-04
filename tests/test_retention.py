@@ -300,6 +300,70 @@ class RetentionTests(unittest.TestCase):
                 retention.protect_current_selection(self.store, 'survival', self.fixture.workspace, expected_selection=self.current)
         self.assertEqual(self.store.tags, before)
 
+    def provider_two_world_lifecycle(self):
+        rules = []
+        for instance in ('survival', 'creative'):
+            for original in RetentionStore({}).lifecycle['Rules']:
+                rule = copy.deepcopy(original)
+                rule['ID'] = rule['ID'].replace('survival', instance)
+                filter_value = rule['Filter']
+                if 'And' in filter_value:
+                    filter_value = filter_value['And']
+                    # AWS provider 6.63 sends this planned zero value to S3.
+                    filter_value['ObjectSizeGreaterThan'] = 0
+                filter_value['Prefix'] = f'instances/{instance}/'
+                rules.append(rule)
+        return {'Rules': rules}
+
+    def test_provider_zero_size_six_rules_protect_and_verify_kept_selection(self):
+        self.store.lifecycle = self.provider_two_world_lifecycle()
+        self.assertEqual(len(self.store.lifecycle['Rules']), 6)
+        self.publish(1)
+        for instance in ('survival', 'creative'):
+            self.assertEqual(len(retention.verify_protection_lifecycle(self.store, instance)), 64)
+        before = list(self.store.events)
+        result = retention.verify_current_selection_protection(
+            self.store, 'survival', self.fixture.workspace, expected_selection=self.current)
+        self.assertEqual(result['protection'], 'verified')
+        self.assertEqual(self.store.events, before)
+        self.assertEqual(len(self.store.tags), 4)
+        self.assertTrue(all(tags == {'minecraft-retention': 'keep'} for tags in self.store.tags.values()))
+
+    def test_provider_size_filter_variants_refuse_before_protection_tag_mutation(self):
+        self.publish(1)
+        before = dict(self.store.tags)
+        before_events = list(self.store.events)
+        for instance in ('survival', 'creative'):
+            for key, value in (('ObjectSizeGreaterThan', 1), ('ObjectSizeGreaterThan', -1),
+                               ('ObjectSizeGreaterThan', True), ('ObjectSizeGreaterThan', False),
+                               ('ObjectSizeGreaterThan', 0.0), ('ObjectSizeGreaterThan', '0'),
+                               ('ObjectSizeGreaterThan', None), ('ObjectSizeLessThan', 0),
+                               ('UnknownFilter', 0),
+                               ('Tags', [{'Key': 'minecraft-retention', 'Value': 'keep'}]),
+                               ('Tags', []), ('Prefix', 'instances/')):
+                with self.subTest(instance=instance, key=key, value=value):
+                    self.store.lifecycle = self.provider_two_world_lifecycle()
+                    rule = next(rule for rule in self.store.lifecycle['Rules']
+                                if rule['ID'] == f'retire-verified-{instance}')
+                    rule['Filter']['And'][key] = value
+                    with self.assertRaises(backup.BackupError):
+                        retention.verify_protection_lifecycle(self.store, instance)
+                    with self.assertRaises(backup.BackupError):
+                        retention.protect_current_selection(
+                            self.store, 'survival', self.fixture.workspace, expected_selection=self.current)
+                    self.assertEqual(self.store.tags, before)
+                    self.assertEqual(self.store.events, before_events)
+
+    def test_zero_size_filter_does_not_admit_cleanup_rule_with_expiry_of_kept_versions(self):
+        self.store.lifecycle = self.provider_two_world_lifecycle()
+        conflict = {'ID': 'keep-expiry', 'Status': 'Enabled',
+                    'Filter': {'And': {'Prefix': 'instances/survival/', 'ObjectSizeGreaterThan': 0,
+                                      'Tags': [{'Key': 'minecraft-retention', 'Value': 'keep'}]}},
+                    'Expiration': {'Days': 14}, 'NoncurrentVersionExpiration': {'NoncurrentDays': 14}}
+        self.store.lifecycle['Rules'].append(conflict)
+        with self.assertRaises(backup.BackupError):
+            retention.verify_protection_lifecycle(self.store, 'survival')
+
     def test_missing_cleanup_rule_or_lifecycle_drift_cannot_certify_protection(self):
         self.publish(1)
         valid = copy.deepcopy(self.store.lifecycle)
