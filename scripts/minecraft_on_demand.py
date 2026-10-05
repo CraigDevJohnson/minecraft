@@ -440,13 +440,25 @@ def matches_known(expected, actual, unknown=None) -> bool:
 
 
 def created_resource_matches(address, change, actual) -> bool:
-    """Resolve only the omitted EC2 default-disabled hibernation value."""
+    """Resolve only approved omitted EC2 and GP3 defaults."""
     expected, unknown = change.get('after'), change.get('after_unknown')
     if address == 'aws_instance.host[0]' and isinstance(expected, dict) and isinstance(actual, dict):
         if any(value is not None and value is not False for value in (expected.get('hibernation'), actual.get('hibernation'))):
             return False
         if 'hibernation' in expected and expected['hibernation'] is None and actual.get('hibernation') is False:
             expected = {**expected, 'hibernation': False}
+    if (address == 'aws_ebs_volume.session_data[0]' and isinstance(expected, dict) and isinstance(actual, dict)
+            and expected.get('type') == 'gp3' and actual.get('type') == 'gp3'):
+        expected = dict(expected)
+        for field, default in (('multi_attach_enabled', False), ('outpost_arn', ''), ('volume_initialization_rate', 0)):
+            planned, observed = expected.get(field), actual.get(field)
+            if planned is None and observed is None:
+                continue
+            if type(observed) is not type(default) or observed != default:
+                return False
+            if planned is not None and (type(planned) is not type(default) or planned != default):
+                return False
+            expected[field] = default
     return matches_known(expected, actual, unknown)
 
 
