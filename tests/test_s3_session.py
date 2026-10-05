@@ -165,6 +165,78 @@ class S3SessionTests(unittest.TestCase):
                             transfer=lambda remote,bundle,digest: self.transfers.append(json.loads(bundle)),
                             receipt_verifier=verify, receipt_loader=load, provenance=provenance, marker_scanner=scan,
                             retention=lambda journal: self.retirements.append(copy.deepcopy(journal['receipt_ids'])))
+
+    def created_gp3(self):
+        expected = {**DATA, 'id': None, 'size': 4, 'tags': {'Name': 'fixture-session-data'},
+                    'multi_attach_enabled': None, 'outpost_arn': None, 'volume_initialization_rate': None}
+        actual = {**expected, 'id': NEW_VOLUME, 'multi_attach_enabled': False, 'outpost_arn': '', 'volume_initialization_rate': 0}
+        return {'actions': ['create'], 'after': expected, 'after_unknown': {'id': True}}, actual
+
+    def test_cold_start_accepts_exact_gp3_defaults_after_successful_create(self):
+        session = self.create(False)
+        original_plan, original_apply = self.tofu.plan, self.tofu.apply
+        defaults = {'multi_attach_enabled': False, 'outpost_arn': '', 'volume_initialization_rate': 0}
+        def plan(path, present, *, variables):
+            result = original_plan(path, present, variables=variables)
+            for value in result['resource_changes']:
+                if value['address'] == s3.DATA_ADDRESS:
+                    value['change']['after'].update(dict.fromkeys(defaults))
+            return result
+        def apply(path):
+            original_apply(path)
+            for value in self.tofu.current['resources']:
+                if value['type'] == 'aws_ebs_volume' and value['name'] == 'session_data':
+                    value['instances'][0]['attributes'].update(defaults)
+        self.tofu.plan, self.tofu.apply = plan, apply
+        result = session.start('survival')
+        self.assertTrue(result['ready'])
+        self.assertEqual(self.tofu.applies, 1)
+        self.assertEqual(len(self.proofs), 1)
+        self.assertEqual(len(self.marker_scans), 1)
+        journal = json.loads(session.journal_path.read_text())
+        self.assertEqual(journal['phase'], 'complete')
+        self.assertIn('successful_apply_window', journal)
+        self.assertEqual(journal['restored_instances'], ['survival'])
+
+    def test_created_gp3_accepts_only_typed_null_omitted_or_explicit_defaults(self):
+        defaults = {'multi_attach_enabled': False, 'outpost_arn': '', 'volume_initialization_rate': 0}
+        for mode in ('null', 'omitted', 'explicit'):
+            with self.subTest(mode=mode):
+                change, actual = self.created_gp3()
+                if mode == 'omitted':
+                    for field in defaults: del change['after'][field]
+                elif mode == 'explicit': change['after'].update(defaults)
+                original = copy.deepcopy(change)
+                self.assertTrue(base.created_resource_matches(s3.DATA_ADDRESS, change, actual))
+                self.assertEqual(change, original)
+
+    def test_created_gp3_refuses_nondefault_or_wrong_type_even_when_declared_unknown(self):
+        invalid = {'multi_attach_enabled': (True, 0, 'false'), 'outpost_arn': ('arn:aws:outposts:unreviewed', False, 0),
+                   'volume_initialization_rate': (1, False, 0.0, '0')}
+        for field, values in invalid.items():
+            for value in values:
+                for unknown in (False, True):
+                    with self.subTest(field=field, value=value, unknown=unknown):
+                        change, actual = self.created_gp3()
+                        if unknown: change['after_unknown'].update(dict.fromkeys(invalid, True))
+                        actual[field] = value
+                        self.assertFalse(base.created_resource_matches(s3.DATA_ADDRESS, change, actual))
+                change, actual = self.created_gp3()
+                change['after'][field] = value
+                self.assertFalse(base.created_resource_matches(s3.DATA_ADDRESS, change, actual))
+
+    def test_created_gp3_normalization_preserves_resource_scope_and_known_drift_guards(self):
+        change, actual = self.created_gp3()
+        for address in ('aws_ebs_volume.data', 'aws_ebs_volume.session_data[1]', 'aws_ebs_volume.other[0]'):
+            with self.subTest(address=address):
+                self.assertFalse(base.created_resource_matches(address, change, actual))
+        for field, value in (('snapshot_id', 'snap-unreviewed'), ('encrypted', False), ('size', 5),
+                             ('tags', {'Name': 'unreviewed'}), ('availability_zone', 'us-west-2b'), ('type', 'io2')):
+            with self.subTest(field=field):
+                changed = {**actual, field: value}
+                self.assertFalse(base.created_resource_matches(s3.DATA_ADDRESS, change, changed))
+        change['after']['type'] = actual['type'] = 'io2'
+        self.assertFalse(base.created_resource_matches(s3.DATA_ADDRESS, change, actual))
     def test_failed_retirement_preserves_active_disk_and_host_for_repair(self):
         session=self.create(True)
         session.retention=mock.Mock(side_effect=host.HostError('unknown historical version'))
