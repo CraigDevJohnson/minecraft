@@ -504,7 +504,7 @@ class S3Session(OnDemandSession):
                     raise HostError('fresh-volume provenance expired before zero-fill; revalidate target for repair')
                 self.record(journal, 'initializing-storage')
                 volume, filesystem = self.deployment['data_volume_id'], self.deployment['data_filesystem_uuid']
-                session.execute_shell(f'/usr/local/sbin/minecraft-storage zero-fill --volume-id {volume} --confirm-volume-id {volume} >/dev/null && '
+                session.execute_shell(f'/usr/local/sbin/minecraft-storage zero-fill --volume-id {volume} --confirm-volume-id {volume} --filesystem-uuid {filesystem} >/dev/null && '
                                       f'/usr/local/sbin/minecraft-storage initialize --volume-id {volume} --confirm-volume-id {volume} --filesystem-uuid {filesystem} >/dev/null && '
                                       'printf \'{"storage":"initialized"}\\n\'', 'storage-initialize')
                 self.record(journal, 'storage-ready')

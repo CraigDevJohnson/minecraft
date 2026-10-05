@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import datetime as dt
+import io
 import json
+import shlex
 import sys
 import tempfile
 import unittest
@@ -16,6 +19,7 @@ from test_on_demand_host import DEPLOYMENT, HOST_ATTRIBUTES, ATTACHMENT_ATTRIBUT
 import minecraft_host as host
 import minecraft_on_demand as base
 import minecraft_s3_session as s3
+import minecraft_storage as storage
 
 RECEIPT_ID = 'b' * 64
 NEW_HOST = 'i-1123456789abcdef0'
@@ -171,6 +175,40 @@ class S3SessionTests(unittest.TestCase):
                     'multi_attach_enabled': None, 'outpost_arn': None, 'volume_initialization_rate': None}
         actual = {**expected, 'id': NEW_VOLUME, 'multi_attach_enabled': False, 'outpost_arn': '', 'volume_initialization_rate': 0}
         return {'actions': ['create'], 'after': expected, 'after_unknown': {'id': True}}, actual
+
+    def test_cold_start_storage_argv_passes_actual_parser_with_recorded_filesystem_uuid(self):
+        session = self.create(False)
+        original = S3Remote.execute_shell
+        parsed = []
+        boundary = mock.Mock()
+        boundary.lock.side_effect = contextlib.nullcontext
+        disk = {'name': '/dev/fixture-disk'}
+        def execute(remote, command, action):
+            if action == 'storage-initialize':
+                commands = command.split(' && ')
+                self.assertEqual(len(commands), 3)
+                for component in commands[:2]:
+                    words = shlex.split(component)
+                    self.assertEqual(words[0], '/usr/local/sbin/minecraft-storage')
+                    self.assertEqual(words[-1], '>/dev/null')
+                    arguments = words[1:-1]
+                    parsed.append(arguments)
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        self.assertEqual(storage.main(arguments, host=boundary), 0)
+            return original(remote, command, action)
+        with mock.patch.object(S3Remote, 'execute_shell', execute), \
+                mock.patch.object(storage, 'discover', return_value=disk), \
+                mock.patch.object(storage, 'zero_fill') as zero_fill, \
+                mock.patch.object(storage, 'initialize') as initialize:
+            self.assertTrue(session.start('survival')['ready'])
+        journal = json.loads(session.journal_path.read_text())
+        filesystem = journal['target_storage']['filesystem_uuid']
+        for arguments, action in zip(parsed, ('zero-fill', 'initialize'), strict=True):
+            self.assertEqual(arguments, [action, '--volume-id', NEW_VOLUME, '--confirm-volume-id', NEW_VOLUME,
+                                         '--filesystem-uuid', filesystem])
+        zero_fill.assert_called_once_with(boundary, disk, NEW_VOLUME)
+        initialize.assert_called_once_with(boundary, disk, NEW_VOLUME, filesystem)
+        boundary.run.assert_not_called()
 
     def test_cold_start_accepts_exact_gp3_defaults_after_successful_create(self):
         session = self.create(False)
