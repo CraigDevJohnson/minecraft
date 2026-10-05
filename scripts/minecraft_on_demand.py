@@ -630,7 +630,8 @@ class TofuCLI:
         for name, value in (variables or {}).items():
             if name not in ("data_filesystem_uuid", "data_volume_size_gib", "recovery_receipt_ids"):
                 raise HostError("unapproved lifecycle variable override")
-            arguments.append(f"-var={name}={json.dumps(value, separators=(',', ':'))}")
+            encoded = value if isinstance(value, str) else json.dumps(value, separators=(',', ':'))
+            arguments.append(f"-var={name}={encoded}")
         self.run('plan', '-input=false', '-lock-timeout=30s', '-no-color',
                  f'-var-file={self.policy["variables_file"]}', f'-var=session_present={str(present).lower()}', *arguments, f'-out={destination}')
         destination.chmod(0o600)

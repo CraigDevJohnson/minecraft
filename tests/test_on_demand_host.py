@@ -708,6 +708,56 @@ class PolicyBoundaryTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.policy))
         self.path.chmod(0o600)
         return lifecycle.load_policy(self.path, lifecycle.digest_file(self.path), DEPLOYMENT)
+
+    def generated_plan_arguments(self, overrides):
+        destination = self.directory / 'reviewed.tfplan'
+        destination.write_bytes(b'fixture-plan')
+        client = lifecycle.TofuCLI(self.policy)
+        with mock.patch.object(lifecycle.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{}', '')) as run:
+            self.assertEqual(client.plan(destination, True, variables=overrides), {})
+        return run.call_args_list[0].args[0]
+
+    def test_plan_passes_raw_uuid_and_json_number_and_receipt_map_to_cli(self):
+        filesystem = DEPLOYMENT['data_filesystem_uuid']
+        receipts = {'survival': 'b' * 64, 'creative': 'c' * 64}
+        arguments = self.generated_plan_arguments({'data_filesystem_uuid': filesystem,
+                                                   'data_volume_size_gib': 4, 'recovery_receipt_ids': receipts})
+        self.assertEqual(arguments, [str(self.directory / '.tools/bin/tofu'), f'-chdir={self.infra}',
+            'plan', '-input=false', '-lock-timeout=30s', '-no-color', f'-var-file={self.variables}',
+            '-var=session_present=true', f'-var=data_filesystem_uuid={filesystem}', '-var=data_volume_size_gib=4',
+            '-var=recovery_receipt_ids=' + json.dumps(receipts, separators=(',', ':')),
+            f'-out={self.directory / "reviewed.tfplan"}'])
+
+    def test_generated_overrides_pass_actual_provider_free_tofu_uuid_validation(self):
+        filesystem = DEPLOYMENT['data_filesystem_uuid']
+        receipts = {'survival': 'b' * 64}
+        arguments = self.generated_plan_arguments({'data_filesystem_uuid': filesystem,
+                                                   'data_volume_size_gib': 4, 'recovery_receipt_ids': receipts})
+        probe = self.directory / 'uuid-probe'
+        probe.mkdir()
+        source = (ROOT / 'infra/variables.tf').read_text()
+        uuid_variable = 'variable "data_filesystem_uuid" {' + source.split('variable "data_filesystem_uuid" {', 1)[1].split('\n}', 1)[0] + '\n}\n'
+        (probe / 'main.tf').write_text(uuid_variable + 'variable "session_present" { type = bool }\n'
+                                     + 'variable "data_volume_size_gib" { type = number }\n'
+                                     + 'variable "recovery_receipt_ids" { type = map(string) }\n')
+        configuration = self.directory / 'empty.tfrc'
+        configuration.write_bytes(b'')
+        environment = {name: value for name, value in os.environ.items() if not name.startswith(('TF_', 'TOFU_', 'AWS_'))}
+        environment.update(TF_CLI_CONFIG_FILE=str(configuration), TERRAFORM_CONFIG=str(configuration), TF_LOG='OFF')
+        result = subprocess.run([str(ROOT / '.tools/bin/tofu'), f'-chdir={probe}', 'console', '-no-color',
+                                 *[argument for argument in arguments if argument.startswith('-var=')]],
+                                input='jsonencode({uuid = var.data_filesystem_uuid, size = var.data_volume_size_gib, receipts = var.recovery_receipt_ids})\n',
+                                capture_output=True, text=True, timeout=10, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.strip(), result.stderr)
+        self.assertEqual(json.loads(json.loads(result.stdout)), {'uuid': filesystem, 'size': 4, 'receipts': receipts})
+
+    def test_plan_refuses_unapproved_override_before_subprocess(self):
+        client = lifecycle.TofuCLI(self.policy)
+        with mock.patch.object(lifecycle.subprocess, 'run') as run:
+            with self.assertRaisesRegex(host.HostError, 'unapproved lifecycle variable'):
+                client.plan(self.directory / 'unapproved.tfplan', True, variables={'host_instance_type': 'm7g.large'})
+            run.assert_not_called()
     def test_device_policy_accepts_same_workstation_after_hostname_changes(self):
         self.policy['workstation'] = 'device-sha256:' + DIGEST
         with mock.patch.object(lifecycle, 'workstation_identity', return_value=self.policy['workstation']), \
