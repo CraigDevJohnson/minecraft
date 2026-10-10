@@ -399,9 +399,13 @@ def stage_import(manifest: dict, destination: Path, *, fetch=download, archive: 
         # The jars are already compressed, so store them; server files sit at the archive root.
         # Crafty's own account can write to this folder, so never follow or reuse a planted link.
         try:
-            descriptor = os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o660)
+            folder = os.open(archive.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                descriptor = os.open(archive.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o660, dir_fd=folder)
+            finally:
+                os.close(folder)
         except OSError as exc:
-            raise CraftyError("the import archive could not be created as a new regular file") from exc
+            raise CraftyError("the import archive could not be created as a new regular file in a real folder") from exc
         with os.fdopen(descriptor, "wb") as output, zipfile.ZipFile(output, "w", zipfile.ZIP_STORED) as bundle:
             os.fchmod(output.fileno(), 0o660)
             for path in sorted(destination.rglob("*")):

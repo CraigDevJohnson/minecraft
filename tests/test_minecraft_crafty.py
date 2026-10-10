@@ -311,6 +311,16 @@ class ManifestTests(unittest.TestCase):
                                     fetch=lambda url, sha256, target: target.write_bytes(b"jar"))
             self.assertFalse((Path(directory) / "elsewhere").exists())
 
+    def test_stage_import_refuses_a_linked_archive_folder(self):
+        manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "elsewhere").mkdir()
+            (Path(directory) / "upload").symlink_to(Path(directory) / "elsewhere")
+            with self.assertRaises(crafty.CraftyError):
+                crafty.stage_import(manifest, Path(directory) / "family", archive=Path(directory) / "upload" / "family.zip",
+                                    fetch=lambda url, sha256, target: target.write_bytes(b"jar"))
+            self.assertEqual(list((Path(directory) / "elsewhere").iterdir()), [])
+
     def test_import_server_creates_one_server_from_the_archive(self):
         with tempfile.TemporaryDirectory() as directory:
             api = FakeAPI()
