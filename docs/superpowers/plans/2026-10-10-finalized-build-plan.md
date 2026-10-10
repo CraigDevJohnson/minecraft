@@ -34,7 +34,7 @@ The S3-only first-setup provenance check requires the host to be on its first bo
 ## Decisions for Craig
 
 1. **Stack and admin UI.** Keep the built Compose stack with independent worlds and the planned website dashboard (recommended), or rebuild around Crafty Controller and Multiverse. Rebuilding would discard the accepted lifecycle, backup and recovery tooling.
-2. **How the server sleeps when off.** After the world is restored, either return to the retained-disk on-demand mode (recommended: 3 minute 53 second cold starts, accepted on 2026-10-05, for roughly $0.40 a month of disk), or stay S3-only (no disk while off, but every start adds a mandatory 15-minute fresh-disk proof plus a full restore). Either way the next restore runs through the S3-only path once, because the world currently lives only in S3.
+2. **How the server sleeps when off.** Decided 2026-10-10: Craig chose the retained disk. After the world is restored, return to the retained-disk on-demand mode (3 minute 53 second cold starts, accepted on 2026-10-05, for roughly $0.40 a month of disk) rather than staying S3-only (no disk while off, but every start adds a mandatory 15-minute fresh-disk proof plus a full restore). The next restore still runs through the S3-only path once, because the world currently lives only in S3.
 
 ## Remaining work, in order
 
@@ -42,8 +42,8 @@ The S3-only first-setup provenance check requires the host to be on its first bo
    1. Review and apply a repair that removes the stalled host and blank 4 GiB disk while keeping both S3 receipts and the journal history.
    2. Run the normal S3-only `start` for a fresh cold restore, then confirm both worlds with Java and Bedrock joins.
    3. Run `dns` to repair the parked record that the 2026-10-05 stop left pending.
-   4. Record the round trip in `docs/operations/on-demand-host.md` and close or re-scope #24 according to Decision 2.
-2. **Apply Decision 2.** If retained disk is chosen, prepare and review the ownership handoff back to `retained-host`/`on-demand-host` with protection restored.
+   4. Record the round trip in `docs/operations/on-demand-host.md` and re-scope #24, since S3-only stays available but is no longer the operating mode.
+2. **Apply Decision 2.** Prepare and review the ownership handoff back to `retained-host`/`on-demand-host` with protection restored.
 3. **#26, NetherNet before Bedrock 26.60 drops RakNet (high).** The dual-transport configuration is merged (#30) with Craig's approved ports (signaling TCP 19132, WebRTC UDP 19133). Waiting on an upstream Geyser release that supports 26.60, then a reviewed activation plan and server-side transport checks.
 4. **#27, Java 26.3 (medium).** Waiting on a STABLE Paper 26.3 build and a Geyser release supporting Java 26.3; then world-copy upgrade test, verified pre-upgrade recovery point and reviewed rollout.
 5. **Website dashboard.** Build the `/minecraft` page from portfolio PR #126 once its access model and world display names are settled.
