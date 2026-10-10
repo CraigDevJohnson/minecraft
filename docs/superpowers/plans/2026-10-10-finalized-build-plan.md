@@ -33,20 +33,18 @@ The S3-only first-setup provenance check requires the host to be on its first bo
 
 ## Decisions for Craig
 
-1. **Stack and admin UI.** Keep the built Compose stack with independent worlds and the planned website dashboard (recommended), or rebuild around Crafty Controller and Multiverse. Rebuilding would discard the accepted lifecycle, backup and recovery tooling.
+1. **Stack and admin UI.** Decided 2026-10-10: Craig chose to rebuild on Crafty Controller and Multiverse, with fresh worlds, recorded in [ADR 0004](../../adr/0004-crafty-multiverse-rebuild.md). The options were: keep the built Compose stack with independent worlds and the planned website dashboard (recommended), or rebuild around Crafty Controller and Multiverse. Rebuilding would discard the accepted lifecycle, backup and recovery tooling.
 2. **How the server sleeps when off.** Decided 2026-10-10: Craig chose the retained disk. After the world is restored, return to the retained-disk on-demand mode (3 minute 53 second cold starts, accepted on 2026-10-05, for roughly $0.40 a month of disk) rather than staying S3-only (no disk while off, but every start adds a mandatory 15-minute fresh-disk proof plus a full restore). The next restore still runs through the S3-only path once, because the world currently lives only in S3.
 
 ## Remaining work, in order
 
-1. **Bring the worlds back** (needs Craig's workstation: AWS SSO and the Cloudflare token from 1Password; every AWS change needs his approval).
-   1. Review and apply a repair that removes the stalled host and blank 4 GiB disk while keeping both S3 receipts and the journal history.
-   2. Run the normal S3-only `start` for a fresh cold restore, then confirm both worlds with Java and Bedrock joins.
-   3. Run `dns` to repair the parked record that the 2026-10-05 stop left pending.
-   4. Record the round trip in `docs/operations/on-demand-host.md` and re-scope #24, since S3-only stays available but is no longer the operating mode.
-2. **Apply Decision 2.** Prepare and review the ownership handoff back to `retained-host`/`on-demand-host` with protection restored.
-3. **#26, NetherNet before Bedrock 26.60 drops RakNet (high).** The dual-transport configuration is merged (#30) with Craig's approved ports (signaling TCP 19132, WebRTC UDP 19133). Waiting on an upstream Geyser release that supports 26.60, then a reviewed activation plan and server-side transport checks.
-4. **#27, Java 26.3 (medium).** Waiting on a STABLE Paper 26.3 build and a Geyser release supporting Java 26.3; then world-copy upgrade test, verified pre-upgrade recovery point and reviewed rollout.
-5. **Website dashboard.** Build the `/minecraft` page from portfolio PR #126 once its access model and world display names are settled.
-6. **Optional:** console joins through BedrockConnect; a lobby or single entry point if consoles are added; idle auto-stop (PR #18) is incompatible with on-demand mode and stays disabled.
+Craig said on 2026-10-10 that the existing worlds were test worlds and need not be kept, so no restore is needed. The work below replaces the earlier restore-first order.
+
+1. **Build the Crafty host in the repo** (no AWS needed): pinned Crafty image and plugin manifest, host bootstrap that installs Docker and Crafty on the retained data disk, a script that creates the Paper server and Multiverse worlds through the Crafty API, S3 backup sync, single-address ingress, and workstation `start`, `stop`, `status` and `admin` (SSM port-forward to Crafty) commands. Offline tests for each.
+2. **Tear down and deploy** (needs Craig's workstation, AWS SSO and the Cloudflare token, and his approval of the reviewed plan): remove the stalled S3-only host and blank disk, apply `retained-host` with the new data disk and Crafty bootstrap, set the Crafty admin password, and confirm Java and Bedrock joins and portal travel between worlds.
+3. **Retire the old controllers**: remove the S3-only, on-demand and Compose instance code once the Crafty host is proven, and close #24 as superseded.
+4. **#26, NetherNet before Bedrock 26.60 drops RakNet (high)** and **#27, Java 26.3 (medium)**: unchanged gates, now applied to the Crafty-managed server's pinned jars.
+5. **Website dashboard** from portfolio PR #126, talking to Crafty's API once its exposure is decided.
+6. **Optional:** console joins through BedrockConnect, an adventure or lobby world, and pointing the idle-stop Lambda at Crafty.
 
 Upstream release checks for #26 and #27 could not be refreshed from this session on 2026-10-10 because the release sites were unreachable; the last recorded check is 2026-10-05 in [client compatibility](../../operations/client-compatibility-readiness.md).
