@@ -8,6 +8,7 @@ Report suspected vulnerabilities using the [security policy](SECURITY.md).
 
 ## Start here
 
+- [Crafty Controller host (current build, ADR 0004)](docs/operations/crafty.md)
 - [Development setup and commands](docs/development.md)
 - [Server operations design](docs/superpowers/specs/2026-09-07-server-operations-design.md)
 - [Infrastructure ownership, setup, costs, and handoff](docs/operations/infrastructure.md)
