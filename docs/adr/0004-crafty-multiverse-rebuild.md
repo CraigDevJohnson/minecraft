@@ -13,7 +13,7 @@ On October 10, 2026, Craig chose to rebuild around Crafty Controller and Multive
 - **Lifecycle adapter:** `scripts/minecraft_crafty.py` is installed as the host's `minecraft-instance` command and answers the same `start`, `host-drain` and `host-status` requests through Crafty's loopback API, so the workstation `minecraft_host.py` and the idle-stop Lambda need no changes.
 - **Admin access:** the Crafty web UI (HTTPS 8443) is not exposed publicly. Craig reaches it through an SSM port-forwarding session from his workstation. Public access for the craigdevjohnson.com dashboard is a separate later decision.
 - **Backups:** every stop asks Crafty to stop the server, then archives the stopped server folder to the existing versioned S3 bucket with the host role, verifies the stored size and SHA-256, and keeps the newest 14 archives. EC2 is stopped only after that succeeds. Crafty's own scheduled backups can be added in its UI for mid-session snapshots on the data disk.
-- **Retained infrastructure:** network, security group, host role, S3 bucket, budget, state backend and the Cloudflare hostname stay. By default the host and its data disk are kept and the host is simply stopped between sessions (`lifecycle_mode="retained-host"`, `data_ownership="retained"`); Craig was asked on 2026-10-10 to confirm this over recreating the host on every start.
+- **Retained infrastructure:** network, security group, host role, S3 bucket, budget, state backend and the Cloudflare hostname stay. By default the host and its data disk are kept and the host is simply stopped between sessions (`lifecycle_mode="retained-host"`, `data_ownership="retained"`); Craig confirmed this on 2026-10-10 over recreating the host on every start.
 
 ## Consequences
 
