@@ -379,7 +379,7 @@ def render_properties(values: dict) -> bytes:
 def stage_import(manifest: dict, destination: Path, *, fetch=download, archive: Path | None = None) -> Path:
     """Write the server folder, and optionally the archive Crafty imports. Refuses to touch existing ones."""
     destination = Path(destination)
-    if destination.exists() or (archive is not None and Path(archive).exists()):
+    if destination.exists() or (archive is not None and os.path.lexists(archive)):
         raise CraftyError("the import folder or archive already exists; remove it after a completed import")
     destination.mkdir(parents=True)
     (destination / "plugins").mkdir()
@@ -397,11 +397,16 @@ def stage_import(manifest: dict, destination: Path, *, fetch=download, archive: 
         archive = Path(archive)
         archive.parent.mkdir(parents=True, exist_ok=True)
         # The jars are already compressed, so store them; server files sit at the archive root.
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as bundle:
+        # Crafty's own account can write to this folder, so never follow or reuse a planted link.
+        try:
+            descriptor = os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o660)
+        except OSError as exc:
+            raise CraftyError("the import archive could not be created as a new regular file") from exc
+        with os.fdopen(descriptor, "wb") as output, zipfile.ZipFile(output, "w", zipfile.ZIP_STORED) as bundle:
+            os.fchmod(output.fileno(), 0o660)
             for path in sorted(destination.rglob("*")):
                 if path.is_file():
                     bundle.write(path, path.relative_to(destination).as_posix())
-        archive.chmod(0o660)
     return destination
 
 

@@ -301,6 +301,16 @@ class ManifestTests(unittest.TestCase):
                 names = set(bundle.namelist())
             self.assertLessEqual({"paper.jar", "eula.txt", "server.properties", "plugins/Geyser-Spigot/config.yml"}, names)
 
+    def test_stage_import_refuses_a_planted_archive_link(self):
+        manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "family.zip"
+            archive.symlink_to(Path(directory) / "elsewhere")  # dangling, so exists() alone would miss it
+            with self.assertRaises(crafty.CraftyError):
+                crafty.stage_import(manifest, Path(directory) / "family", archive=archive,
+                                    fetch=lambda url, sha256, target: target.write_bytes(b"jar"))
+            self.assertFalse((Path(directory) / "elsewhere").exists())
+
     def test_import_server_creates_one_server_from_the_archive(self):
         with tempfile.TemporaryDirectory() as directory:
             api = FakeAPI()
