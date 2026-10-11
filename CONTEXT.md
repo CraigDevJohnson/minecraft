@@ -15,6 +15,7 @@ Craig also removed recovery authorization and maintenance windows and overall re
 - **Server instance:** one independently configured Minecraft runtime and content set. The only one is `family`, run by Crafty Controller. It owns its server folder, ports, backup namespace, and lifecycle.
 - **World:** a playable map within an instance. `family` holds two Multiverse worlds, `survival` (with its Nether and End) and `creative`, each with its own inventories. Worlds share the instance's ports, archive and lifecycle.
 - **Crafty Controller:** the process manager and admin web UI on the host. It alone starts and stops the server; the lifecycle adapter asks it to through its loopback API.
+- **Launcher:** the backend of The Lobby's Minecraft Launcher page, a Lambda in `lambda/launcher`. It reports the server's state and starts the host and game the way the workstation start does, but never stops them. See the [launcher runbook](docs/operations/launcher.md).
 - **Archive:** one stopped-server folder stored in S3 on every stop, with its SHA-256. It is the recovery point for the `family` instance.
 - **Content manifest:** the exact runtime, plugins/mods, resource packs, mappings, versions, and integrity metadata needed to recreate an instance.
 - **Recovery point:** a verified, completed backup of the data and content configuration needed to recover an instance.

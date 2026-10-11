@@ -21,6 +21,16 @@ budget_notification_email = "operator@example.invalid"
 #   idle_minutes = 30
 #   cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef"
 # }
+
+# Optional: the backend for The Lobby's Minecraft Launcher. Build the package with
+# `task lambda:package:launcher` and see docs/operations/launcher.md before enabling it.
+# launcher = {
+#   package_path             = "/absolute/path/to/minecraft/.build/launcher.zip"
+#   site_role_arn            = "arn:aws:iam::111122223333:role/site-dev-server"
+#   site_environment         = "dev"
+#   permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary"
+# }
+
 # Retained data disk size in GiB. Grow only: never decrease it for an existing disk
 # (docs/operations/data-disk-capacity.md). An existing deployment sets its current
 # size before planning.

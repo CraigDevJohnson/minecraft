@@ -119,9 +119,10 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
             {name for name, body in role_policies.items() if re.search(r"\brole\s*=\s*aws_iam_role\.host\.", body)},
             {"aws_iam_role_policy.ssm", "aws_iam_role_policy.backups", "aws_iam_role_policy.bootstrap"},
         )
-        # The only other inline policy belongs to the separate idle-stop function role, never the host.
-        self.assertEqual(set(role_policies), {"aws_iam_role_policy.ssm", "aws_iam_role_policy.backups", "aws_iam_role_policy.bootstrap", "aws_iam_role_policy.idle_stop"})
+        # The only other inline policies belong to the separate idle-stop and launcher function roles, never the host.
+        self.assertEqual(set(role_policies), {"aws_iam_role_policy.ssm", "aws_iam_role_policy.backups", "aws_iam_role_policy.bootstrap", "aws_iam_role_policy.idle_stop", "aws_iam_role_policy.launcher"})
         self.assertRegex(role_policies["aws_iam_role_policy.idle_stop"], r"\brole\s*=\s*aws_iam_role\.idle_stop\[0\]\.id\b")
+        self.assertRegex(role_policies["aws_iam_role_policy.launcher"], r"\brole\s*=\s*aws_iam_role\.launcher\[0\]\.id\b")
         self.assertFalse(
             any(name.startswith(("aws_iam_access_key.", "aws_iam_role_policy_attachment.", "aws_iam_policy_attachment.")) for name in blocks)
         )

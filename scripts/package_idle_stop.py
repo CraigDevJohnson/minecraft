@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the idle-stop Lambda for ARM64 and write a reproducible deployment zip."""
+"""Build a Lambda function (the idle stop or the launcher) for ARM64 and write a reproducible deployment zip."""
 from __future__ import annotations
 
 import argparse
@@ -12,19 +12,21 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "lambda" / "idlestop"
-DEFAULT_OUTPUT = ROOT / ".build" / "idle-stop.zip"
+FUNCTIONS = {
+    "idle-stop": ROOT / "lambda" / "idlestop",
+    "launcher": ROOT / "lambda" / "launcher",
+}
 # A fixed timestamp and mode keep the archive bytes, and so the Lambda code hash, stable across rebuilds.
 ZIP_TIME = (2026, 1, 1, 0, 0, 0)
 
 
-def build(output: Path) -> str:
-    with tempfile.TemporaryDirectory(prefix="idle-stop-") as directory:
+def build(output: Path, source: Path = FUNCTIONS["idle-stop"]) -> str:
+    with tempfile.TemporaryDirectory(prefix="lambda-") as directory:
         binary = Path(directory) / "bootstrap"
         environment = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64", "GOFLAGS": "-mod=readonly"}
         subprocess.run(
             ["go", "build", "-trimpath", "-buildvcs=false", "-tags", "lambda.norpc", "-ldflags", "-s -w -buildid=", "-o", str(binary), "."],
-            cwd=SOURCE,
+            cwd=source,
             env=environment,
             check=True,
             timeout=600,
@@ -42,10 +44,12 @@ def build(output: Path) -> str:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--function", choices=sorted(FUNCTIONS), default="idle-stop")
+    parser.add_argument("--output", type=Path, help="default: .build/<function>.zip")
     args = parser.parse_args(argv)
-    digest = build(args.output.resolve())
-    print(f"{args.output.resolve()} sha256={digest}")
+    output = (args.output or ROOT / ".build" / f"{args.function}.zip").resolve()
+    digest = build(output, FUNCTIONS[args.function])
+    print(f"{output} sha256={digest}")
     return 0
 
 

@@ -18,13 +18,14 @@ Report suspected vulnerabilities using the [security policy](SECURITY.md).
 - [Backup commands, retention, and isolated recovery](docs/operations/backup-recovery.md)
 - [Live persistence and recovery rehearsal](docs/operations/live-recovery-rehearsal.md)
 - [Optional idle stop](docs/operations/idle-stop.md)
+- [Launcher backend for The Lobby](docs/operations/launcher.md)
 - [Pinned content and explicit local runtime validation](docs/operations/runtime-content.md)
 - [Family device joins, console rollback, and play acceptance](docs/operations/family-device-validation.md)
 - [Creative world, separate ports and shared-host operation](docs/operations/creative-world.md)
 - [Client compatibility and upstream release gates](docs/operations/client-compatibility-readiness.md)
 - [Foundation issue #3](https://github.com/CraigDevJohnson/minecraft/issues/3) and [current issues](https://github.com/CraigDevJohnson/minecraft/issues)
 
-Python 3.11 or newer and Go (the version in `lambda/idlestop/go.mod`) are the host-language prerequisites. Install the pinned tools and run the shared gate from the repository root:
+Python 3.11 or newer and Go (the version in `lambda/idlestop/go.mod`, shared by `lambda/launcher`) are the host-language prerequisites. Install the pinned tools and run the shared gate from the repository root:
 
 ```sh
 python3 scripts/bootstrap_tools.py

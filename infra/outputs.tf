@@ -36,3 +36,8 @@ output "deployment" {
     }
   }
 }
+
+output "launcher_url" {
+  description = "The launcher's Function URL, for The Lobby's MINECRAFT_BACKEND_URL; null when the launcher is not deployed. Only the site's role may call it."
+  value       = try(aws_lambda_function_url.launcher[0].function_url, null)
+}

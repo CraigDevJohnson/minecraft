@@ -220,6 +220,47 @@ variable "idle_stop" {
   }
 }
 
+variable "launcher" {
+  description = "Optional backend for The Lobby's Minecraft Launcher: status and start through a Function URL only site_role_arn may call. package_path is the zip built by `task lambda:package:launcher`; the function is named <resource_prefix>-<site_environment>-launcher; null deploys none of its resources."
+  type = object({
+    package_path               = string
+    site_role_arn              = string
+    site_environment           = string
+    server_name                = optional(string, "Family server")
+    cloudflare_token_parameter = optional(string)
+    permissions_boundary_arn   = optional(string)
+  })
+  default = null
+  validation {
+    condition     = var.launcher == null || try(can(regex("^arn:aws:iam::[0-9]{12}:role/.+$", var.launcher.site_role_arn)), false)
+    error_message = "launcher.site_role_arn must name the site's IAM role."
+  }
+  validation {
+    condition     = var.launcher == null || try(var.launcher.cloudflare_token_parameter == null || can(regex("^/${var.resource_prefix}/[A-Za-z0-9/_.-]+$", var.launcher.cloudflare_token_parameter)), false)
+    error_message = "launcher.cloudflare_token_parameter must be an SSM parameter under /<resource_prefix>/."
+  }
+  validation {
+    condition     = var.launcher == null || try(can(regex("^[a-z][a-z0-9]{0,11}$", var.launcher.site_environment)), false)
+    error_message = "launcher.site_environment must be the calling site's environment name, such as dev or prod: up to 12 lowercase letters and digits."
+  }
+  validation {
+    condition     = var.launcher == null || try(length(trimspace(var.launcher.server_name)) > 0 && length(var.launcher.server_name) <= 60, false)
+    error_message = "launcher.server_name must be 1 to 60 characters."
+  }
+  validation {
+    condition     = var.launcher == null || length(var.instance_ids) == 1
+    error_message = "launcher supports exactly one game instance on Java port 25565."
+  }
+  validation {
+    condition     = var.launcher == null || var.lifecycle_mode == "retained-host"
+    error_message = "launcher starts the retained host and is incompatible with on-demand and S3-only lifecycles."
+  }
+  validation {
+    condition     = var.launcher == null || try(var.launcher.permissions_boundary_arn == null || (can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", var.launcher.permissions_boundary_arn)) && split(":", var.launcher.permissions_boundary_arn)[4] == var.account_id), false)
+    error_message = "launcher.permissions_boundary_arn must name a managed policy in the target account."
+  }
+}
+
 variable "lifecycle_mode" {
   description = "Opt-in session host removal. Retained-host preserves existing stop/start operation. Activation requires a reviewed recurring policy and initial migration."
   type        = string
