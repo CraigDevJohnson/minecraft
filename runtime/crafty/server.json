@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "revision": "family-2026-10-10-crafty-multiverse",
+  "crafty": {
+    "image": "registry.gitlab.com/crafty-controller/crafty-4@sha256:7b6e87514259549647e15ceeaf73d238792e6d77e2c79fc744d5badc8d6e997c",
+    "version": "4.11.0"
+  },
+  "minecraft_version": "26.2",
+  "java_version": "25",
+  "artifacts": [
+    {
+      "name": "paper",
+      "version": "26.2",
+      "build": 129,
+      "path": "paper.jar",
+      "url": "https://fill-data.papermc.io/v1/objects/b1d8f6bfa1b6101fa8e947b53041cb3bdf5540e7b83b6547ca19ba7edefeb083/paper-26.2-129.jar",
+      "sha256": "b1d8f6bfa1b6101fa8e947b53041cb3bdf5540e7b83b6547ca19ba7edefeb083"
+    },
+    {
+      "name": "geyser",
+      "version": "2.11.3",
+      "build": 1247,
+      "path": "plugins/Geyser-Spigot.jar",
+      "url": "https://download.geysermc.org/v2/projects/geyser/versions/2.11.3/builds/1247/downloads/spigot",
+      "sha256": "6fed2d9711e2db3c365508ec10db36d06a0199abd226159d23d57f82662fd7a6"
+    },
+    {
+      "name": "floodgate",
+      "version": "2.2.5",
+      "build": 141,
+      "path": "plugins/floodgate-spigot.jar",
+      "url": "https://download.geysermc.org/v2/projects/floodgate/versions/2.2.5/builds/141/downloads/spigot",
+      "sha256": "21570aff9ce17d6983928e8552777760e1ede5050026b04c686b0ae112e6fd7e"
+    },
+    {
+      "name": "viaversion",
+      "version": "5.12.0",
+      "path": "plugins/ViaVersion.jar",
+      "url": "https://github.com/ViaVersion/ViaVersion/releases/download/5.12.0/ViaVersion-5.12.0.jar",
+      "sha256": "72c40a6a702d67f226fc9a0d8ad82aba1483fdabe2e6159bcdddb2dc070750b0"
+    },
+    {
+      "name": "multiverse-core",
+      "version": "5.8.1",
+      "path": "plugins/multiverse-core-5.8.1.jar",
+      "url": "https://github.com/Multiverse/Multiverse-Core/releases/download/5.8.1/multiverse-core-5.8.1.jar",
+      "sha256": "bc3f34e2d747fdf024f44868747bb016b08fa11d98ccb4ffcac958f083151a83"
+    },
+    {
+      "name": "multiverse-inventories",
+      "version": "5.3.6",
+      "path": "plugins/multiverse-inventories-5.3.6.jar",
+      "url": "https://github.com/Multiverse/Multiverse-Inventories/releases/download/5.3.6/multiverse-inventories-5.3.6.jar",
+      "sha256": "6e58e89009283f4be8658abe2b7e46c482010ceccf3c8e0b0e8ca6a0a114ff92"
+    },
+    {
+      "name": "multiverse-portals",
+      "version": "5.3.0",
+      "path": "plugins/multiverse-portals-5.3.0.jar",
+      "url": "https://github.com/Multiverse/Multiverse-Portals/releases/download/5.3.0/multiverse-portals-5.3.0.jar",
+      "sha256": "345f0f296bb54e1fd98494260f93fb1ab97ba92f8ad7f6bfba129ea90021ea8d"
+    },
+    {
+      "name": "multiverse-netherportals",
+      "version": "5.1.0",
+      "path": "plugins/multiverse-netherportals-5.1.0.jar",
+      "url": "https://github.com/Multiverse/Multiverse-NetherPortals/releases/download/5.1.0/multiverse-netherportals-5.1.0.jar",
+      "sha256": "a4b3750970b5b710aa942baaff07a8fcef56802cf286b9dcda7e69dd904492cc"
+    }
+  ],
+  "managed_files": [
+    {
+      "path": "plugins/Geyser-Spigot/config.yml",
+      "format": "canonical-json-v1",
+      "content": {
+        "config-version": 8,
+        "bedrock": {
+          "address": "0.0.0.0",
+          "port": 19132,
+          "clone-remote-port": false
+        },
+        "java": {
+          "auth-type": "floodgate"
+        },
+        "log-player-ip-addresses": false,
+        "saved-user-logins": []
+      },
+      "sha256": "a98d3442120aa0cfe4eb63e28eebb935b01e7c52b0aa1d8e55bb6d618d1c442f"
+    }
+  ],
+  "server_properties": {
+    "server-port": 25565,
+    "motd": "Family Minecraft",
+    "level-name": "survival",
+    "gamemode": "survival",
+    "difficulty": "normal",
+    "max-players": 10,
+    "view-distance": 10,
+    "simulation-distance": 8,
+    "online-mode": true,
+    "white-list": true,
+    "enforce-whitelist": true,
+    "enforce-secure-profile": false,
+    "enable-rcon": false,
+    "enable-query": false,
+    "spawn-protection": 0,
+    "pvp": false
+  }
+}
