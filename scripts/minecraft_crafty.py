@@ -436,7 +436,12 @@ class Adapter:
                 if target.exists():
                     replaced = staging / f"replaced-{instance}-{self.host.now().strftime('%Y%m%dT%H%M%SZ')}"
                     target.rename(replaced)
-                restored.rename(target)
+                try:
+                    restored.rename(target)
+                except BaseException:
+                    if replaced is not None:
+                        replaced.rename(target)  # never leave the server without a folder
+                    raise
                 self.record(instance, backup="complete", key=key, sha256=digest, boot_id=self.host.boot_id(),
                             fingerprint=fingerprint(target))
             finally:
@@ -482,17 +487,22 @@ class Adapter:
 
         self.host.upload(backup["region"], backup["bucket"], key, max(expected, 1), write)
         size, digest = counted["sink"].size, counted["sink"].digest.hexdigest()
-        head = self.host.aws(backup["region"], "s3api", "head-object", "--bucket", backup["bucket"], "--key", key)
-        if head.get("ContentLength") != size:
-            raise CraftyError("S3 did not confirm the stored archive")
         staging = self.root / "crafty" / "staging"
         staging.mkdir(mode=0o700, parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile("w", dir=staging, suffix=".sha256", delete=False) as output:
             output.write(f"{digest}  {stamp}.tar.gz\n")
             checksum = Path(output.name)
         try:
+            head = self.host.aws(backup["region"], "s3api", "head-object", "--bucket", backup["bucket"], "--key", key)
+            if head.get("ContentLength") != size:
+                raise CraftyError("S3 did not confirm the stored archive")
             self.host.aws(backup["region"], "s3api", "put-object", "--bucket", backup["bucket"], "--key", f"{key}.sha256",
                           "--body", str(checksum), "--if-none-match", "*")
+        except BaseException:
+            # Without its checksum the upload can never be restored; do not leave it to look like a recovery point.
+            with contextlib.suppress(CraftyError):
+                self.host.aws(backup["region"], "s3api", "delete-object", "--bucket", backup["bucket"], "--key", key)
+            raise
         finally:
             checksum.unlink(missing_ok=True)
         try:
@@ -504,8 +514,15 @@ class Adapter:
 
     def prune(self, backup: dict, prefix: str) -> None:
         listing = self.host.aws(backup["region"], "s3api", "list-objects-v2", "--bucket", backup["bucket"], "--prefix", prefix)
-        keys = sorted(item["Key"] for item in listing.get("Contents", []) if re.fullmatch(re.escape(prefix) + r"[0-9]{8}T[0-9]{6}Z\.tar\.gz", item.get("Key", "")))
-        for key in keys[:-KEEP_ARCHIVES]:
+        present = {item.get("Key", "") for item in listing.get("Contents", [])}
+        keys = sorted(key for key in present if re.fullmatch(re.escape(prefix) + r"[0-9]{8}T[0-9]{6}Z\.tar\.gz", key))
+        # Only an archive with its checksum is a recovery point, so only those count toward the kept
+        # number. Anything older than the oldest one kept goes, with or without a checksum.
+        verified = [key for key in keys if f"{key}.sha256" in present]
+        if len(verified) <= KEEP_ARCHIVES:
+            return
+        oldest_kept = verified[-KEEP_ARCHIVES]
+        for key in (key for key in keys if key < oldest_kept):
             self.host.aws(backup["region"], "s3api", "delete-object", "--bucket", backup["bucket"], "--key", key)
             self.host.aws(backup["region"], "s3api", "delete-object", "--bucket", backup["bucket"], "--key", f"{key}.sha256")
 
@@ -519,10 +536,9 @@ class Adapter:
                 # The operator's stop already drained this boot; EC2's shutdown runs the drain again.
                 # Archive only if something has run since, so one session is not stored twice.
                 current = {name: self.status(name) for name in sorted(self.config["instances"])}
-                # A session run from Crafty's own UI bypasses this adapter's state, so the stopped
-                # folder must also be exactly as archived.
-                if all(value["application"] == "stopped" and (value["backup"] == "not-required" or
-                                                              (value["backup"] == "complete" and self.unchanged(name)))
+                # A session run from Crafty's own UI bypasses this adapter's state, so only a folder
+                # that is exactly as archived counts. Missing state proves nothing and is archived.
+                if all(value["application"] == "stopped" and value["backup"] == "complete" and self.unchanged(name)
                        for name, value in current.items()):
                     return {"draining": True, "instances": {name: {key: value[key] for key in ("instance", "application", "backup")}
                                                             for name, value in current.items()}}

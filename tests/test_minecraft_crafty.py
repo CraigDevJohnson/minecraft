@@ -281,6 +281,64 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual((folder / "level.dat").read_bytes(), b"current")
         self.assertEqual(list((self.root / "crafty" / "staging").glob("restore-*")), [])
 
+    def test_retried_drain_archives_a_server_that_has_no_recorded_state(self):
+        self.played_server()
+        api = FakeAPI()  # already stopped: the first drain was interrupted after Crafty's UI session
+        adapter, host = self.adapter(api)
+        crafty.write_durably(self.root / "crafty" / "state" / "host-drain.json", {"boot_id": "boot-1"})
+        self.assertEqual(adapter.host_drain()["instances"]["family"]["backup"], "complete")
+        self.assertEqual(sum(call[:2] == ("s3", "cp") for call in host.calls), 1)
+
+    def test_an_upload_that_cannot_be_verified_is_removed_from_s3(self):
+        self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        original = host.aws
+
+        def aws(region, *arguments):
+            if arguments[1] == "put-object":
+                raise crafty.CraftyError("AWS put-object failed")
+            return original(region, *arguments)
+
+        host.aws = aws
+        with self.assertRaises(crafty.CraftyError):
+            adapter.host_drain()
+        self.assertEqual(host.stored, {})
+        self.assertEqual(adapter.backup_state("family"), "failed")
+
+    def test_prune_counts_only_archives_with_a_checksum(self):
+        adapter, host = self.adapter(FakeAPI())
+        prefix = "instances/family/crafty/"
+        verified = [f"{prefix}202610{day:02d}T000000Z.tar.gz" for day in range(1, 16)]
+        orphans = [f"{prefix}20261020T000000Z.tar.gz", f"{prefix}20261021T000000Z.tar.gz"]
+        for key in verified:
+            host.stored[key], host.stored[key + ".sha256"] = b"a", b"b"
+        for key in orphans:
+            host.stored[key] = b"a"
+        adapter.prune({"bucket": "family-backups", "region": "us-west-2"}, prefix)
+        kept = sorted(key for key in host.stored if key.endswith(".tar.gz") and key + ".sha256" in host.stored)
+        self.assertEqual(kept, verified[1:])
+        self.assertNotIn(verified[0], host.stored)
+
+    def test_restore_puts_the_original_folder_back_when_the_swap_fails(self):
+        folder = self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        adapter.host_drain()
+        (folder / "level.dat").write_bytes(b"current")
+        real, failed = Path.rename, []
+
+        def rename(path, target):
+            if Path(target) == folder and not failed:
+                failed.append(path)
+                raise OSError("disk error")
+            return real(path, target)
+
+        with unittest.mock.patch.object(Path, "rename", rename):
+            with self.assertRaises(OSError):
+                adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+        self.assertEqual((folder / "level.dat").read_bytes(), b"current")
+
     def test_failed_prune_keeps_the_verified_backup(self):
         api = FakeAPI(running=True)
         adapter, host = self.adapter(api)
