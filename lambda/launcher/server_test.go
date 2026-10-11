@@ -101,7 +101,11 @@ func TestStartAnswers(t *testing.T) {
 	for _, tc := range cases {
 		log, logged := quiet()
 		launcher := &fakeLauncher{status: Status{Name: "Family server", State: Starting}, started: tc.started, err: tc.err}
-		code, body := serve(t, &Server{Launcher: launcher, Log: log}, "POST", "/server/start")
+		lost := 0
+		code, body := serve(t, &Server{Launcher: launcher, Log: log, LostStart: func() { lost++ }}, "POST", "/server/start")
+		if wantLost := map[bool]int{true: 1, false: 0}[tc.started && tc.err != nil]; lost != wantLost {
+			t.Fatalf("%s: counted %d lost starts", tc.name, lost)
+		}
 		if code != tc.code || launcher.starts != 1 {
 			t.Fatalf("%s: %d %v", tc.name, code, body)
 		}

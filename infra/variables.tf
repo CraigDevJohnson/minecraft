@@ -221,14 +221,14 @@ variable "idle_stop" {
 }
 
 variable "launcher" {
-  description = "Optional backend for The Lobby's Minecraft Launcher: status and start through a Function URL only site_role_arn may call. package_path is the zip built by `task lambda:package:launcher`; the function is named <resource_prefix>-<site_environment>-launcher; null deploys none of its resources."
+  description = "Optional backend for The Lobby's Minecraft Launcher: status and start through a Function URL only site_role_arn may call. package_path is the zip built by `task lambda:package:launcher`; permissions_boundary_arn is the administrator-created launcher boundary; the function is named <resource_prefix>-<site_environment>-launcher; null deploys none of its resources."
   type = object({
     package_path               = string
     site_role_arn              = string
     site_environment           = string
     server_name                = optional(string, "Family server")
     cloudflare_token_parameter = optional(string)
-    permissions_boundary_arn   = optional(string)
+    permissions_boundary_arn   = string
   })
   default = null
   validation {
@@ -256,8 +256,12 @@ variable "launcher" {
     error_message = "launcher starts the retained host and is incompatible with on-demand and S3-only lifecycles."
   }
   validation {
-    condition     = var.launcher == null || try(var.launcher.permissions_boundary_arn == null || (can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", var.launcher.permissions_boundary_arn)) && split(":", var.launcher.permissions_boundary_arn)[4] == var.account_id), false)
-    error_message = "launcher.permissions_boundary_arn must name a managed policy in the target account."
+    condition     = var.launcher == null || try(can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", var.launcher.permissions_boundary_arn)) && split(":", var.launcher.permissions_boundary_arn)[4] == var.account_id, false)
+    error_message = "launcher.permissions_boundary_arn must name the administrator-created launcher boundary, a managed policy in the target account. The operator role may create the launcher's role only inside it."
+  }
+  validation {
+    condition     = var.launcher == null || try(!startswith(lower(reverse(split("/", var.launcher.permissions_boundary_arn))[0]), "${var.resource_prefix}-"), false)
+    error_message = "launcher.permissions_boundary_arn must name a policy outside the resource prefix, so prefix-scoped operator permissions never cover it."
   }
 }
 

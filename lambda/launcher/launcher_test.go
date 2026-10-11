@@ -269,9 +269,31 @@ func TestRunningHostWithoutGame(t *testing.T) {
 		if err != nil || status.State != tc.want {
 			t.Fatalf("%s: state=%s err=%v", tc.name, status.State, err)
 		}
-		if len(r.pinged) != 2 {
-			t.Fatalf("%s: pinged %d times, want one retry", tc.name, len(r.pinged))
+		if wantPings := map[bool]int{true: 0, false: 2}[tc.idle != "" && tc.want == Stopping]; len(r.pinged) != wantPings {
+			t.Fatalf("%s: pinged %d times, want %d", tc.name, len(r.pinged), wantPings)
 		}
+	}
+}
+
+func TestADrainIsStoppingWhileTheGameStillAnswers(t *testing.T) {
+	r := newRig(ec2types.InstanceStateNameRunning, time.Hour)
+	r.gameUp = true
+	r.launcher.Config.IdleStopStateParameter = idleStateName
+	r.ssm.params[idleStateName] = `{"launch_time":"2026-10-11T15:00:00Z","drain_command_id":"x"}`
+	status, err := r.launcher.Status(context.Background())
+	if err != nil || status.State != Stopping {
+		t.Fatalf("state=%s err=%v", status.State, err)
+	}
+}
+
+func TestUnknownKeepsAFailedDNSHidden(t *testing.T) {
+	r := newRig(ec2types.InstanceStateNameRunning, 5*time.Minute)
+	r.setSession(t, Session{RequestedAt: now.Add(-6 * time.Minute), LaunchTime: now.Add(-5 * time.Minute), Phase: Ready, DNS: "failed"})
+	r.launcher.Config.IdleStopStateParameter = idleStateName
+	r.ssm.params[idleStateName] = "not json"
+	status, err := r.launcher.Status(context.Background())
+	if err == nil || status.State != Unknown || status.Connection.Java != nil || status.Connection.Bedrock != nil {
+		t.Fatalf("status %+v err=%v", status, err)
 	}
 }
 
@@ -355,6 +377,21 @@ func TestStartRefusedByEC2IsRecordedFailed(t *testing.T) {
 		t.Fatalf("state=%s started=%v err=%v", status.State, started, err)
 	}
 	if session := r.session(t); session.Phase != Failed {
+		t.Fatalf("session %+v", session)
+	}
+}
+
+func TestASecondStartRefusedBecauseTheFirstWonKeepsTheStart(t *testing.T) {
+	// Both requests saw the host stopped; EC2 refuses the second because the first moved it to pending.
+	r := newRig(ec2types.InstanceStateNameStopped, 0)
+	r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameStopped, ec2types.InstanceStateNamePending}
+	r.ec2.launch = now
+	r.ec2.startErr = errors.New("IncorrectInstanceState")
+	status, started, err := r.launcher.Start(context.Background())
+	if err != nil || started || status.State != Starting || r.followUps != 0 {
+		t.Fatalf("state=%s started=%v err=%v followUps=%d", status.State, started, err, r.followUps)
+	}
+	if session := r.session(t); session.Phase != Starting {
 		t.Fatalf("session %+v", session)
 	}
 }

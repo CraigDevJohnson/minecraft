@@ -214,3 +214,22 @@ resource "aws_cloudwatch_metric_alarm" "launcher_errors" {
   alarm_actions       = [aws_sns_topic.launcher_alerts[0].arn]
   ok_actions          = [aws_sns_topic.launcher_alerts[0].arn]
 }
+
+# A start whose follow-up could not be handed off answers 202, so Lambda counts no error. The function
+# reports it as this metric in its logs (embedded metric format), and the server shows failed later.
+resource "aws_cloudwatch_metric_alarm" "launcher_lost_starts" {
+  count               = local.launcher_count
+  alarm_name          = "${local.launcher_name}-lost-start"
+  alarm_description   = "A start from The Lobby began EC2 but could not hand off the rest of the start. See docs/operations/launcher.md."
+  namespace           = "Minecraft/Launcher"
+  metric_name         = "LostStarts"
+  dimensions          = { FunctionName = aws_lambda_function.launcher[0].function_name }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.launcher_alerts[0].arn]
+  ok_actions          = [aws_sns_topic.launcher_alerts[0].arn]
+}

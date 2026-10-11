@@ -20,6 +20,9 @@ type Server struct {
 		Start(context.Context) (Status, bool, error)
 	}
 	Log *slog.Logger
+	// LostStart counts a start whose follow-up could not be handed off, for the alarm. The request still
+	// answers 202, so Lambda's own error count never sees it.
+	LostStart func()
 
 	mu        sync.Mutex
 	lastKnown string
@@ -55,6 +58,9 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 		s.Log.Info("start", "member", member)
 		if err != nil {
 			s.Log.Error("start follow-up", "member", member, "err", err)
+			if s.LostStart != nil {
+				s.LostStart()
+			}
 		}
 		writeJSON(w, http.StatusAccepted, s.remember(status))
 		return

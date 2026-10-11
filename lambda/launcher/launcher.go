@@ -139,7 +139,8 @@ func (l *Launcher) Status(ctx context.Context) (Status, error) {
 	}
 	state, err := l.decide(ctx, h, session)
 	if err != nil {
-		return l.answer(Unknown, Session{}), err
+		// Keep the current run's record, so a DNS failure stays hidden while AWS can't be read.
+		return l.answer(Unknown, l.current(h, session)), err
 	}
 	return l.answer(state, l.current(h, session)), nil
 }
@@ -167,6 +168,15 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 			return l.answer(Unknown, Session{}), false, err
 		}
 		if _, err := l.EC2.StartInstances(ctx, &ec2.StartInstancesInput{InstanceIds: []string{l.Config.HostID}}); err != nil {
+			// Two Members starting at once both see the host stopped. EC2 refuses the second because the first
+			// already moved it on, and that start's record and follow-up must stand.
+			if h, describeErr := l.describeHost(ctx); describeErr == nil && h.state != ec2types.InstanceStateNameStopped {
+				state, decideErr := l.decide(ctx, h, session)
+				if decideErr != nil {
+					return l.answer(Unknown, l.current(h, session)), false, decideErr
+				}
+				return l.answer(state, l.current(h, session)), false, nil
+			}
 			_ = l.saveSession(ctx, Session{RequestedAt: now, Phase: Failed, Detail: "EC2 refused the start"})
 			return l.answer(Unknown, Session{}), false, fmt.Errorf("start host: %w", err)
 		}
@@ -174,7 +184,7 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 	case ec2types.InstanceStateNameRunning:
 		state, err := l.decide(ctx, h, session)
 		if err != nil {
-			return l.answer(Unknown, Session{}), false, err
+			return l.answer(Unknown, l.current(h, session)), false, err
 		}
 		if state != Failed {
 			return l.answer(state, l.current(h, session)), false, nil
@@ -189,7 +199,7 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 		// Pending, stopping and anything else: someone else's transition is under way.
 		state, err := l.decide(ctx, h, session)
 		if err != nil {
-			return l.answer(Unknown, Session{}), false, err
+			return l.answer(Unknown, l.current(h, session)), false, err
 		}
 		return l.answer(state, l.current(h, session)), false, nil
 	}
@@ -216,15 +226,16 @@ func (l *Launcher) decide(ctx context.Context, h host, session Session) (string,
 	default:
 		return Unknown, nil
 	}
-	if l.gameAnswers(ctx, h.publicIP) {
-		return Ready, nil
-	}
+	// The idle stop's drain comes first: the game still answers while it saves and backs up the server.
 	draining, err := l.idleStopDraining(ctx, h)
 	if err != nil {
 		return "", err
 	}
 	if draining {
 		return Stopping, nil
+	}
+	if l.gameAnswers(ctx, h.publicIP) {
+		return Ready, nil
 	}
 	now := l.Now().UTC()
 	if session, ok := l.sessionFor(h, session); ok {

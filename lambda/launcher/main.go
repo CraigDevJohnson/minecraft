@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -96,6 +98,7 @@ func main() {
 			})
 			return err
 		}
+		server.LostStart = func() { writeMetric(os.Stdout, name, lostStartMetric, time.Now()) }
 		proxy := httpadapter.NewV2(server.Handler())
 		lambda.Start(func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var task struct {
@@ -149,4 +152,28 @@ func finishStart(ctx context.Context, launcher *Launcher, log *slog.Logger) erro
 		log.Info("finish start", "state", Ready)
 	}
 	return err
+}
+
+// The custom metric the lost-start alarm watches (infra/launcher.tf).
+const (
+	metricNamespace = "Minecraft/Launcher"
+	lostStartMetric = "LostStarts"
+)
+
+// writeMetric records one count of a metric in CloudWatch's embedded metric format. Lambda ships the line
+// to the function's logs and CloudWatch turns it into the metric, so the function needs no metrics permission.
+func writeMetric(w io.Writer, function, metric string, at time.Time) {
+	line, _ := json.Marshal(map[string]any{
+		"_aws": map[string]any{
+			"Timestamp": at.UnixMilli(),
+			"CloudWatchMetrics": []map[string]any{{
+				"Namespace":  metricNamespace,
+				"Dimensions": [][]string{{"FunctionName"}},
+				"Metrics":    []map[string]string{{"Name": metric, "Unit": "Count"}},
+			}},
+		},
+		"FunctionName": function,
+		metric:         1,
+	})
+	fmt.Fprintln(w, string(line))
 }

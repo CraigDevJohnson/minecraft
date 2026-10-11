@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+)
 
 func environment(overrides map[string]string) func(string) string {
 	values := map[string]string{
@@ -41,5 +47,32 @@ func TestLoadConfig(t *testing.T) {
 		if _, _, err := loadConfig(environment(map[string]string{key: value})); err == nil {
 			t.Fatalf("%s=%q must be refused", key, value)
 		}
+	}
+}
+
+func TestWriteMetricIsEmbeddedMetricFormat(t *testing.T) {
+	var buffer bytes.Buffer
+	writeMetric(&buffer, "minecraft-test-dev-launcher", lostStartMetric, time.UnixMilli(1760198400000))
+	var line struct {
+		AWS struct {
+			Timestamp         int64
+			CloudWatchMetrics []struct {
+				Namespace  string
+				Dimensions [][]string
+				Metrics    []struct{ Name, Unit string }
+			}
+		} `json:"_aws"`
+		FunctionName string
+		LostStarts   int
+	}
+	if err := json.Unmarshal(buffer.Bytes(), &line); err != nil || !strings.HasSuffix(buffer.String(), "}\n") || strings.Count(buffer.String(), "\n") != 1 {
+		t.Fatalf("%q: %v", buffer.String(), err)
+	}
+	metrics := line.AWS.CloudWatchMetrics
+	if line.AWS.Timestamp != 1760198400000 || len(metrics) != 1 || metrics[0].Namespace != "Minecraft/Launcher" ||
+		len(metrics[0].Dimensions) != 1 || len(metrics[0].Dimensions[0]) != 1 || metrics[0].Dimensions[0][0] != "FunctionName" ||
+		len(metrics[0].Metrics) != 1 || metrics[0].Metrics[0].Name != "LostStarts" || metrics[0].Metrics[0].Unit != "Count" ||
+		line.FunctionName != "minecraft-test-dev-launcher" || line.LostStarts != 1 {
+		t.Fatalf("%q", buffer.String())
 	}
 }

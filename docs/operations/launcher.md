@@ -27,7 +27,7 @@ A start runs the same steps as `python3 scripts/minecraft_host.py start --instan
 3. It sends `minecraft-instance … start family` through `AWS-RunShellScript` and waits for the adapter to report `running` and `ready`. That is the same command and the same completion check the workstation start uses.
 4. It records `ready` or `failed`, tied to the host's EC2 launch time so a later run never inherits it.
 
-A DNS failure never stops the game. The run records it, the page shows no connection details for that run instead of a wrong address, and the run fails so the alarm emails you. Repeated taps, refreshes and several Members starting at once are safe. EC2's start is idempotent, the adapter takes its own lifecycle lock, and the second run's steps all repeat harmlessly. The second run is never retried: if it is lost, the start shows `failed` after 15 minutes and a Member can start again.
+A DNS failure never stops the game. The run records it, the page shows no connection details for that run instead of a wrong address, and the run fails so the alarm emails you. Repeated taps, refreshes and several Members starting at once are safe. EC2's start is idempotent, the adapter takes its own lifecycle lock, and the second run's steps all repeat harmlessly. The second run is never retried: if it is lost, the start shows `failed` after 15 minutes and a Member can start again. A second run that could not even be handed off is counted as `LostStarts` in the `Minecraft/Launcher` metrics, and its own alarm emails you.
 
 The function can start the host but never stop it. Stopping stays with the workstation `stop`, the idle stop, and EC2's own shutdown drain.
 
@@ -97,7 +97,7 @@ Everything below runs on your Mac in `/Users/craigjohnson/Projects/minecraft`, a
 
    `site_environment` puts the site's environment in the function's name (`<prefix>-dev-launcher`). The site's permissions boundary lets it call only backends named `*-dev-*`.
 
-5. **Plan** as described in [infrastructure](infrastructure.md#private-deployment-inputs-and-output). Expect creates only. Those are the function with its role and inline policy, the state parameter, the log group, the async invoke setting, the Function URL, its two permissions, the SNS topic and email subscription, and the alarm. Any change to the host, data disk, buckets or network is a stop condition.
+5. **Plan** as described in [infrastructure](infrastructure.md#private-deployment-inputs-and-output). Expect creates only. Those are the function with its role and inline policy, the state parameter, the log group, the async invoke setting, the Function URL, its two permissions, the SNS topic and email subscription, and the two alarms. Any change to the host, data disk, buckets or network is a stop condition.
 
 6. **Apply** the reviewed plan once you've approved it. Then confirm the SNS subscription email and read the address:
 
@@ -121,7 +121,7 @@ Everything below runs on your Mac in `/Users/craigjohnson/Projects/minecraft`, a
 
 ## Cost
 
-Each status request makes one EC2 describe, one or two SSM parameter reads and a status ping. The page polls every 30 seconds while it is visible, or every 5 seconds during a start, which stays well inside Lambda's free tier. A standard SecureString costs nothing. The alarm is about $0.10 a month. The server itself costs what it does today while it runs.
+Each status request makes one EC2 describe, one or two SSM parameter reads and a status ping. The page polls every 30 seconds while it is visible, or every 5 seconds during a start, which stays well inside Lambda's free tier. A standard SecureString costs nothing. The two alarms are about $0.20 a month. The server itself costs what it does today while it runs.
 
 ## Evidence limits
 
