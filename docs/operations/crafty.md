@@ -30,7 +30,7 @@ The installer writes `/opt/minecraft-crafty/compose.yaml`, stores Crafty's confi
 
 ## Open the Crafty admin page
 
-From the workstation, forward the loopback port through SSM:
+The tunnel needs the Session Manager plugin on the workstation (`brew install --cask session-manager-plugin`). Forward the loopback port through SSM and leave the command running. A plain `start-session` shell does not forward the port:
 
 ```sh
 aws ssm start-session --target "$HOST_ID" \
@@ -40,19 +40,15 @@ aws ssm start-session --target "$HOST_ID" \
 
 Then open `https://localhost:8443` and accept Crafty's self-signed certificate. On first start Crafty writes its initial admin login to `/srv/minecraft/crafty/config/default-creds.txt`; sign in, change the password at once, and delete that file.
 
-## Create the server
+## Create the API key and operator configuration
 
-Stage the pinned files on the host:
+In Crafty, open `https://localhost:8443/panel/edit_user_apikeys?id=1`, create a key named `lifecycle` with **Full Access**, and use its token button to show the token. In an SSM shell on the host, store it without echoing it. The command prompts for the paste:
 
 ```sh
-sudo /usr/local/sbin/minecraft-instance stage-import \
-  --manifest /opt/minecraft-crafty/runtime/server.json \
-  --destination /srv/minecraft/crafty/import/family
+sudo bash -c 'read -rsp "Paste the Crafty token, then press Enter: " t; umask 077; printf %s "$t" > /etc/minecraft/crafty-api.token; echo'
 ```
 
-In Crafty, create a server by importing from a folder: name it `family`, use the folder `/crafty/import/family`, the jar `paper.jar`, Java 25, and about 5 GB of memory. Leave Crafty's auto-start off, because the workstation `start` command starts the server. After the import completes, remove the staged folder.
-
-Create a Crafty API key for the admin user with access to `family`, and write it on the host as `/etc/minecraft/crafty-api.token` (root-owned, mode 0600). Write `/etc/minecraft/operator.json` (root-owned, mode 0600):
+Write `/etc/minecraft/operator.json` (root-owned, mode 0600):
 
 ```json
 {
@@ -65,6 +61,21 @@ Create a Crafty API key for the admin user with access to `family`, and write it
   "backup": {"bucket": "the-private-backup-bucket", "region": "us-west-2"}
 }
 ```
+
+## Create the server
+
+Crafty 4.11 has no import-from-folder form: it imports only a `.zip` from its `import/upload` folder. Stage the pinned files and that archive on the host, then create the server through Crafty's API:
+
+```sh
+sudo /usr/local/sbin/minecraft-instance stage-import \
+  --manifest /opt/minecraft-crafty/runtime/server.json \
+  --destination /srv/minecraft/crafty/import/family \
+  --archive /srv/minecraft/crafty/import/upload/family.zip
+sudo /usr/local/sbin/minecraft-instance import-server family --archive-name family.zip --max-memory-gb 5
+sudo rm -rf /srv/minecraft/crafty/import/family /srv/minecraft/crafty/import/upload/family.zip
+```
+
+The imported server runs `paper.jar` on the container's default Java 25 with auto-start off, because the workstation `start` command starts the server. The staged `eula.txt` has no trailing newline on purpose: Crafty 4.11 compares its first line exactly and otherwise refuses every start without logging an error.
 
 ## Set up the worlds
 
