@@ -203,6 +203,15 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(adapter.host_status()["draining"])
         self.assertTrue(adapter.start("family")["ready"])
 
+    def test_shutdown_drain_after_an_operator_stop_does_not_archive_again(self):
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        adapter.host_drain()
+        stored = dict(host.stored)
+        result = adapter.host_drain()
+        self.assertEqual(host.stored, stored)
+        self.assertEqual(result["instances"]["family"], {"instance": "family", "application": "stopped", "backup": "complete"})
+
     def test_failed_prune_keeps_the_verified_backup(self):
         api = FakeAPI(running=True)
         adapter, host = self.adapter(api)
@@ -257,6 +266,8 @@ class AdapterTests(unittest.TestCase):
             adapter.server_dir({"path": "/crafty/servers/../../etc"})
         with self.assertRaises(crafty.CraftyError):
             adapter.server_dir({"path": "/srv/elsewhere"})
+        with self.assertRaises(crafty.CraftyError):
+            adapter.server_dir({"path": "/crafty/servers//etc"})
 
     def test_host_status_matches_the_workstation_contract(self):
         api = FakeAPI()
@@ -334,6 +345,15 @@ class ManifestTests(unittest.TestCase):
                          "multiverse-portals", "multiverse-netherportals"} <= names)
         self.assertTrue(manifest["server_properties"]["white-list"])
         self.assertTrue(manifest["server_properties"]["online-mode"])
+
+    def test_managed_file_outside_the_server_folder_is_refused(self):
+        manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())
+        manifest["managed_files"][0]["path"] = "../../etc/cron.d/x"
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(manifest, handle)
+            handle.flush()
+            with self.assertRaises(crafty.CraftyError):
+                crafty.load_manifest(Path(handle.name))
 
     def test_unpinned_image_is_refused(self):
         manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())

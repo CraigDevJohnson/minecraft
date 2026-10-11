@@ -209,9 +209,12 @@ class Adapter:
 
     def server_dir(self, server: dict) -> Path:
         path = server.get("path")
-        if not isinstance(path, str) or not path.startswith(CONTAINER_SERVERS) or ".." in Path(path).parts:
+        servers = self.root / "crafty" / "servers"
+        name = path[len(CONTAINER_SERVERS):] if isinstance(path, str) and path.startswith(CONTAINER_SERVERS) else ""
+        # Exactly one plain folder name under the servers folder, never an absolute or nested path.
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name.rstrip("/")):
             raise CraftyError("Crafty reported an unexpected server path")
-        return self.root / "crafty" / "servers" / path[len(CONTAINER_SERVERS):]
+        return servers / name.rstrip("/")
 
     def running(self, server: dict) -> bool:
         data = self.api.request("GET", f"/api/v2/servers/{server['server_id']}/stats").get("data")
@@ -261,12 +264,7 @@ class Adapter:
         return value if value in ("pending", "complete", "failed") else "failed"
 
     def record(self, instance: str, **fields) -> None:
-        path = self.state_path(instance)
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as output:
-            json.dump(fields, output, sort_keys=True)
-            temporary = Path(output.name)
-        temporary.replace(path)
+        write_durably(self.state_path(instance), fields)
 
     # Drain barrier: once a drain starts, no session may start again until the host reboots,
     # so a caller that drained can stop EC2 without racing a new start.
@@ -406,17 +404,33 @@ class Adapter:
 
     def host_drain(self) -> dict:
         with self.lifecycle():
-            self.record_drain()
+            if self.draining():
+                # The operator's stop already drained this boot; EC2's shutdown runs the drain again.
+                # Archive only if something has run since, so one session is not stored twice.
+                current = {name: self.status(name) for name in sorted(self.config["instances"])}
+                if all(value["application"] == "stopped" and value["backup"] in ("complete", "not-required")
+                       for value in current.values()):
+                    return {"draining": True, "instances": {name: {key: value[key] for key in ("instance", "application", "backup")}
+                                                            for name, value in current.items()}}
+            write_durably(self.root / "crafty" / STATE_DIR / "host-drain.json", {"boot_id": self.host.boot_id()})
             results = {name: self._stop(name) for name in sorted(self.config["instances"])}
         return {"draining": True, "instances": results}
 
-    def record_drain(self) -> None:
-        path = self.root / "crafty" / STATE_DIR / "host-drain.json"
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as output:
-            json.dump({"boot_id": self.host.boot_id()}, output)
-            temporary = Path(output.name)
-        temporary.replace(path)
+
+def write_durably(path: Path, value: dict) -> None:
+    """Replace a small JSON state file so that, once this returns, a power loss cannot undo it."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as output:
+        json.dump(value, output, sort_keys=True)
+        output.flush()
+        os.fsync(output.fileno())
+        temporary = Path(output.name)
+    temporary.replace(path)
+    folder = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(folder)
+    finally:
+        os.close(folder)
 
 
 # First setup: stage the reviewed server files for Crafty's "import from folder" ------------
@@ -439,6 +453,9 @@ def load_manifest(path: Path) -> dict:
     if not {"paper", "geyser", "floodgate", "multiverse-core", "multiverse-inventories"} <= names:
         raise CraftyError("manifest must include Paper, Geyser, Floodgate and Multiverse")
     for managed in manifest.get("managed_files", []):
+        # Written under sudo, so only plain relative paths inside the server folder are accepted.
+        if not re.fullmatch(r"(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*", str(managed.get("path", ""))):
+            raise CraftyError("managed file paths must be plain relative paths")
         if hashlib.sha256(_managed_file_bytes(managed)).hexdigest() != managed.get("sha256"):
             raise CraftyError("managed configuration checksum mismatch")
     if not isinstance(manifest.get("server_properties"), dict):
