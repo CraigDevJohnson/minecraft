@@ -515,6 +515,34 @@ func TestFinishStartRecordsAFailedGame(t *testing.T) {
 	}
 }
 
+func TestFinishStartEndsWithinItsStartsDeadline(t *testing.T) {
+	// The follow-up waited in Lambda's queue: it gets only what is left of the start's deadline.
+	r := finishRig(t)
+	r.launcher.Now = func() time.Time { return now.Add(startDeadline - finishMargin - 20*time.Millisecond) }
+	r.ssm.online = []bool{false}
+	if err := r.launcher.FinishStart(context.Background()); err == nil || !strings.Contains(err.Error(), "SSM") {
+		t.Fatalf("err=%v", err)
+	}
+	// One that arrives after it does nothing at all.
+	r = finishRig(t)
+	r.launcher.Now = func() time.Time { return now.Add(startDeadline) }
+	if err := r.launcher.FinishStart(context.Background()); err == nil || len(r.pointedAt) != 0 || len(r.ssm.commands) != 0 || r.session(t).Phase != Starting {
+		t.Fatalf("err=%v pointed=%v commands=%v", err, r.pointedAt, r.ssm.commands)
+	}
+}
+
+func TestAFailedFollowUpLeavesALaterStartAlone(t *testing.T) {
+	r := finishRig(t)
+	later := Session{RequestedAt: now.Add(time.Minute), Phase: Starting}
+	r.setSession(t, later)
+	if err := r.launcher.fail(context.Background(), Session{RequestedAt: now, Phase: Starting}, errors.New("late")); err == nil {
+		t.Fatal("no error")
+	}
+	if session := r.session(t); !session.RequestedAt.Equal(later.RequestedAt) || session.Phase != Starting {
+		t.Fatalf("session %+v", session)
+	}
+}
+
 func TestFinishStartGivesUpAtItsDeadline(t *testing.T) {
 	r := finishRig(t)
 	r.ssm.online = []bool{false}

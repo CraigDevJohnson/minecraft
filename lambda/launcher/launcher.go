@@ -40,6 +40,9 @@ const (
 	bootGrace = 10 * time.Minute
 	// pingAttempt bounds one status ping of the game.
 	pingAttempt = 2 * time.Second
+	// finishMargin ends a follow-up this long before its start's deadline, so it has written its last state
+	// before the start is reported failed and a Member can start again.
+	finishMargin = 30 * time.Second
 )
 
 // pollEvery is how often the follow-up run checks EC2, SSM and the remote start. Tests shorten it.
@@ -334,6 +337,21 @@ func (l *Launcher) idleStopDraining(ctx context.Context, h host) (bool, error) {
 // FinishStart does the rest of a start once EC2 has accepted it: the same steps as `minecraft_host.py start`.
 // It waits for the host, points DNS at it, waits for SSM, and asks the host's adapter to start the game.
 func (l *Launcher) FinishStart(ctx context.Context) error {
+	requested, err := l.loadSession(ctx)
+	if err != nil {
+		return err
+	}
+	if requested.Phase == Starting {
+		// A follow-up that waited in Lambda's queue still ends inside its start's deadline, so it never
+		// overwrites a retry a Member began once the start was reported failed.
+		remaining := requested.RequestedAt.Add(startDeadline - finishMargin).Sub(l.Now())
+		if remaining <= 0 {
+			return errors.New("the start passed its deadline before its follow-up ran")
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, remaining)
+		defer cancel()
+	}
 	h, err := l.waitRunning(ctx)
 	if err != nil {
 		return l.fail(ctx, Session{}, err)
@@ -378,12 +396,14 @@ func (l *Launcher) fail(ctx context.Context, session Session, cause error) error
 	// The deadline that ended the start must not also lose its record.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
+	saved, err := l.loadSession(ctx)
+	if err != nil {
+		return errors.Join(cause, err)
+	}
 	if session.RequestedAt.IsZero() {
-		saved, err := l.loadSession(ctx)
-		if err != nil {
-			return errors.Join(cause, err)
-		}
 		session = saved
+	} else if !saved.RequestedAt.Equal(session.RequestedAt) {
+		return cause // a later start owns the record now
 	}
 	session.Phase = Failed
 	session.Detail = cause.Error()
