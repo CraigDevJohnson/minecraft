@@ -398,11 +398,11 @@ class Adapter:
         try:
             source = self.server_dir(server)
             before = fingerprint(source) if source.is_dir() and not source.is_symlink() else None
-            stored = self.archive(instance, server)
             # Crafty's own UI can start the server while the archive uploads. That archive may be
             # inconsistent and the session must not be cut off, so the stop fails and is repeated.
-            if self.running(server) or fingerprint(source) != before:
-                raise CraftyError("the server changed while it was being archived; repeat the stop")
+            # The check runs before the upload gets its checksum, so it never becomes a recovery point.
+            stored = self.archive(instance, server,
+                                  settled=lambda: not self.running(server) and fingerprint(source) == before)
         except Exception:
             self.record(instance, backup="failed", boot_id=self.host.boot_id())
             raise
@@ -482,7 +482,7 @@ class Adapter:
             raise CraftyError("the archive has no recorded SHA-256")
         return value
 
-    def archive(self, instance: str, server: dict) -> dict:
+    def archive(self, instance: str, server: dict, settled=None) -> dict:
         """Cold archive of the stopped server directory, streamed to S3 and verified there.
 
         Streaming needs no second copy of the world on the data disk, and the multipart upload
@@ -517,6 +517,8 @@ class Adapter:
             head = self.host.aws(backup["region"], "s3api", "head-object", "--bucket", backup["bucket"], "--key", key)
             if head.get("ContentLength") != size:
                 raise CraftyError("S3 did not confirm the stored archive")
+            if settled is not None and not settled():
+                raise CraftyError("the server changed while it was being archived; repeat the stop")
             self.host.aws(backup["region"], "s3api", "put-object", "--bucket", backup["bucket"], "--key", f"{key}.sha256",
                           "--body", str(checksum), "--if-none-match", "*")
         except BaseException:

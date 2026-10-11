@@ -354,6 +354,7 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(crafty.CraftyError):
             adapter.host_drain()
         self.assertEqual(adapter.backup_state("family"), "failed")
+        self.assertEqual(host.stored, {})  # the doubtful upload is not left as a recovery point
 
     def test_failed_prune_keeps_the_verified_backup(self):
         api = FakeAPI(running=True)
