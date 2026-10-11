@@ -321,6 +321,23 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(kept, verified[1:])
         self.assertNotIn(verified[0], host.stored)
 
+    def test_restore_refuses_to_swap_under_a_server_started_meanwhile(self):
+        folder = self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        adapter.host_drain()
+        (folder / "level.dat").write_bytes(b"current")
+        download = host.download
+
+        def download_then_started(*arguments):
+            download(*arguments)
+            api.is_running = True
+
+        host.download = download_then_started
+        with self.assertRaises(crafty.CraftyError):
+            adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+        self.assertEqual((folder / "level.dat").read_bytes(), b"current")
+
     def test_restore_puts_the_original_folder_back_when_the_swap_fails(self):
         folder = self.played_server()
         api = FakeAPI(running=True)

@@ -29,6 +29,15 @@ findmnt --mountpoint "$data_root" >/dev/null || {
 	printf 'The retained data disk is not mounted at %s.\n' "$data_root" >&2
 	exit 1
 }
+# Nothing is written under the data root until the mount is proven to be the configured retained disk.
+(
+	# shellcheck source=/dev/null
+	source /etc/minecraft/storage.conf
+	/usr/local/sbin/minecraft-storage verify --volume-id "$DATA_VOLUME_ID" --filesystem-uuid "$DATA_FILESYSTEM_UUID" >/dev/null
+) || {
+	printf 'The filesystem at %s is not the configured retained disk.\n' "$data_root" >&2
+	exit 1
+}
 
 image="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["crafty"]["image"])' "$source_dir/runtime/crafty/server.json")"
 [[ "$image" =~ ^registry\.gitlab\.com/crafty-controller/crafty-4@sha256:[0-9a-f]{64}$ ]] || {
@@ -81,6 +90,7 @@ chmod 0755 /usr/local/sbin/minecraft-instance
 # Stopping the unit (including an EC2 stop without the operator's drain) archives first. The
 # containers always stop afterwards, but a failed drain or a failed container stop fails the unit, so it
 # shows in the journal and a container left running is never reported as a clean stop.
+# The stop timeout covers the adapter's own limits: 300 seconds for the server to stop and 1800 for the upload.
 # Every start re-verifies the retained disk, so Compose can never create a blank Crafty on the root disk.
 cat >/etc/systemd/system/minecraft-crafty.service <<'UNIT'
 [Unit]
@@ -97,7 +107,7 @@ ExecStartPre=/usr/local/sbin/minecraft-storage verify --volume-id $DATA_VOLUME_I
 ExecStart=/usr/bin/docker compose -f /opt/minecraft-crafty/compose.yaml up --detach --wait
 ExecStop=/bin/sh -c '/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json host-drain; drained=$$?; /usr/bin/docker compose -f /opt/minecraft-crafty/compose.yaml stop; stopped=$$?; [ $$drained -eq 0 ] || exit $$drained; exit $$stopped'
 TimeoutStartSec=600
-TimeoutStopSec=900
+TimeoutStopSec=2400
 
 [Install]
 WantedBy=multi-user.target

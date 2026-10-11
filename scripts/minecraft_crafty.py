@@ -453,6 +453,9 @@ class Adapter:
                 restored = work / "files" / instance
                 if digest != expected or not restored.is_dir() or restored.is_symlink():
                     raise CraftyError("the archive does not match its recorded SHA-256")
+                # Crafty's own UI could have started the server while the archive unpacked.
+                if self.running(server):
+                    raise CraftyError("the server was started during the restore; stop it and restore again")
                 replaced = None
                 if target.exists():
                     replaced = staging / f"replaced-{instance}-{self.host.now().strftime('%Y%m%dT%H%M%SZ')}"
