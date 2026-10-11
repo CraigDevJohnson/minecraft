@@ -21,6 +21,10 @@ command -v aws >/dev/null || {
 	printf 'AWS CLI v2 is required for S3 archives; run scripts/install_aws_cli.sh first.\n' >&2
 	exit 1
 }
+[[ -x /usr/local/sbin/minecraft-storage && -f /etc/minecraft/storage.conf ]] || {
+	printf 'The host storage verifier is missing; run the host bootstrap first.\n' >&2
+	exit 1
+}
 findmnt --mountpoint "$data_root" >/dev/null || {
 	printf 'The retained data disk is not mounted at %s.\n' "$data_root" >&2
 	exit 1
@@ -74,7 +78,9 @@ exec /usr/bin/python3 -B /opt/minecraft-crafty/scripts/minecraft_crafty.py "$@"
 LAUNCHER
 chmod 0755 /usr/local/sbin/minecraft-instance
 
-# Stopping the unit (including an EC2 stop without the operator's drain) archives first.
+# Stopping the unit (including an EC2 stop without the operator's drain) archives first. The
+# containers always stop afterwards, but a failed drain still fails the unit so it shows in the journal.
+# Every start re-verifies the retained disk, so Compose can never create a blank Crafty on the root disk.
 cat >/etc/systemd/system/minecraft-crafty.service <<'UNIT'
 [Unit]
 Description=Crafty Controller for the family Minecraft server
@@ -85,9 +91,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+EnvironmentFile=/etc/minecraft/storage.conf
+ExecStartPre=/usr/local/sbin/minecraft-storage verify --volume-id $DATA_VOLUME_ID --filesystem-uuid $DATA_FILESYSTEM_UUID
 ExecStart=/usr/bin/docker compose -f /opt/minecraft-crafty/compose.yaml up --detach --wait
-ExecStop=-/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json host-drain
-ExecStop=/usr/bin/docker compose -f /opt/minecraft-crafty/compose.yaml stop
+ExecStop=/bin/sh -c '/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json host-drain; drained=$$?; /usr/bin/docker compose -f /opt/minecraft-crafty/compose.yaml stop; exit $$drained'
 TimeoutStartSec=600
 TimeoutStopSec=900
 

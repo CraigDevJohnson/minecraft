@@ -92,7 +92,7 @@ python3 scripts/minecraft_host.py --deployment operator-config/family/deployment
 python3 scripts/minecraft_host.py --deployment operator-config/family/deployment.json stop
 ```
 
-`start` starts EC2, updates DNS, and asks Crafty to start the server, waiting until the Java port answers. `stop` asks Crafty to stop the server, archives the stopped server folder to `s3://<bucket>/instances/family/crafty/<UTC time>.tar.gz`, verifies the stored size and SHA-256, keeps the newest 14 archives, then stops EC2 and parks DNS. If the archive fails, EC2 is not stopped. Stopping the host any other way still runs the same drain from `minecraft-crafty.service`.
+`start` starts EC2, updates DNS, and asks Crafty to start the server, waiting until the Java port answers. `stop` asks Crafty to stop the server, streams an archive of the stopped server folder to `s3://<bucket>/instances/family/crafty/<UTC time>.tar.gz` (no second copy on the data disk and no 5 GB limit), verifies the stored size, writes its SHA-256 beside it as `<UTC time>.tar.gz.sha256`, keeps the newest 14 archives, then stops EC2 and parks DNS. If the archive fails, EC2 is not stopped. Once a stop has begun, `start` is refused until the host has been stopped and started again, so a stop can never race a new session. Stopping the host any other way still runs the same drain from `minecraft-crafty.service`; if that drain fails, the unit is marked failed in the journal.
 
 ## Acceptance
 

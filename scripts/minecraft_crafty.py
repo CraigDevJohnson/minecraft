@@ -10,12 +10,15 @@ server, then makes a cold archive of the stopped server directory and stores it 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import ssl
 import subprocess
@@ -132,6 +135,51 @@ class Host:
             raise CraftyError(f"AWS {arguments[1]} failed")
         return json.loads(result.stdout) if result.stdout.strip() else {}
 
+    def upload(self, region: str, bucket: str, key: str, expected_size: int, write) -> None:
+        """Stream an object to S3. `aws s3 cp -` uses multipart upload, so archives may exceed 5 GB."""
+        command = ["aws", "--region", region, "--no-cli-pager", "s3", "cp", "-", f"s3://{bucket}/{key}",
+                   "--only-show-errors", "--expected-size", str(expected_size)]
+        try:
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            raise CraftyError("AWS upload could not run") from exc
+        try:
+            write(process.stdin)
+            process.stdin.close()
+            code = process.wait(timeout=1800)
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+        if code:
+            raise CraftyError("AWS upload failed")
+
+    @contextlib.contextmanager
+    def lock(self, path: Path):
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with open(os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), "w") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise CraftyError("another lifecycle command is running; retry when it finishes") from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+class _Counted:
+    """Write-through sink that measures and hashes the archive as it streams to S3."""
+
+    def __init__(self, sink):
+        self.sink, self.size, self.digest = sink, 0, hashlib.sha256()
+
+    def write(self, data: bytes) -> int:
+        self.sink.write(data)
+        self.size += len(data)
+        self.digest.update(data)
+        return len(data)
+
 
 class Adapter:
     def __init__(self, config: dict, api, host=None):
@@ -189,6 +237,21 @@ class Adapter:
             temporary = Path(output.name)
         temporary.replace(path)
 
+    # Drain barrier: once a drain starts, no session may start again until the host reboots,
+    # so a caller that drained can stop EC2 without racing a new start.
+
+    def draining(self) -> bool:
+        try:
+            state = json.loads((self.root / "crafty" / STATE_DIR / "host-drain.json").read_text())
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError):
+            return True
+        return not isinstance(state, dict) or state.get("boot_id") == self.host.boot_id()
+
+    def lifecycle(self):
+        return self.host.lock(self.root / "crafty" / STATE_DIR / "lifecycle.lock")
+
     # Lifecycle ------------------------------------------------------------------------------
 
     def wait(self, predicate, seconds: int, failure: str) -> None:
@@ -214,6 +277,12 @@ class Adapter:
             return False
 
     def start(self, instance: str) -> dict:
+        with self.lifecycle():
+            if self.draining():
+                raise CraftyError("host is draining; finish stopping the host before starting another session")
+            return self._start(instance)
+
+    def _start(self, instance: str) -> dict:
         # Right after an EC2 start, Crafty's container may still be booting.
         self.wait(self.api_ready, self.timeouts["start"], "Crafty's API did not come up; check minecraft-crafty.service")
         server = self.server(instance)
@@ -227,6 +296,10 @@ class Adapter:
         return {**self.status(instance), "storage": self.host.storage(str(self.root))}
 
     def stop(self, instance: str) -> dict:
+        with self.lifecycle():
+            return self._stop(instance)
+
+    def _stop(self, instance: str) -> dict:
         server = self.server(instance)
         port = self.config["instances"][instance]["java_port"]
         if self.running(server):
@@ -236,15 +309,19 @@ class Adapter:
         # Always archive: the server may also have been started and stopped from the Crafty UI,
         # so the only safe evidence that the latest play is stored is a fresh archive.
         try:
-            key = self.archive(instance, server)
+            stored = self.archive(instance, server)
         except Exception:
             self.record(instance, backup="failed", boot_id=self.host.boot_id())
             raise
-        self.record(instance, backup="complete", key=key, boot_id=self.host.boot_id())
+        self.record(instance, backup="complete", **stored, boot_id=self.host.boot_id())
         return {"instance": instance, "application": "stopped", "backup": "complete"}
 
-    def archive(self, instance: str, server: dict) -> str:
-        """Cold archive of the stopped server directory, stored once and verified in S3."""
+    def archive(self, instance: str, server: dict) -> dict:
+        """Cold archive of the stopped server directory, streamed to S3 and verified there.
+
+        Streaming needs no second copy of the world on the data disk, and the multipart upload
+        has no 5 GB limit. The SHA-256 is stored beside the archive as `<key>.sha256`.
+        """
         source = self.server_dir(server)
         if not source.is_dir() or source.is_symlink():
             raise CraftyError("the Crafty server directory is missing")
@@ -252,42 +329,63 @@ class Adapter:
         stamp = self.host.now().strftime("%Y%m%dT%H%M%SZ")
         prefix = f"instances/{instance}/crafty/"
         key = f"{prefix}{stamp}.tar.gz"
+        existing = self.host.aws(backup["region"], "s3api", "list-objects-v2", "--bucket", backup["bucket"], "--prefix", key)
+        if existing.get("Contents"):
+            raise CraftyError("an archive with this timestamp already exists; retry the stop")
+        expected = sum(entry.stat(follow_symlinks=False).st_size for entry in source.rglob("*"))
+        counted = {}
+
+        def write(sink) -> None:
+            counted["sink"] = _Counted(sink)
+            with tarfile.open(fileobj=counted["sink"], mode="w|gz") as bundle:
+                bundle.add(source, arcname=instance)
+
+        self.host.upload(backup["region"], backup["bucket"], key, max(expected, 1), write)
+        size, digest = counted["sink"].size, counted["sink"].digest.hexdigest()
+        head = self.host.aws(backup["region"], "s3api", "head-object", "--bucket", backup["bucket"], "--key", key)
+        if head.get("ContentLength") != size:
+            raise CraftyError("S3 did not confirm the stored archive")
         staging = self.root / "crafty" / "staging"
         staging.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=staging, suffix=".tar.gz", delete=False) as output:
-            archive = Path(output.name)
+        with tempfile.NamedTemporaryFile("w", dir=staging, suffix=".sha256", delete=False) as output:
+            output.write(f"{digest}  {stamp}.tar.gz\n")
+            checksum = Path(output.name)
         try:
-            with tarfile.open(archive, "w:gz") as bundle:
-                bundle.add(source, arcname=instance)
-            with archive.open("rb") as stored:
-                digest = hashlib.file_digest(stored, "sha256").hexdigest()
-            size = archive.stat().st_size
-            self.host.aws(backup["region"], "s3api", "put-object", "--bucket", backup["bucket"], "--key", key,
-                          "--body", str(archive), "--if-none-match", "*", "--checksum-algorithm", "SHA256",
-                          "--metadata", f"sha256={digest}")
-            head = self.host.aws(backup["region"], "s3api", "head-object", "--bucket", backup["bucket"], "--key", key)
-            if head.get("ContentLength") != size or head.get("Metadata", {}).get("sha256") != digest:
-                raise CraftyError("S3 did not confirm the stored archive")
+            self.host.aws(backup["region"], "s3api", "put-object", "--bucket", backup["bucket"], "--key", f"{key}.sha256",
+                          "--body", str(checksum), "--if-none-match", "*")
         finally:
-            archive.unlink(missing_ok=True)
-        self.prune(backup, prefix)
-        return key
+            checksum.unlink(missing_ok=True)
+        try:
+            self.prune(backup, prefix)
+        except CraftyError as exc:
+            # The new archive is stored and verified; old-archive cleanup retries on the next stop.
+            print(f"warning: could not prune old archives: {exc}", file=sys.stderr)
+        return {"key": key, "sha256": digest}
 
     def prune(self, backup: dict, prefix: str) -> None:
         listing = self.host.aws(backup["region"], "s3api", "list-objects-v2", "--bucket", backup["bucket"], "--prefix", prefix)
         keys = sorted(item["Key"] for item in listing.get("Contents", []) if re.fullmatch(re.escape(prefix) + r"[0-9]{8}T[0-9]{6}Z\.tar\.gz", item.get("Key", "")))
         for key in keys[:-KEEP_ARCHIVES]:
             self.host.aws(backup["region"], "s3api", "delete-object", "--bucket", backup["bucket"], "--key", key)
+            self.host.aws(backup["region"], "s3api", "delete-object", "--bucket", backup["bucket"], "--key", f"{key}.sha256")
 
     def host_status(self) -> dict:
-        return {"draining": False, "instances": {name: self.status(name) for name in self.config["instances"]},
+        return {"draining": self.draining(), "instances": {name: self.status(name) for name in self.config["instances"]},
                 "storage": self.host.storage(str(self.root))}
 
     def host_drain(self) -> dict:
-        results = {}
-        for name in sorted(self.config["instances"]):
-            results[name] = self.stop(name)
+        with self.lifecycle():
+            self.record_drain()
+            results = {name: self._stop(name) for name in sorted(self.config["instances"])}
         return {"draining": True, "instances": results}
+
+    def record_drain(self) -> None:
+        path = self.root / "crafty" / STATE_DIR / "host-drain.json"
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as output:
+            json.dump({"boot_id": self.host.boot_id()}, output)
+            temporary = Path(output.name)
+        temporary.replace(path)
 
 
 # First setup: stage the reviewed server files for Crafty's "import from folder" ------------
@@ -353,17 +451,25 @@ def stage_import(manifest: dict, destination: Path, *, fetch=download) -> Path:
     destination = Path(destination)
     if destination.exists():
         raise CraftyError("the import folder already exists; remove it after a completed import")
-    destination.mkdir(parents=True)
-    (destination / "plugins").mkdir()
-    for artifact in manifest["artifacts"]:
-        fetch(artifact["url"], artifact["sha256"], destination / artifact["path"])
-    for managed in manifest.get("managed_files", []):
-        target = destination / managed["path"]
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(_managed_file_bytes(managed))
-    (destination / "server.properties").write_bytes(render_properties(manifest["server_properties"]))
-    # Craig accepted the Minecraft EULA for this family server on issue #5.
-    (destination / "eula.txt").write_text("eula=true\n")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    # Build beside the destination and rename on success, so a failed download leaves nothing to clean up.
+    partial = Path(tempfile.mkdtemp(prefix=f".{destination.name}.partial-", dir=destination.parent))
+    try:
+        (partial / "plugins").mkdir()
+        for artifact in manifest["artifacts"]:
+            fetch(artifact["url"], artifact["sha256"], partial / artifact["path"])
+        for managed in manifest.get("managed_files", []):
+            target = partial / managed["path"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(_managed_file_bytes(managed))
+        (partial / "server.properties").write_bytes(render_properties(manifest["server_properties"]))
+        # Craig accepted the Minecraft EULA for this family server on issue #5.
+        (partial / "eula.txt").write_text("eula=true\n")
+        partial.chmod(0o755)
+        partial.rename(destination)
+    except BaseException:
+        shutil.rmtree(partial, ignore_errors=True)
+        raise
     return destination
 
 

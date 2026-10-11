@@ -3,10 +3,13 @@ import datetime
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
+import tarfile
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -73,8 +76,19 @@ class FakeHost:
     def port_open(self, port):
         return self.api.is_running
 
+    boot = "boot-1"
+
     def boot_id(self):
-        return "boot-1"
+        return self.boot
+
+    def lock(self, path):
+        return contextlib.nullcontext()
+
+    def upload(self, region, bucket, key, expected_size, write):
+        self.calls.append(("s3", "cp", key))
+        sink = io.BytesIO()
+        write(sink)
+        self.stored[key] = sink.getvalue()
 
     def storage(self, root):
         return {"size_bytes": 100, "available_bytes": 60, "used_percent": 40}
@@ -88,12 +102,12 @@ class FakeHost:
             self.stored[key] = body
             return {}
         if operation == "head-object":
-            body = self.stored[key]
-            return {"ContentLength": len(body), "Metadata": {"sha256": hashlib.sha256(body).hexdigest()}}
+            return {"ContentLength": len(self.stored[key])}
         if operation == "list-objects-v2":
-            return {"Contents": [{"Key": key} for key in self.stored]}
+            prefix = arguments[arguments.index("--prefix") + 1]
+            return {"Contents": [{"Key": key} for key in self.stored if key.startswith(prefix)]}
         if operation == "delete-object":
-            del self.stored[key]
+            self.stored.pop(key, None)
             return {}
         raise AssertionError(operation)
 
@@ -156,11 +170,44 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(api.actions, ["stop_server"])
         self.assertEqual(result, {"draining": True, "instances": {"family": {"instance": "family", "application": "stopped", "backup": "complete"}}})
         key = "instances/family/crafty/20261010T180000Z.tar.gz"
-        self.assertIn(key, host.stored)
+        self.assertIn(("s3", "cp", key), host.calls)
+        digest = hashlib.sha256(host.stored[key]).hexdigest()
+        self.assertEqual(host.stored[f"{key}.sha256"], f"{digest}  20261010T180000Z.tar.gz\n".encode())
         put = next(call for call in host.calls if call[1] == "put-object")
         self.assertIn("--if-none-match", put)
-        self.assertEqual(json.loads((self.root / "crafty" / "state" / "family.json").read_text())["key"], key)
+        state = json.loads((self.root / "crafty" / "state" / "family.json").read_text())
+        self.assertEqual((state["key"], state["sha256"]), (key, digest))
         self.assertFalse(any((self.root / "crafty" / "staging").iterdir()))
+        with tarfile.open(fileobj=io.BytesIO(host.stored[key])) as bundle:
+            self.assertEqual(bundle.extractfile("family/survival/level.dat").read(), b"world")
+
+    def test_drain_blocks_starts_until_the_host_reboots(self):
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        adapter.host_drain()
+        self.assertTrue(adapter.host_status()["draining"])
+        with self.assertRaises(crafty.CraftyError):
+            adapter.start("family")
+        self.assertEqual(api.actions, ["stop_server"])
+        host.boot = "boot-2"
+        self.assertFalse(adapter.host_status()["draining"])
+        self.assertTrue(adapter.start("family")["ready"])
+
+    def test_failed_prune_keeps_the_verified_backup(self):
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        original = host.aws
+
+        def aws(region, *arguments):
+            if arguments[1] == "list-objects-v2" and arguments[arguments.index("--prefix") + 1].endswith("/"):
+                raise crafty.CraftyError("AWS list-objects-v2 failed")
+            return original(region, *arguments)
+
+        host.aws = aws
+        with contextlib.redirect_stderr(io.StringIO()):
+            result = adapter.host_drain()
+        self.assertEqual(result["instances"]["family"]["backup"], "complete")
+        self.assertEqual(adapter.backup_state("family"), "complete")
 
     def test_failed_upload_records_a_failed_backup(self):
         api = FakeAPI(running=True)
@@ -184,10 +231,12 @@ class AdapterTests(unittest.TestCase):
         prefix = "instances/family/crafty/"
         for day in range(1, 20):
             host.stored[f"{prefix}202609{day:02d}T000000Z.tar.gz"] = b"x"
+            host.stored[f"{prefix}202609{day:02d}T000000Z.tar.gz.sha256"] = b"x"
         host.stored[f"{prefix}notes.txt"] = b"keep"
         adapter.prune(config(self.root)["backup"], prefix)
         kept = sorted(host.stored)
-        self.assertEqual(len(kept), crafty.KEEP_ARCHIVES + 1)
+        self.assertEqual(len(kept), 2 * crafty.KEEP_ARCHIVES + 1)
+        self.assertNotIn(f"{prefix}20260901T000000Z.tar.gz.sha256", kept)
         self.assertIn(f"{prefix}notes.txt", kept)
         self.assertIn(f"{prefix}20260919T000000Z.tar.gz", kept)
         self.assertNotIn(f"{prefix}20260901T000000Z.tar.gz", kept)
@@ -205,6 +254,30 @@ class AdapterTests(unittest.TestCase):
         result = adapter.host_status()
         self.assertEqual(result["draining"], False)
         self.assertEqual(result["instances"]["family"], {"instance": "family", "application": "stopped", "backup": "not-required", "ready": False})
+
+
+class HostTests(unittest.TestCase):
+    def test_lifecycle_lock_refuses_a_second_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state" / "lifecycle.lock"
+            host = crafty.Host()
+            with host.lock(path):
+                with self.assertRaises(crafty.CraftyError):
+                    with host.lock(path):
+                        pass
+            with host.lock(path):
+                pass
+
+    def test_upload_streams_to_the_aws_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory) / "aws"
+            received = Path(directory) / "received"
+            fake.write_text(f"#!/bin/sh\necho \"$@\" > {received}.args\ncat > {received}\n")
+            fake.chmod(0o755)
+            with unittest.mock.patch.dict(os.environ, {"PATH": f"{directory}:{os.environ['PATH']}"}):
+                crafty.Host().upload("us-west-2", "bucket", "a/b.tar.gz", 5, lambda sink: sink.write(b"hello"))
+            self.assertEqual(received.read_bytes(), b"hello")
+            self.assertIn("s3 cp - s3://bucket/a/b.tar.gz", Path(f"{received}.args").read_text())
 
 
 class ConfigTests(unittest.TestCase):
@@ -280,6 +353,18 @@ class ManifestTests(unittest.TestCase):
             self.assertTrue((destination / "plugins" / "Geyser-Spigot" / "config.yml").is_file())
             with self.assertRaises(crafty.CraftyError):
                 crafty.stage_import(manifest, destination, fetch=fetch)
+
+    def test_failed_stage_import_leaves_nothing_behind(self):
+        manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
+
+        def fetch(url, sha256, target):
+            raise crafty.CraftyError("download failed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "family"
+            with self.assertRaises(crafty.CraftyError):
+                crafty.stage_import(manifest, destination, fetch=fetch)
+            self.assertEqual(list(Path(directory).iterdir()), [])
 
 
 if __name__ == "__main__":
