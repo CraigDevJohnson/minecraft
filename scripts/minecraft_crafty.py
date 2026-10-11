@@ -111,9 +111,12 @@ class Host:
         return datetime.datetime.now(datetime.timezone.utc)
 
     def port_open(self, port: int) -> bool:
+        """Whether a Minecraft server answers on the port. Docker's port proxy accepts connections
+        for a stopped server and then closes them, so a bare connect proves nothing."""
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=3):
-                return True
+            with socket.create_connection(("127.0.0.1", port), timeout=3) as connection:
+                connection.sendall(b"\xfe\x01")  # legacy server-list ping; any server replies with a kick packet
+                return connection.recv(1) != b""
         except OSError:
             return False
 

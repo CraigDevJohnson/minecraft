@@ -3,6 +3,8 @@ import datetime
 import hashlib
 import io
 import json
+import socket
+import threading
 from pathlib import Path
 import sys
 import tempfile
@@ -343,6 +345,28 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaises(crafty.CraftyError):
                 adapter.import_server("family", "../family.zip", 5)
             self.assertEqual(api.created, [])
+
+
+class HostPortTests(unittest.TestCase):
+    def answer(self, reply: bytes) -> bool:
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            def serve():
+                connection, _ = listener.accept()
+                with connection:
+                    connection.recv(16)
+                    connection.sendall(reply)
+            thread = threading.Thread(target=serve)
+            thread.start()
+            try:
+                return crafty.Host().port_open(listener.getsockname()[1])
+            finally:
+                thread.join()
+
+    def test_a_server_that_answers_the_ping_is_open(self):
+        self.assertTrue(self.answer(b"\xff\x00"))
+
+    def test_a_proxy_that_accepts_and_closes_is_not_open(self):
+        self.assertFalse(self.answer(b""))
 
 
 if __name__ == "__main__":
