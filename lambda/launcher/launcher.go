@@ -15,6 +15,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/aws/smithy-go"
 )
 
 // The states the Launcher page understands (the-lobby docs/minecraft-backend.md).
@@ -171,18 +172,17 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 			return l.answer(Unknown, Session{}), false, err
 		}
 		if _, err := l.EC2.StartInstances(ctx, &ec2.StartInstancesInput{InstanceIds: []string{l.Config.HostID}}); err != nil {
-			// Two Members starting at once both see the host stopped, and EC2 refuses the second because the
-			// first already moved it on. Or EC2 accepted this start and its answer was lost. Either way the host is
-			// on its way, so the start stands and gets a follow-up: a second one repeats harmlessly.
-			if h, describeErr := l.describeHost(ctx); describeErr == nil &&
-				(h.state == ec2types.InstanceStateNamePending || h.state == ec2types.InstanceStateNameRunning) {
-				return l.answer(Starting, session), true, l.followUp(ctx)
+			// Only EC2's own answer refusing this start is final. IncorrectInstanceState means another Member's
+			// start moved the host on first, and an error without EC2's answer may hide an accepted start. In both
+			// the start stands and gets a follow-up, which repeats harmlessly or fails at the start's deadline.
+			var refused smithy.APIError
+			if errors.As(err, &refused) && refused.ErrorCode() != "IncorrectInstanceState" {
+				_ = l.saveSession(ctx, Session{RequestedAt: now, Phase: Failed, Detail: "EC2 refused the start"})
+				return l.answer(Unknown, Session{}), false, fmt.Errorf("start host: %w", err)
 			}
-			_ = l.saveSession(ctx, Session{RequestedAt: now, Phase: Failed, Detail: "EC2 refused the start"})
-			return l.answer(Unknown, Session{}), false, fmt.Errorf("start host: %w", err)
 		}
 		return l.answer(Starting, session), true, l.followUp(ctx)
-	case ec2types.InstanceStateNameRunning:
+	case ec2types.InstanceStateNameRunning, ec2types.InstanceStateNamePending:
 		state, err := l.decide(ctx, h, session)
 		if err != nil {
 			return l.answer(Unknown, l.current(h, session)), false, err
@@ -190,14 +190,14 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 		if state != Failed {
 			return l.answer(state, l.current(h, session)), false, nil
 		}
-		// The host runs but this function's start failed: try the game again on the same host.
+		// The host runs, or is still pending, but this function's start failed: try again on the same run.
 		session = Session{RequestedAt: now, LaunchTime: h.launchTime, Phase: Starting}
 		if err := l.saveSession(ctx, session); err != nil {
 			return l.answer(Unknown, Session{}), false, err
 		}
 		return l.answer(Starting, session), true, l.followUp(ctx)
 	default:
-		// Pending, stopping and anything else: someone else's transition is under way.
+		// Stopping and anything else: someone else's transition is under way.
 		state, err := l.decide(ctx, h, session)
 		if err != nil {
 			return l.answer(Unknown, l.current(h, session)), false, err
@@ -218,6 +218,11 @@ func (l *Launcher) followUp(ctx context.Context) error {
 func (l *Launcher) decide(ctx context.Context, h host, session Session) (string, error) {
 	switch h.state {
 	case ec2types.InstanceStateNamePending:
+		// A start of ours that failed or ran out of time stays failed even while EC2 is stuck pending.
+		if session, ok := l.sessionFor(h, session); ok && (session.Phase == Failed ||
+			session.Phase == Starting && l.Now().UTC().Sub(session.RequestedAt) >= startDeadline) {
+			return Failed, nil
+		}
 		return Starting, nil
 	case ec2types.InstanceStateNameStopping, ec2types.InstanceStateNameShuttingDown:
 		return Stopping, nil
@@ -402,8 +407,8 @@ func (l *Launcher) fail(ctx context.Context, session Session, cause error) error
 	}
 	if session.RequestedAt.IsZero() {
 		session = saved
-	} else if !saved.RequestedAt.Equal(session.RequestedAt) {
-		return cause // a later start owns the record now
+	} else if !saved.RequestedAt.Equal(session.RequestedAt) || saved.Phase == Ready {
+		return cause // a later start owns the record now, or a repeated follow-up already finished this one
 	}
 	session.Phase = Failed
 	session.Detail = cause.Error()

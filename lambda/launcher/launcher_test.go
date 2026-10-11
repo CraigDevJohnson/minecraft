@@ -14,6 +14,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/aws/smithy-go"
 )
 
 const (
@@ -371,7 +372,7 @@ func TestStartRecordsBeforeEC2(t *testing.T) {
 
 func TestStartRefusedByEC2IsRecordedFailed(t *testing.T) {
 	r := newRig(ec2types.InstanceStateNameStopped, 0)
-	r.ec2.startErr = errors.New("insufficient capacity")
+	r.ec2.startErr = &smithy.GenericAPIError{Code: "InsufficientInstanceCapacity"}
 	status, started, err := r.launcher.Start(context.Background())
 	if err == nil || started || status.State != Unknown || r.followUps != 0 {
 		t.Fatalf("state=%s started=%v err=%v", status.State, started, err)
@@ -386,7 +387,7 @@ func TestASecondStartRefusedBecauseTheFirstWonKeepsTheStart(t *testing.T) {
 	r := newRig(ec2types.InstanceStateNameStopped, 0)
 	r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameStopped, ec2types.InstanceStateNamePending}
 	r.ec2.launch = now
-	r.ec2.startErr = errors.New("IncorrectInstanceState")
+	r.ec2.startErr = &smithy.GenericAPIError{Code: "IncorrectInstanceState"}
 	status, started, err := r.launcher.Start(context.Background())
 	// The start stands. Its follow-up is handed off again, since EC2 may have accepted this start and lost
 	// the answer; a second follow-up repeats harmlessly.
@@ -395,6 +396,33 @@ func TestASecondStartRefusedBecauseTheFirstWonKeepsTheStart(t *testing.T) {
 	}
 	if session := r.session(t); session.Phase != Starting {
 		t.Fatalf("session %+v", session)
+	}
+}
+
+func TestAStartWhoseAnswerWasLostStands(t *testing.T) {
+	// No answer from EC2, and a description that may still be stale: the start may have been accepted.
+	r := newRig(ec2types.InstanceStateNameStopped, 0)
+	r.ec2.startErr = errors.New("connection reset")
+	status, started, err := r.launcher.Start(context.Background())
+	if err != nil || !started || status.State != Starting || r.followUps != 1 || r.session(t).Phase != Starting {
+		t.Fatalf("state=%s started=%v err=%v followUps=%d", status.State, started, err, r.followUps)
+	}
+}
+
+func TestAStartStuckPendingFailsAndCanBeRetried(t *testing.T) {
+	r := newRig(ec2types.InstanceStateNamePending, 16*time.Minute)
+	r.setSession(t, Session{RequestedAt: now.Add(-16 * time.Minute), Phase: Starting})
+	if status, err := r.launcher.Status(context.Background()); err != nil || status.State != Failed {
+		t.Fatalf("state=%s err=%v", status.State, err)
+	}
+	status, started, err := r.launcher.Start(context.Background())
+	if err != nil || !started || status.State != Starting || r.followUps != 1 || r.ec2.starts != 0 {
+		t.Fatalf("state=%s started=%v err=%v followUps=%d starts=%d", status.State, started, err, r.followUps, r.ec2.starts)
+	}
+	// Someone else's pending host is still just starting.
+	r = newRig(ec2types.InstanceStateNamePending, 16*time.Minute)
+	if status, _ := r.launcher.Status(context.Background()); status.State != Starting {
+		t.Fatalf("state=%s", status.State)
 	}
 }
 
@@ -539,6 +567,18 @@ func TestAFailedFollowUpLeavesALaterStartAlone(t *testing.T) {
 		t.Fatal("no error")
 	}
 	if session := r.session(t); !session.RequestedAt.Equal(later.RequestedAt) || session.Phase != Starting {
+		t.Fatalf("session %+v", session)
+	}
+}
+
+func TestARepeatedFollowUpLeavesAFinishedStartReady(t *testing.T) {
+	r := finishRig(t)
+	finished := Session{RequestedAt: now, LaunchTime: now.Add(30 * time.Second), Phase: Ready, DNS: "current"}
+	r.setSession(t, finished)
+	if err := r.launcher.fail(context.Background(), Session{RequestedAt: now, Phase: Starting, DNS: "failed"}, errors.New("lock held")); err == nil {
+		t.Fatal("no error")
+	}
+	if session := r.session(t); session != finished {
 		t.Fatalf("session %+v", session)
 	}
 }

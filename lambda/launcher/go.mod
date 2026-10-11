@@ -9,6 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.4
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.112.1
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.79.3
+	github.com/aws/smithy-go v1.28.5
 	github.com/awslabs/aws-lambda-go-api-proxy v0.16.2
 )
 
@@ -25,5 +26,4 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.38.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.4 // indirect
-	github.com/aws/smithy-go v1.28.5 // indirect
 )
