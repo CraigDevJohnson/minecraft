@@ -26,6 +26,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from minecraft_content import _managed_file_bytes  # noqa: E402  (canonical Geyser config bytes)
@@ -83,9 +84,13 @@ class CraftyAPI:
         context.verify_mode = ssl.CERT_NONE
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
 
-    def request(self, method: str, path: str) -> dict:
-        request = urllib.request.Request(self.base_url + path, method=method, data=b"" if method == "POST" else None,
-                                         headers={"Authorization": f"Bearer {self.token}"})
+    def request(self, method: str, path: str, body: dict | None = None) -> dict:
+        headers = {"Authorization": f"Bearer {self.token}"}
+        data = b"" if method == "POST" else None
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(self.base_url + path, method=method, data=data, headers=headers)
         try:
             with self.opener.open(request, timeout=30) as response:
                 body = json.loads(response.read())
@@ -106,9 +111,12 @@ class Host:
         return datetime.datetime.now(datetime.timezone.utc)
 
     def port_open(self, port: int) -> bool:
+        """Whether a Minecraft server answers on the port. Docker's port proxy accepts connections
+        for a stopped server and then closes them, so a bare connect proves nothing."""
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=3):
-                return True
+            with socket.create_connection(("127.0.0.1", port), timeout=3) as connection:
+                connection.sendall(b"\xfe\x01")  # legacy server-list ping; any server replies with a kick packet
+                return connection.recv(1) != b""
         except OSError:
             return False
 
@@ -165,6 +173,29 @@ class Adapter:
 
     def action(self, server: dict, action: str) -> None:
         self.api.request("POST", f"/api/v2/servers/{server['server_id']}/action/{action}")
+
+    def import_server(self, instance: str, archive_name: str, max_memory_gb: int) -> dict:
+        """Create the Crafty server from an archive in Crafty's import/upload folder (Crafty 4.11 imports only archives)."""
+        settings = self.config["instances"][instance]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.zip", archive_name):
+            raise CraftyError("archive name must be a plain .zip file name in Crafty's import/upload folder")
+        if type(max_memory_gb) is not int or not 1 <= max_memory_gb <= 64:
+            raise CraftyError("maximum memory must be a whole number of GB from 1 through 64")
+        servers = self.api.request("GET", "/api/v2/servers").get("data")
+        if any(isinstance(server, dict) and server.get("server_name") == settings["server_name"] for server in servers or []):
+            raise CraftyError(f"Crafty already has a server named {settings['server_name']}")
+        created = self.api.request("POST", "/api/v2/servers", {
+            "name": settings["server_name"], "roles": [], "monitoring_type": "minecraft_java",
+            "minecraft_java_monitoring_data": {"host": "127.0.0.1", "port": settings["java_port"]},
+            "create_type": "minecraft_java",
+            "minecraft_java_create_data": {"create_type": "import_server", "import_server_create_data": {
+                "archive_name": archive_name, "archive_internal_path": "", "jarfile": "paper.jar",
+                "mem_min": 1, "mem_max": max_memory_gb, "server_properties_port": settings["java_port"]}},
+        }).get("data")
+        server_id = created.get("new_server_id") if isinstance(created, dict) else None
+        if not UUID.fullmatch(str(server_id)):
+            raise CraftyError("Crafty did not report the new server")
+        return {"instance": instance, "server_id": server_id}
 
     # Recorded backup state ------------------------------------------------------------------
 
@@ -348,11 +379,11 @@ def render_properties(values: dict) -> bytes:
     return "".join(lines).encode()
 
 
-def stage_import(manifest: dict, destination: Path, *, fetch=download) -> Path:
-    """Write the server folder Crafty imports. Refuses to touch an existing folder."""
+def stage_import(manifest: dict, destination: Path, *, fetch=download, archive: Path | None = None) -> Path:
+    """Write the server folder, and optionally the archive Crafty imports. Refuses to touch existing ones."""
     destination = Path(destination)
-    if destination.exists():
-        raise CraftyError("the import folder already exists; remove it after a completed import")
+    if destination.exists() or (archive is not None and os.path.lexists(archive)):
+        raise CraftyError("the import folder or archive already exists; remove it after a completed import")
     destination.mkdir(parents=True)
     (destination / "plugins").mkdir()
     for artifact in manifest["artifacts"]:
@@ -362,8 +393,27 @@ def stage_import(manifest: dict, destination: Path, *, fetch=download) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(_managed_file_bytes(managed))
     (destination / "server.properties").write_bytes(render_properties(manifest["server_properties"]))
-    # Craig accepted the Minecraft EULA for this family server on issue #5.
-    (destination / "eula.txt").write_text("eula=true\n")
+    # Craig accepted the Minecraft EULA for this family server on issue #5. No trailing newline:
+    # Crafty 4.11 compares the first line exactly and silently refuses to start otherwise.
+    (destination / "eula.txt").write_text("eula=true")
+    if archive is not None:
+        archive = Path(archive)
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        # The jars are already compressed, so store them; server files sit at the archive root.
+        # Crafty's own account can write to this folder, so never follow or reuse a planted link.
+        try:
+            folder = os.open(archive.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                descriptor = os.open(archive.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o660, dir_fd=folder)
+            finally:
+                os.close(folder)
+        except OSError as exc:
+            raise CraftyError("the import archive could not be created as a new regular file in a real folder") from exc
+        with os.fdopen(descriptor, "wb") as output, zipfile.ZipFile(output, "w", zipfile.ZIP_STORED) as bundle:
+            os.fchmod(output.fileno(), 0o660)
+            for path in sorted(destination.rglob("*")):
+                if path.is_file():
+                    bundle.write(path, path.relative_to(destination).as_posix())
     return destination
 
 
@@ -378,11 +428,16 @@ def main(argv=None, *, api=None, host=None) -> int:
     stage = commands.add_parser("stage-import", help="download and verify the pinned server files for a first Crafty import")
     stage.add_argument("--manifest", type=Path, required=True)
     stage.add_argument("--destination", type=Path, required=True)
+    stage.add_argument("--archive", type=Path, help="also write the .zip that Crafty 4.11 imports")
+    create = commands.add_parser("import-server", help="create the Crafty server from a staged archive in import/upload")
+    create.add_argument("instance")
+    create.add_argument("--archive-name", required=True)
+    create.add_argument("--max-memory-gb", type=int, default=5)
     args = parser.parse_args(argv)
     try:
         if args.action == "stage-import":
-            path = stage_import(load_manifest(args.manifest), args.destination)
-            print(json.dumps({"staged": str(path)}))
+            path = stage_import(load_manifest(args.manifest), args.destination, archive=args.archive)
+            print(json.dumps({"staged": str(path), **({"archive": str(args.archive)} if args.archive else {})}))
             return 0
         config = load_config(args.config)
         if getattr(args, "instance", None) is not None and args.instance not in config["instances"]:
@@ -394,6 +449,8 @@ def main(argv=None, *, api=None, host=None) -> int:
         handlers = {"start": adapter.start, "stop": adapter.stop, "status": adapter.status}
         if args.action in handlers:
             output = handlers[args.action](args.instance)
+        elif args.action == "import-server":
+            output = adapter.import_server(args.instance, args.archive_name, args.max_memory_gb)
         elif args.action == "host-drain":
             output = adapter.host_drain()
         else:

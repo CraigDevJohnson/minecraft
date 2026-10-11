@@ -3,10 +3,13 @@ import datetime
 import hashlib
 import io
 import json
+import socket
+import threading
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -33,9 +36,16 @@ class FakeAPI:
         self.stop_after = stop_after
         self.pending = None
         self.actions = []
+        self.created = []
+        self.no_servers = False
 
-    def request(self, method, path):
+    def request(self, method, path, body=None):
+        if path == "/api/v2/servers" and method == "POST":
+            self.created.append(body)
+            return {"status": "ok", "data": {"new_server_id": SERVER_ID}}
         if path == "/api/v2/servers":
+            if self.no_servers:
+                return {"status": "ok", "data": []}
             return {"status": "ok", "data": [{"server_id": SERVER_ID, "server_name": "family", "path": f"/crafty/servers/{SERVER_ID}"}]}
         if path.endswith("/stats"):
             if self.pending:
@@ -273,13 +283,90 @@ class ManifestTests(unittest.TestCase):
             destination = Path(directory) / "family"
             crafty.stage_import(manifest, destination, fetch=fetch)
             self.assertEqual(len(fetched), len(manifest["artifacts"]))
-            self.assertEqual((destination / "eula.txt").read_text(), "eula=true\n")
+            # Crafty 4.11 compares the first line exactly, so a trailing newline blocks every start.
+            self.assertEqual((destination / "eula.txt").read_text(), "eula=true")
             properties = (destination / "server.properties").read_text()
             self.assertIn("white-list=true\n", properties)
             self.assertIn("level-name=survival\n", properties)
             self.assertTrue((destination / "plugins" / "Geyser-Spigot" / "config.yml").is_file())
             with self.assertRaises(crafty.CraftyError):
                 crafty.stage_import(manifest, destination, fetch=fetch)
+
+    def test_stage_import_archive_holds_the_server_files_at_its_root(self):
+        manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "family"
+            archive = Path(directory) / "upload" / "family.zip"
+            crafty.stage_import(manifest, destination, fetch=lambda url, sha256, target: target.write_bytes(b"jar"),
+                                archive=archive)
+            with zipfile.ZipFile(archive) as bundle:
+                names = set(bundle.namelist())
+            self.assertLessEqual({"paper.jar", "eula.txt", "server.properties", "plugins/Geyser-Spigot/config.yml"}, names)
+
+    def test_stage_import_refuses_a_planted_archive_link(self):
+        manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "family.zip"
+            archive.symlink_to(Path(directory) / "elsewhere")  # dangling, so exists() alone would miss it
+            with self.assertRaises(crafty.CraftyError):
+                crafty.stage_import(manifest, Path(directory) / "family", archive=archive,
+                                    fetch=lambda url, sha256, target: target.write_bytes(b"jar"))
+            self.assertFalse((Path(directory) / "elsewhere").exists())
+
+    def test_stage_import_refuses_a_linked_archive_folder(self):
+        manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "elsewhere").mkdir()
+            (Path(directory) / "upload").symlink_to(Path(directory) / "elsewhere")
+            with self.assertRaises(crafty.CraftyError):
+                crafty.stage_import(manifest, Path(directory) / "family", archive=Path(directory) / "upload" / "family.zip",
+                                    fetch=lambda url, sha256, target: target.write_bytes(b"jar"))
+            self.assertEqual(list((Path(directory) / "elsewhere").iterdir()), [])
+
+    def test_import_server_creates_one_server_from_the_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api = FakeAPI()
+            api.no_servers = True
+            adapter = crafty.Adapter(config(Path(directory)), api, FakeHost(api))
+            self.assertEqual(adapter.import_server("family", "family.zip", 5), {"instance": "family", "server_id": SERVER_ID})
+            (body,) = api.created
+            self.assertEqual(body["name"], "family")
+            imported = body["minecraft_java_create_data"]["import_server_create_data"]
+            self.assertEqual((imported["archive_name"], imported["jarfile"], imported["mem_max"], imported["server_properties_port"]),
+                             ("family.zip", "paper.jar", 5, 25565))
+
+    def test_import_server_refuses_an_existing_server_or_a_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api = FakeAPI()
+            adapter = crafty.Adapter(config(Path(directory)), api, FakeHost(api))
+            with self.assertRaises(crafty.CraftyError):
+                adapter.import_server("family", "family.zip", 5)
+            api.no_servers = True
+            with self.assertRaises(crafty.CraftyError):
+                adapter.import_server("family", "../family.zip", 5)
+            self.assertEqual(api.created, [])
+
+
+class HostPortTests(unittest.TestCase):
+    def answer(self, reply: bytes) -> bool:
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            def serve():
+                connection, _ = listener.accept()
+                with connection:
+                    connection.recv(16)
+                    connection.sendall(reply)
+            thread = threading.Thread(target=serve)
+            thread.start()
+            try:
+                return crafty.Host().port_open(listener.getsockname()[1])
+            finally:
+                thread.join()
+
+    def test_a_server_that_answers_the_ping_is_open(self):
+        self.assertTrue(self.answer(b"\xff\x00"))
+
+    def test_a_proxy_that_accepts_and_closes_is_not_open(self):
+        self.assertFalse(self.answer(b""))
 
 
 if __name__ == "__main__":
