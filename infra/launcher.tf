@@ -1,19 +1,80 @@
 locals {
+  # One function per Lobby environment the launcher serves (var.launcher.sites), all starting the same host.
+  launcher_sites = var.launcher == null ? {} : var.launcher.sites
   launcher_count = var.launcher == null ? 0 : 1
-  # The site may call only backends named *-<its environment>-* (the-lobby's site boundary), so the name carries it.
-  launcher_name           = try("${var.resource_prefix}-${var.launcher.site_environment}-launcher", "${var.resource_prefix}-launcher")
-  launcher_arn            = "arn:aws:lambda:${var.region}:${var.account_id}:function:${local.launcher_name}"
-  launcher_host_arn       = "arn:aws:ec2:${var.region}:${var.account_id}:instance/${try(aws_instance.host[0].id, "absent")}"
-  launcher_state_name     = "/${var.resource_prefix}/launcher/state"
-  launcher_state_arn      = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${local.launcher_state_name}"
-  launcher_token_name     = try(coalesce(var.launcher.cloudflare_token_parameter, "/${var.resource_prefix}/launcher/cloudflare-token"), null)
-  launcher_token_arn      = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${coalesce(local.launcher_token_name, "/absent")}"
-  launcher_log_group_name = "/aws/lambda/${local.launcher_name}"
+  # The site may call only backends named *-<its environment>-* (the-lobby's site boundary), so each name carries the environment it serves.
+  launcher_names    = { for environment in keys(local.launcher_sites) : environment => "${var.resource_prefix}-${environment}-launcher" }
+  launcher_arns     = { for environment, name in local.launcher_names : environment => "arn:aws:lambda:${var.region}:${var.account_id}:function:${name}" }
+  launcher_host_arn = "arn:aws:ec2:${var.region}:${var.account_id}:instance/${try(aws_instance.host[0].id, "absent")}"
+  # The start record and the Cloudflare token belong to the host, not to a site, so every function shares them:
+  # a start from one site shows as starting on the others.
+  launcher_state_name      = "/${var.resource_prefix}/launcher/state"
+  launcher_state_arn       = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${local.launcher_state_name}"
+  launcher_token_name      = try(coalesce(var.launcher.cloudflare_token_parameter, "/${var.resource_prefix}/launcher/cloudflare-token"), null)
+  launcher_token_arn       = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${coalesce(local.launcher_token_name, "/absent")}"
+  launcher_log_group_names = { for environment, name in local.launcher_names : environment => "/aws/lambda/${name}" }
+}
+
+# The deployment that existed before launchers were per environment served dev as instance [0]. These move
+# it in place of replacing it; delete them once every deployment has applied this version.
+moved {
+  from = aws_iam_role.launcher[0]
+  to   = aws_iam_role.launcher["dev"]
+}
+
+moved {
+  from = aws_iam_role_policy.launcher[0]
+  to   = aws_iam_role_policy.launcher["dev"]
+}
+
+moved {
+  from = aws_cloudwatch_log_group.launcher[0]
+  to   = aws_cloudwatch_log_group.launcher["dev"]
+}
+
+moved {
+  from = aws_lambda_function.launcher[0]
+  to   = aws_lambda_function.launcher["dev"]
+}
+
+moved {
+  from = aws_lambda_function_event_invoke_config.launcher[0]
+  to   = aws_lambda_function_event_invoke_config.launcher["dev"]
+}
+
+moved {
+  from = aws_lambda_function_url.launcher[0]
+  to   = aws_lambda_function_url.launcher["dev"]
+}
+
+moved {
+  from = aws_lambda_permission.launcher_url[0]
+  to   = aws_lambda_permission.launcher_url["dev"]
+}
+
+moved {
+  from = aws_lambda_permission.launcher_invoke[0]
+  to   = aws_lambda_permission.launcher_invoke["dev"]
+}
+
+moved {
+  from = aws_sns_topic.launcher_alerts[0]
+  to   = aws_sns_topic.launcher_alerts["dev"]
+}
+
+moved {
+  from = aws_sns_topic_subscription.launcher_alerts[0]
+  to   = aws_sns_topic_subscription.launcher_alerts["dev"]
+}
+
+moved {
+  from = aws_cloudwatch_metric_alarm.launcher_failing[0]
+  to   = aws_cloudwatch_metric_alarm.launcher_failing["dev"]
 }
 
 resource "aws_iam_role" "launcher" {
-  count = local.launcher_count
-  name  = local.launcher_name
+  for_each = local.launcher_sites
+  name     = local.launcher_names[each.key]
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -27,9 +88,9 @@ resource "aws_iam_role" "launcher" {
 }
 
 resource "aws_iam_role_policy" "launcher" {
-  count = local.launcher_count
-  name  = "launcher"
-  role  = aws_iam_role.launcher[0].id
+  for_each = local.launcher_sites
+  name     = "launcher"
+  role     = aws_iam_role.launcher[each.key].id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = concat([
@@ -84,13 +145,13 @@ resource "aws_iam_role_policy" "launcher" {
         Sid      = "FinishStartsInItself"
         Effect   = "Allow"
         Action   = ["lambda:InvokeFunction"]
-        Resource = [local.launcher_arn]
+        Resource = [local.launcher_arns[each.key]]
       },
       {
         Sid      = "OwnLogsOnly"
         Effect   = "Allow"
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = ["arn:aws:logs:${var.region}:${var.account_id}:log-group:${local.launcher_log_group_name}:*"]
+        Resource = ["arn:aws:logs:${var.region}:${var.account_id}:log-group:${local.launcher_log_group_names[each.key]}:*"]
       },
       ], var.idle_stop == null ? [] : [{
         Sid      = "ReadIdleStopProgress"
@@ -101,6 +162,7 @@ resource "aws_iam_role_policy" "launcher" {
   })
 }
 
+# Shared by every site's function: they start the same host, so they share one start record.
 resource "aws_ssm_parameter" "launcher_state" {
   count       = local.launcher_count
   name        = local.launcher_state_name
@@ -113,16 +175,16 @@ resource "aws_ssm_parameter" "launcher_state" {
 }
 
 resource "aws_cloudwatch_log_group" "launcher" {
-  count             = local.launcher_count
-  name              = local.launcher_log_group_name
+  for_each          = local.launcher_sites
+  name              = local.launcher_log_group_names[each.key]
   retention_in_days = 30
 }
 
 resource "aws_lambda_function" "launcher" {
-  count            = local.launcher_count
-  function_name    = local.launcher_name
-  description      = "Answers The Lobby's Minecraft Launcher and starts the family server."
-  role             = aws_iam_role.launcher[0].arn
+  for_each         = local.launcher_sites
+  function_name    = local.launcher_names[each.key]
+  description      = "Answers The Lobby's Minecraft Launcher (${each.key} site) and starts the family server."
+  role             = aws_iam_role.launcher[each.key].arn
   runtime          = "provided.al2023"
   architectures    = ["arm64"]
   handler          = "bootstrap"
@@ -146,7 +208,7 @@ resource "aws_lambda_function" "launcher" {
   }
   logging_config {
     log_format = "Text"
-    log_group  = aws_cloudwatch_log_group.launcher[0].name
+    log_group  = aws_cloudwatch_log_group.launcher[each.key].name
   }
   depends_on = [aws_iam_role_policy.launcher]
 }
@@ -154,46 +216,46 @@ resource "aws_lambda_function" "launcher" {
 # A lost follow-up is reported failed after its deadline and can be started again, so it is never retried
 # late into a session somebody else has already handled.
 resource "aws_lambda_function_event_invoke_config" "launcher" {
-  count                        = local.launcher_count
-  function_name                = aws_lambda_function.launcher[0].function_name
+  for_each                     = local.launcher_sites
+  function_name                = aws_lambda_function.launcher[each.key].function_name
   maximum_retry_attempts       = 0
   maximum_event_age_in_seconds = 300
 }
 
 resource "aws_lambda_function_url" "launcher" {
-  count              = local.launcher_count
-  function_name      = aws_lambda_function.launcher[0].function_name
+  for_each           = local.launcher_sites
+  function_name      = aws_lambda_function.launcher[each.key].function_name
   authorization_type = "AWS_IAM"
 }
 
-# Only the site's role may call the address (the-lobby ADR 0006). The second statement is the
+# Only this environment's site role may call the address (the-lobby ADR 0006). The second statement is the
 # lambda:InvokeFunction grant AWS also requires for a Function URL, limited to calls through the URL.
 resource "aws_lambda_permission" "launcher_url" {
-  count                  = local.launcher_count
+  for_each               = local.launcher_sites
   statement_id           = "AllowSiteThroughFunctionUrl"
   action                 = "lambda:InvokeFunctionUrl"
-  function_name          = aws_lambda_function.launcher[0].function_name
-  principal              = var.launcher.site_role_arn
+  function_name          = aws_lambda_function.launcher[each.key].function_name
+  principal              = each.value
   function_url_auth_type = "AWS_IAM"
 }
 
 resource "aws_lambda_permission" "launcher_invoke" {
-  count                    = local.launcher_count
+  for_each                 = local.launcher_sites
   statement_id             = "AllowSiteInvokeThroughFunctionUrl"
   action                   = "lambda:InvokeFunction"
-  function_name            = aws_lambda_function.launcher[0].function_name
-  principal                = var.launcher.site_role_arn
+  function_name            = aws_lambda_function.launcher[each.key].function_name
+  principal                = each.value
   invoked_via_function_url = true
 }
 
 resource "aws_sns_topic" "launcher_alerts" {
-  count = local.launcher_count
-  name  = "${local.launcher_name}-alerts"
+  for_each = local.launcher_sites
+  name     = "${local.launcher_names[each.key]}-alerts"
 }
 
 resource "aws_sns_topic_subscription" "launcher_alerts" {
-  count     = local.launcher_count
-  topic_arn = aws_sns_topic.launcher_alerts[0].arn
+  for_each  = local.launcher_sites
+  topic_arn = aws_sns_topic.launcher_alerts[each.key].arn
   protocol  = "email"
   endpoint  = var.budget_notification_email
 }
@@ -202,15 +264,15 @@ resource "aws_sns_topic_subscription" "launcher_alerts" {
 # errors), a follow-up that aged out before it ran (dropped async events), and a start request that failed or
 # could not hand off its follow-up, which the function counts itself because the site still gets an answer.
 resource "aws_cloudwatch_metric_alarm" "launcher_failing" {
-  count               = local.launcher_count
-  alarm_name          = "${local.launcher_name}-failing"
+  for_each            = local.launcher_sites
+  alarm_name          = "${local.launcher_names[each.key]}-failing"
   alarm_description   = "A start from The Lobby failed, lost its follow-up, or could not update DNS. See docs/operations/launcher.md."
   evaluation_periods  = 1
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
-  alarm_actions       = [aws_sns_topic.launcher_alerts[0].arn]
-  ok_actions          = [aws_sns_topic.launcher_alerts[0].arn]
+  alarm_actions       = [aws_sns_topic.launcher_alerts[each.key].arn]
+  ok_actions          = [aws_sns_topic.launcher_alerts[each.key].arn]
 
   metric_query {
     id          = "failures"
@@ -223,7 +285,7 @@ resource "aws_cloudwatch_metric_alarm" "launcher_failing" {
     metric {
       namespace   = "AWS/Lambda"
       metric_name = "Errors"
-      dimensions  = { FunctionName = aws_lambda_function.launcher[0].function_name }
+      dimensions  = { FunctionName = aws_lambda_function.launcher[each.key].function_name }
       period      = 300
       stat        = "Sum"
     }
@@ -233,7 +295,7 @@ resource "aws_cloudwatch_metric_alarm" "launcher_failing" {
     metric {
       namespace   = "AWS/Lambda"
       metric_name = "AsyncEventsDropped"
-      dimensions  = { FunctionName = aws_lambda_function.launcher[0].function_name }
+      dimensions  = { FunctionName = aws_lambda_function.launcher[each.key].function_name }
       period      = 300
       stat        = "Sum"
     }
@@ -243,7 +305,7 @@ resource "aws_cloudwatch_metric_alarm" "launcher_failing" {
     metric {
       namespace   = "Minecraft/Launcher"
       metric_name = "StartFailures"
-      dimensions  = { FunctionName = aws_lambda_function.launcher[0].function_name }
+      dimensions  = { FunctionName = aws_lambda_function.launcher[each.key].function_name }
       period      = 300
       stat        = "Sum"
     }

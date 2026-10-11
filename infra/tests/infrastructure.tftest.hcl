@@ -769,7 +769,7 @@ run "launcher_is_absent_unless_configured" {
   command = plan
 
   assert {
-    condition     = length(aws_lambda_function.launcher) == 0 && length(aws_iam_role.launcher) == 0 && length(aws_lambda_function_url.launcher) == 0 && length(aws_lambda_permission.launcher_url) == 0 && length(aws_ssm_parameter.launcher_state) == 0 && output.launcher_url == null
+    condition     = length(aws_lambda_function.launcher) == 0 && length(aws_iam_role.launcher) == 0 && length(aws_lambda_function_url.launcher) == 0 && length(aws_lambda_permission.launcher_url) == 0 && length(aws_ssm_parameter.launcher_state) == 0 && length(output.launchers) == 0
     error_message = "The launcher must deploy nothing until its package is configured."
   }
 }
@@ -778,7 +778,7 @@ run "launcher_starts_only_this_host_for_only_the_site" {
   command = plan
 
   variables {
-    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", site_role_arn = "arn:aws:iam::111122223333:role/site-dev-server", site_environment = "dev", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
+    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
   }
 
   override_resource {
@@ -787,12 +787,12 @@ run "launcher_starts_only_this_host_for_only_the_site" {
   }
 
   assert {
-    condition     = jsondecode(aws_iam_role.launcher[0].assume_role_policy).Statement == [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" } }] && aws_iam_role.launcher[0].permissions_boundary == "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary"
+    condition     = jsondecode(aws_iam_role.launcher["dev"].assume_role_policy).Statement == [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" } }] && aws_iam_role.launcher["dev"].permissions_boundary == "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary"
     error_message = "Only Lambda may assume the launcher role, inside the administrator's launcher boundary."
   }
 
   assert {
-    condition = toset([for statement in jsondecode(aws_iam_role_policy.launcher[0].policy).Statement : jsonencode(statement)]) == toset([
+    condition = toset([for statement in jsondecode(aws_iam_role_policy.launcher["dev"].policy).Statement : jsonencode(statement)]) == toset([
       jsonencode({ Sid = "ObserveHost", Effect = "Allow", Action = ["ec2:DescribeInstances"], Resource = "*" }),
       jsonencode({ Sid = "StartOnlyThisHost", Effect = "Allow", Action = ["ec2:StartInstances"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0123456789abcdef0"] }),
       jsonencode({ Sid = "StartGameOnlyOnThisHostWithShellDocument", Effect = "Allow", Action = ["ssm:SendCommand"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0123456789abcdef0", "arn:aws:ssm:us-west-2::document/AWS-RunShellScript"] }),
@@ -807,22 +807,22 @@ run "launcher_starts_only_this_host_for_only_the_site" {
   }
 
   assert {
-    condition     = aws_lambda_function.launcher[0].environment[0].variables == tomap({ HOST_ID = "i-0123456789abcdef0", INSTANCE = "survival", SERVER_NAME = "Family server", PUBLIC_HOSTNAME = "mc.example.com", BEDROCK_PORT = "19132", STATE_PARAMETER = "/minecraft-test/launcher/state", CLOUDFLARE_ZONE_ID = "0123456789abcdef0123456789abcdef", CLOUDFLARE_TOKEN_PARAMETER = "/minecraft-test/launcher/cloudflare-token", IDLE_STOP_STATE_PARAMETER = "" })
+    condition     = aws_lambda_function.launcher["dev"].environment[0].variables == tomap({ HOST_ID = "i-0123456789abcdef0", INSTANCE = "survival", SERVER_NAME = "Family server", PUBLIC_HOSTNAME = "mc.example.com", BEDROCK_PORT = "19132", STATE_PARAMETER = "/minecraft-test/launcher/state", CLOUDFLARE_ZONE_ID = "0123456789abcdef0123456789abcdef", CLOUDFLARE_TOKEN_PARAMETER = "/minecraft-test/launcher/cloudflare-token", IDLE_STOP_STATE_PARAMETER = "" })
     error_message = "The function must target this host, its one instance, the players' hostname and its own state, naming the token only by parameter."
   }
 
   assert {
-    condition     = aws_lambda_function.launcher[0].architectures == tolist(["arm64"]) && aws_lambda_function.launcher[0].runtime == "provided.al2023" && aws_lambda_function.launcher[0].timeout == 900 && aws_lambda_function_event_invoke_config.launcher[0].maximum_retry_attempts == 0
+    condition     = aws_lambda_function.launcher["dev"].architectures == tolist(["arm64"]) && aws_lambda_function.launcher["dev"].runtime == "provided.al2023" && aws_lambda_function.launcher["dev"].timeout == 900 && aws_lambda_function_event_invoke_config.launcher["dev"].maximum_retry_attempts == 0
     error_message = "The function must run the Go ARM64 bootstrap with room for a start's follow-up, which is never retried."
   }
 
   assert {
-    condition     = aws_lambda_function_url.launcher[0].authorization_type == "AWS_IAM" && aws_lambda_permission.launcher_url[0].principal == "arn:aws:iam::111122223333:role/site-dev-server" && aws_lambda_permission.launcher_url[0].function_url_auth_type == "AWS_IAM" && aws_lambda_permission.launcher_invoke[0].principal == "arn:aws:iam::111122223333:role/site-dev-server" && aws_lambda_permission.launcher_invoke[0].invoked_via_function_url == true
+    condition     = aws_lambda_function_url.launcher["dev"].authorization_type == "AWS_IAM" && aws_lambda_permission.launcher_url["dev"].principal == "arn:aws:iam::111122223333:role/site-dev-server" && aws_lambda_permission.launcher_url["dev"].function_url_auth_type == "AWS_IAM" && aws_lambda_permission.launcher_invoke["dev"].principal == "arn:aws:iam::111122223333:role/site-dev-server" && aws_lambda_permission.launcher_invoke["dev"].invoked_via_function_url == true
     error_message = "Only the site's role may call the launcher, and only through its signed Function URL."
   }
 
   assert {
-    condition     = aws_ssm_parameter.launcher_state[0].type == "String" && aws_cloudwatch_log_group.launcher[0].retention_in_days == 30 && toset([for query in aws_cloudwatch_metric_alarm.launcher_failing[0].metric_query : "${query.metric[0].namespace}/${query.metric[0].metric_name}/${query.metric[0].dimensions["FunctionName"]}" if length(query.metric) > 0]) == toset(["AWS/Lambda/Errors/minecraft-test-dev-launcher", "AWS/Lambda/AsyncEventsDropped/minecraft-test-dev-launcher", "Minecraft/Launcher/StartFailures/minecraft-test-dev-launcher"]) && aws_sns_topic_subscription.launcher_alerts[0].endpoint == "operator@example.invalid"
+    condition     = aws_ssm_parameter.launcher_state[0].type == "String" && aws_cloudwatch_log_group.launcher["dev"].retention_in_days == 30 && toset([for query in aws_cloudwatch_metric_alarm.launcher_failing["dev"].metric_query : "${query.metric[0].namespace}/${query.metric[0].metric_name}/${query.metric[0].dimensions["FunctionName"]}" if length(query.metric) > 0]) == toset(["AWS/Lambda/Errors/minecraft-test-dev-launcher", "AWS/Lambda/AsyncEventsDropped/minecraft-test-dev-launcher", "Minecraft/Launcher/StartFailures/minecraft-test-dev-launcher"]) && aws_sns_topic_subscription.launcher_alerts["dev"].endpoint == "operator@example.invalid"
     error_message = "State must be a plain parameter, logs must expire after 30 days, and a failed start must email the private budget recipient."
   }
 }
@@ -831,31 +831,70 @@ run "launcher_sees_the_idle_stop_drain" {
   command = plan
 
   variables {
-    launcher  = { package_path = "tests/fixtures/idle-stop.placeholder", site_role_arn = "arn:aws:iam::111122223333:role/site-dev-server", site_environment = "dev", cloudflare_token_parameter = "/minecraft-test/cloudflare/token", server_name = "Our server", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
+    launcher  = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, cloudflare_token_parameter = "/minecraft-test/cloudflare/token", server_name = "Our server", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
     idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef" }
   }
 
   assert {
-    condition     = aws_lambda_function.launcher[0].environment[0].variables["IDLE_STOP_STATE_PARAMETER"] == "/minecraft-test/idle-stop/state" && aws_lambda_function.launcher[0].environment[0].variables["CLOUDFLARE_TOKEN_PARAMETER"] == "/minecraft-test/cloudflare/token" && aws_lambda_function.launcher[0].environment[0].variables["SERVER_NAME"] == "Our server"
+    condition     = aws_lambda_function.launcher["dev"].environment[0].variables["IDLE_STOP_STATE_PARAMETER"] == "/minecraft-test/idle-stop/state" && aws_lambda_function.launcher["dev"].environment[0].variables["CLOUDFLARE_TOKEN_PARAMETER"] == "/minecraft-test/cloudflare/token" && aws_lambda_function.launcher["dev"].environment[0].variables["SERVER_NAME"] == "Our server"
     error_message = "The launcher must read the idle stop's progress and the configured token parameter and name."
   }
 
   assert {
-    condition     = aws_lambda_function.launcher[0].function_name == "minecraft-test-dev-launcher" && aws_iam_role.launcher[0].name == "minecraft-test-dev-launcher" && aws_cloudwatch_log_group.launcher[0].name == "/aws/lambda/minecraft-test-dev-launcher"
+    condition     = aws_lambda_function.launcher["dev"].function_name == "minecraft-test-dev-launcher" && aws_iam_role.launcher["dev"].name == "minecraft-test-dev-launcher" && aws_cloudwatch_log_group.launcher["dev"].name == "/aws/lambda/minecraft-test-dev-launcher"
     error_message = "The name must stay inside the resource prefix and carry the site environment the site's boundary lets it call."
   }
 
   assert {
-    condition     = one([for statement in jsondecode(aws_iam_role_policy.launcher[0].policy).Statement : statement if statement.Sid == "ReadIdleStopProgress"]) == { Sid = "ReadIdleStopProgress", Effect = "Allow", Action = ["ssm:GetParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/idle-stop/state"] }
+    condition     = one([for statement in jsondecode(aws_iam_role_policy.launcher["dev"].policy).Statement : statement if statement.Sid == "ReadIdleStopProgress"]) == { Sid = "ReadIdleStopProgress", Effect = "Allow", Action = ["ssm:GetParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/idle-stop/state"] }
     error_message = "The launcher may only read the idle stop's state, never write it."
   }
+}
+
+run "launcher_serves_every_site_from_one_start_record" {
+  command = plan
+  variables {
+    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server", prod = "arn:aws:iam::111122223333:role/site-prod-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
+  }
+  assert {
+    condition     = keys(aws_lambda_function.launcher) == ["dev", "prod"] && aws_lambda_function.launcher["dev"].function_name == "minecraft-test-dev-launcher" && aws_lambda_function.launcher["prod"].function_name == "minecraft-test-prod-launcher" && aws_iam_role.launcher["prod"].name == "minecraft-test-prod-launcher" && aws_cloudwatch_log_group.launcher["prod"].name == "/aws/lambda/minecraft-test-prod-launcher" && aws_sns_topic.launcher_alerts["prod"].name == "minecraft-test-prod-launcher-alerts" && aws_cloudwatch_metric_alarm.launcher_failing["prod"].alarm_name == "minecraft-test-prod-launcher-failing"
+    error_message = "Each Lobby environment must get its own function, role, logs, topic and alarm, named <prefix>-<environment>-launcher so that environment's site boundary allows the call."
+  }
+  assert {
+    condition     = aws_lambda_permission.launcher_url["dev"].principal == "arn:aws:iam::111122223333:role/site-dev-server" && aws_lambda_permission.launcher_invoke["dev"].principal == "arn:aws:iam::111122223333:role/site-dev-server" && aws_lambda_permission.launcher_url["prod"].principal == "arn:aws:iam::111122223333:role/site-prod-server" && aws_lambda_permission.launcher_invoke["prod"].principal == "arn:aws:iam::111122223333:role/site-prod-server" && aws_lambda_function_url.launcher["prod"].authorization_type == "AWS_IAM"
+    error_message = "Each environment's function may be called only by that environment's site role, through its signed Function URL."
+  }
+  assert {
+    condition     = length(aws_ssm_parameter.launcher_state) == 1 && aws_lambda_function.launcher["dev"].environment[0].variables == aws_lambda_function.launcher["prod"].environment[0].variables && aws_lambda_function.launcher["prod"].environment[0].variables["STATE_PARAMETER"] == "/minecraft-test/launcher/state"
+    error_message = "Every environment's function must start the same host from the same start record and token, so a start from one site shows on the others."
+  }
+  assert {
+    condition     = one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "FinishStartsInItself"]).Resource == ["arn:aws:lambda:us-west-2:111122223333:function:minecraft-test-prod-launcher"] && one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "OwnLogsOnly"]).Resource == ["arn:aws:logs:us-west-2:111122223333:log-group:/aws/lambda/minecraft-test-prod-launcher:*"] && one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "OwnStateOnly"]).Resource == ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/state"]
+    error_message = "A function may finish starts only in itself and write only its own logs, while sharing the one start record."
+  }
+  assert {
+    condition     = toset([for query in aws_cloudwatch_metric_alarm.launcher_failing["prod"].metric_query : query.metric[0].dimensions["FunctionName"] if length(query.metric) > 0]) == toset(["minecraft-test-prod-launcher"])
+    error_message = "Each environment's alarm must watch its own function."
+  }
+  assert {
+    condition     = keys(output.launchers) == ["dev", "prod"] && output.launchers["prod"].function_arn == "arn:aws:lambda:us-west-2:111122223333:function:minecraft-test-prod-launcher" && output.launchers["dev"].function_arn == "arn:aws:lambda:us-west-2:111122223333:function:minecraft-test-dev-launcher"
+    error_message = "The launchers output must give each site's deployment the function ARN it allows the site role to invoke."
+  }
+}
+
+run "reject_launcher_without_sites" {
+  command = plan
+  variables {
+    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = {}, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
+  }
+  expect_failures = [var.launcher]
 }
 
 run "reject_launcher_for_multiple_game_instances" {
   command = plan
   variables {
     instance_ids = ["survival", "creative"]
-    launcher     = { package_path = "tests/fixtures/idle-stop.placeholder", site_role_arn = "arn:aws:iam::111122223333:role/site-dev-server", site_environment = "dev", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
+    launcher     = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
   }
   expect_failures = [var.launcher]
 }
@@ -863,7 +902,7 @@ run "reject_launcher_for_multiple_game_instances" {
 run "reject_launcher_without_a_site_role" {
   command = plan
   variables {
-    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", site_role_arn = "*", site_environment = "dev", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
+    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "*" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
   }
   expect_failures = [var.launcher]
 }
@@ -871,7 +910,7 @@ run "reject_launcher_without_a_site_role" {
 run "reject_launcher_token_outside_its_prefix" {
   command = plan
   variables {
-    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", site_role_arn = "arn:aws:iam::111122223333:role/site-dev-server", site_environment = "dev", cloudflare_token_parameter = "/portfolio/lambda/prod/token", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
+    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, cloudflare_token_parameter = "/portfolio/lambda/prod/token", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
   }
   expect_failures = [var.launcher]
 }
@@ -881,15 +920,15 @@ run "reject_launcher_for_on_demand_hosts" {
   variables {
     lifecycle_mode   = "on-demand-host"
     bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    launcher         = { package_path = "tests/fixtures/idle-stop.placeholder", site_role_arn = "arn:aws:iam::111122223333:role/site-dev-server", site_environment = "dev", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
+    launcher         = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
   }
   expect_failures = [var.launcher]
 }
 
-run "reject_launcher_site_environment_that_is_not_a_name" {
+run "reject_launcher_site_key_that_is_not_an_environment_name" {
   command = plan
   variables {
-    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", site_role_arn = "arn:aws:iam::111122223333:role/site-dev-server", site_environment = "dev-*", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
+    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { "dev-*" = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
   }
   expect_failures = [var.launcher]
 }
@@ -897,7 +936,7 @@ run "reject_launcher_site_environment_that_is_not_a_name" {
 run "reject_launcher_without_its_boundary" {
   command = plan
   variables {
-    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", site_role_arn = "arn:aws:iam::111122223333:role/site-dev-server", site_environment = "dev", permissions_boundary_arn = null }
+    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = null }
   }
   expect_failures = [var.launcher]
 }
@@ -905,7 +944,7 @@ run "reject_launcher_without_its_boundary" {
 run "reject_launcher_boundary_inside_the_resource_prefix" {
   command = plan
   variables {
-    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", site_role_arn = "arn:aws:iam::111122223333:role/site-dev-server", site_environment = "dev", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-test-launcher-boundary" }
+    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-test-launcher-boundary" }
   }
   expect_failures = [var.launcher]
 }
@@ -913,7 +952,7 @@ run "reject_launcher_boundary_inside_the_resource_prefix" {
 run "reject_launcher_site_role_in_another_account" {
   command = plan
   variables {
-    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", site_role_arn = "arn:aws:iam::999900001111:role/site-dev-server", site_environment = "dev", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
+    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::999900001111:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
   }
   expect_failures = [var.launcher]
 }

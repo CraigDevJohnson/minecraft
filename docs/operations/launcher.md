@@ -2,6 +2,8 @@
 
 The Lobby's Minecraft Launcher page (`/minecraft` in [the-lobby](https://github.com/CraigDevJohnson/the-lobby)) shows whether the `family` server is up and lets a Member start it. The page calls this repository's launcher function, a Go Lambda in [`lambda/launcher`](../../lambda/launcher). The site checks the Member's `minecraft` grant first and signs each request with its own role. The function's Function URL accepts only that role (the-lobby ADR 0006). The contract is the-lobby's [`docs/minecraft-backend.md`](https://github.com/CraigDevJohnson/the-lobby/blob/main/docs/minecraft-backend.md). The function is off until `launcher` is set in the private deployment inputs, and with `launcher = null` the plan creates none of its resources.
 
+The site has one environment per hostname (dev, then production), and each site may call only backends named after its environment. `launcher.sites` therefore names the Lobby environments to serve, each with its site's role, and the plan makes one function per environment, `<prefix>-<environment>-launcher`, that only that site's role may call. The functions are twins: they run the same package, start the same host, and share one start record and one token parameter, so a start from one site shows as `starting` on the other. Each has its own logs, alarm and alert topic.
+
 ## What it answers
 
 `GET /server` answers `{name, state, last_known?, connection}`. `POST /server/start` starts a `stopped` or `failed` server and answers the same shape, `202` when it started something and `200` when nothing changed. The connection is the players' hostname for Java and the hostname with port 19132 for Bedrock.
@@ -22,7 +24,7 @@ The Member named in `X-Lobby-Member` is logged with every start request.
 
 A start runs the same steps as `python3 scripts/minecraft_host.py start --instance family`, without the workstation:
 
-1. The request records the start in the SSM parameter `/<resource_prefix>/launcher/state`, calls `StartInstances`, and starts a second, asynchronous run of the same function. The page gets `202` with `starting` straight away.
+1. The request records the start in the SSM parameter `/<resource_prefix>/launcher/state`, shared by every environment's function, calls `StartInstances`, and starts a second, asynchronous run of the same function. The page gets `202` with `starting` straight away.
 2. The second run waits for EC2 `running` and a public address. It points the players' hostname at that address through Cloudflare (DNS only, TTL 60), then waits for SSM.
 3. It sends `minecraft-instance … start family` through `AWS-RunShellScript` and waits for the adapter to report `running` and `ready`. That is the same command and the same completion check the workstation start uses.
 4. It records `ready` or `failed`, tied to the host's EC2 launch time so a later run never inherits it.
@@ -78,34 +80,42 @@ Everything below runs on your Mac in `/Users/craigjohnson/Projects/minecraft`, a
 
    This prints `/Users/craigjohnson/Projects/minecraft/.build/launcher.zip sha256=<64 hex characters>`. The same source and Go toolchain always give the same bytes.
 
-4. **Add the launcher to the private deployment inputs.** Find the site's role with the read-only profile:
+4. **Add the launcher to the private deployment inputs.** Find the sites' roles with the read-only profile:
 
    ```sh
-   aws iam list-roles --profile workloads-readonly --query "Roles[?starts_with(RoleName,'site-dev')].Arn"
+   aws iam list-roles --profile workloads-readonly --query "Roles[?starts_with(RoleName,'site-')].Arn"
    ```
 
-   This prints the dev site's roles. Use `site-dev-server`, the site's own Lambda role. Then add this to your private `deployment.tfvars`:
+   This prints each site environment's roles. Use `site-<environment>-server`, the site's own Lambda role, for each environment The Lobby has deployed (the-lobby's `infra/environments/`). Then add this to your private `deployment.tfvars`:
 
    ```hcl
    launcher = {
-     package_path             = "/Users/craigjohnson/Projects/minecraft/.build/launcher.zip"
-     site_role_arn            = "arn:aws:iam::793680745829:role/site-dev-server"
-     site_environment         = "dev"
+     package_path = "/Users/craigjohnson/Projects/minecraft/.build/launcher.zip"
+     sites = {
+       dev  = "arn:aws:iam::793680745829:role/site-dev-server"
+       prod = "arn:aws:iam::793680745829:role/site-prod-server"
+     }
      permissions_boundary_arn = "arn:aws:iam::793680745829:policy/minecraft-launcher-boundary"
    }
    ```
 
-   `site_environment` puts the site's environment in the function's name (`<prefix>-dev-launcher`). The site's permissions boundary lets it call only backends named `*-dev-*`.
+   Each key puts that site's environment in its function's name (`<prefix>-dev-launcher`, `<prefix>-prod-launcher`). A site's permissions boundary lets it call only backends named `*-<its environment>-*`, so a site that has no function here cannot reach the others'. Leave out an environment the site has not deployed yet and add it later: the plan then creates only that environment's function.
 
-5. **Plan** as described in [infrastructure](infrastructure.md#private-deployment-inputs-and-output). Expect creates only. Those are the function with its role and inline policy, the state parameter, the log group, the async invoke setting, the Function URL, its two permissions, the SNS topic and email subscription, and the alarm. Any change to the host, data disk, buckets or network is a stop condition.
+   A deployment made before October 2026 had `site_role_arn` and `site_environment` instead; replace them with `sites = { dev = <that role> }`. The configuration moves the existing resources to their `dev` key, so the plan shows them as moved, not replaced.
 
-6. **Apply** the reviewed plan once you've approved it. Then confirm the SNS subscription email and read the address:
+5. **Plan** as described in [infrastructure](infrastructure.md#private-deployment-inputs-and-output). Expect creates only (and, for a deployment made before October 2026, the moves above). Those are, once, the shared state parameter, and then per environment the function with its role and inline policy, the log group, the async invoke setting, the Function URL, its two permissions, the SNS topic and email subscription, and the alarm. Any change to the host, data disk, buckets or network, and any replacement, is a stop condition.
+
+6. **Apply** the reviewed plan once you've approved it. Then confirm each new SNS subscription email (one per environment) and read the addresses:
 
    ```sh
-   url=$(.tools/bin/tofu -chdir="$private_dir/infrastructure/infra" output -raw launcher_url); echo "$url"
+   .tools/bin/tofu -chdir="$private_dir/infrastructure/infra" output -json launchers
    ```
 
-   This prints `https://<id>.lambda-url.us-west-2.on.aws/`. Keep the terminal open: the next step uses `$url`.
+   This prints, per environment, `url` (`https://<id>.lambda-url.us-west-2.on.aws/`) and `function_arn`. Keep the terminal open and set `url` to the one you want to check:
+
+   ```sh
+   url=$(.tools/bin/tofu -chdir="$private_dir/infrastructure/infra" output -json launchers | python3 -c 'import json,sys; print(json.load(sys.stdin)["dev"]["url"])')
+   ```
 
 7. **Check it from the Mac.** Your administrator role may call the Function URL too:
 
@@ -117,11 +127,11 @@ Everything below runs on your Mac in `/Users/craigjohnson/Projects/minecraft`, a
 
    With the server off, this prints `{"name":"Family server","state":"stopped","connection":{…}}`. Replacing the path with `-X POST "${url%/}/server/start"` starts it. Following `GET` answers go `starting`, then `ready` about a minute later, and mc.craigdevjohnson.com points at the new address.
 
-8. **Connect the site** in the-lobby: set `MINECRAFT_BACKEND_URL` to the address, let the site's server role call `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` on the function, and mark the Launcher ready in `web/src/tools.ts`.
+8. **Connect each site** in the-lobby: that environment's `minecraft_backend_url` and `minecraft_backend_function_arn` (`infra/environments/<environment>/<environment>.tfvars`) take the `url` and `function_arn` printed for the same environment. The site's deploy then lets its role call `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` on the function. The Launcher is marked ready in `web/src/tools.ts` for every environment at once.
 
 ## Cost
 
-Each status request makes one EC2 describe, one or two SSM parameter reads and a status ping. The page polls every 30 seconds while it is visible, or every 5 seconds during a start, which stays well inside Lambda's free tier. A standard SecureString costs nothing. The alarm watches three metrics, about $0.30 a month. The server itself costs what it does today while it runs.
+Each status request makes one EC2 describe, one or two SSM parameter reads and a status ping. The page polls every 30 seconds while it is visible, or every 5 seconds during a start, which stays well inside Lambda's free tier. A standard SecureString costs nothing. Each environment's alarm watches three metrics, about $0.30 a month per environment. The server itself costs what it does today while it runs.
 
 ## Evidence limits
 

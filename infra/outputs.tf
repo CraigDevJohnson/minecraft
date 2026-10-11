@@ -37,7 +37,12 @@ output "deployment" {
   }
 }
 
-output "launcher_url" {
-  description = "The launcher's Function URL, for The Lobby's MINECRAFT_BACKEND_URL; null when the launcher is not deployed. Only the site's role may call it."
-  value       = try(aws_lambda_function_url.launcher[0].function_url, null)
+output "launchers" {
+  description = "Per Lobby environment the launcher serves, what that site's deployment needs: url is the Function URL (the-lobby's minecraft_backend_url) and function_arn the function behind it (minecraft_backend_function_arn). Only that environment's site role may call it. Empty when the launcher is not deployed."
+  value = {
+    for environment, function_url in aws_lambda_function_url.launcher : environment => {
+      url          = function_url.function_url
+      function_arn = local.launcher_arns[environment]
+    }
+  }
 }
