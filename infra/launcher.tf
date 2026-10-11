@@ -198,38 +198,54 @@ resource "aws_sns_topic_subscription" "launcher_alerts" {
   endpoint  = var.budget_notification_email
 }
 
-resource "aws_cloudwatch_metric_alarm" "launcher_errors" {
+# One alarm for every way a start can go wrong without a Member noticing at once: a failed run (Lambda's
+# errors), a follow-up that aged out before it ran (dropped async events), and a start request that failed or
+# could not hand off its follow-up, which the function counts itself because the site still gets an answer.
+resource "aws_cloudwatch_metric_alarm" "launcher_failing" {
   count               = local.launcher_count
   alarm_name          = "${local.launcher_name}-failing"
-  alarm_description   = "A start from The Lobby failed or could not update DNS. See docs/operations/launcher.md."
-  namespace           = "AWS/Lambda"
-  metric_name         = "Errors"
-  dimensions          = { FunctionName = aws_lambda_function.launcher[0].function_name }
-  statistic           = "Sum"
-  period              = 300
+  alarm_description   = "A start from The Lobby failed, lost its follow-up, or could not update DNS. See docs/operations/launcher.md."
   evaluation_periods  = 1
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.launcher_alerts[0].arn]
   ok_actions          = [aws_sns_topic.launcher_alerts[0].arn]
-}
 
-# A start whose follow-up could not be handed off answers 202, so Lambda counts no error. The function
-# reports it as this metric in its logs (embedded metric format), and the server shows failed later.
-resource "aws_cloudwatch_metric_alarm" "launcher_lost_starts" {
-  count               = local.launcher_count
-  alarm_name          = "${local.launcher_name}-lost-start"
-  alarm_description   = "A start from The Lobby began EC2 but could not hand off the rest of the start. See docs/operations/launcher.md."
-  namespace           = "Minecraft/Launcher"
-  metric_name         = "LostStarts"
-  dimensions          = { FunctionName = aws_lambda_function.launcher[0].function_name }
-  statistic           = "Sum"
-  period              = 300
-  evaluation_periods  = 1
-  threshold           = 1
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  treat_missing_data  = "notBreaching"
-  alarm_actions       = [aws_sns_topic.launcher_alerts[0].arn]
-  ok_actions          = [aws_sns_topic.launcher_alerts[0].arn]
+  metric_query {
+    id          = "failures"
+    expression  = "FILL(errors, 0) + FILL(dropped, 0) + FILL(starts, 0)"
+    label       = "Launcher failures"
+    return_data = true
+  }
+  metric_query {
+    id = "errors"
+    metric {
+      namespace   = "AWS/Lambda"
+      metric_name = "Errors"
+      dimensions  = { FunctionName = aws_lambda_function.launcher[0].function_name }
+      period      = 300
+      stat        = "Sum"
+    }
+  }
+  metric_query {
+    id = "dropped"
+    metric {
+      namespace   = "AWS/Lambda"
+      metric_name = "AsyncEventsDropped"
+      dimensions  = { FunctionName = aws_lambda_function.launcher[0].function_name }
+      period      = 300
+      stat        = "Sum"
+    }
+  }
+  metric_query {
+    id = "starts"
+    metric {
+      namespace   = "Minecraft/Launcher"
+      metric_name = "StartFailures"
+      dimensions  = { FunctionName = aws_lambda_function.launcher[0].function_name }
+      period      = 300
+      stat        = "Sum"
+    }
+  }
 }

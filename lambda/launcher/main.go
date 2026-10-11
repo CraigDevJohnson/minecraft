@@ -98,7 +98,7 @@ func main() {
 			})
 			return err
 		}
-		server.LostStart = func() { writeMetric(os.Stdout, name, lostStartMetric, time.Now()) }
+		server.StartFailed = func() { writeMetric(os.Stdout, name, startFailureMetric, time.Now()) }
 		proxy := httpadapter.NewV2(server.Handler())
 		lambda.Start(func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var task struct {
@@ -154,10 +154,10 @@ func finishStart(ctx context.Context, launcher *Launcher, log *slog.Logger) erro
 	return err
 }
 
-// The custom metric the lost-start alarm watches (infra/launcher.tf).
+// The custom metric the launcher's alarm watches with Lambda's own errors (infra/launcher.tf).
 const (
-	metricNamespace = "Minecraft/Launcher"
-	lostStartMetric = "LostStarts"
+	metricNamespace    = "Minecraft/Launcher"
+	startFailureMetric = "StartFailures"
 )
 
 // writeMetric records one count of a metric in CloudWatch's embedded metric format. Lambda ships the line

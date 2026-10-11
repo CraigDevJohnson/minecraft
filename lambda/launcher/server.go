@@ -20,9 +20,9 @@ type Server struct {
 		Start(context.Context) (Status, bool, error)
 	}
 	Log *slog.Logger
-	// LostStart counts a start whose follow-up could not be handed off, for the alarm. The request still
-	// answers 202, so Lambda's own error count never sees it.
-	LostStart func()
+	// StartFailed counts a start request that failed or could not hand off its follow-up, for the alarm. The
+	// request still answers the site normally, so Lambda's own error count never sees it.
+	StartFailed func()
 
 	mu        sync.Mutex
 	lastKnown string
@@ -58,9 +58,7 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 		s.Log.Info("start", "member", member)
 		if err != nil {
 			s.Log.Error("start follow-up", "member", member, "err", err)
-			if s.LostStart != nil {
-				s.LostStart()
-			}
+			s.countFailure()
 		}
 		writeJSON(w, http.StatusAccepted, s.remember(status))
 		return
@@ -68,11 +66,18 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// The site shows anything but 200, 202 and 404 as a status it can't confirm.
 		s.Log.Error("start", "member", member, "err", err)
+		s.countFailure()
 		writeJSON(w, http.StatusBadGateway, map[string]string{"code": "start_unconfirmed"})
 		return
 	}
 	s.Log.Info("start unchanged", "member", member, "state", status.State)
 	writeJSON(w, http.StatusOK, s.remember(status))
+}
+
+func (s *Server) countFailure() {
+	if s.StartFailed != nil {
+		s.StartFailed()
+	}
 }
 
 // remember keeps the last confirmed state of this warm instance, offered as last_known when AWS can't be read.

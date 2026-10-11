@@ -822,7 +822,7 @@ run "launcher_starts_only_this_host_for_only_the_site" {
   }
 
   assert {
-    condition     = aws_ssm_parameter.launcher_state[0].type == "String" && aws_cloudwatch_log_group.launcher[0].retention_in_days == 30 && aws_cloudwatch_metric_alarm.launcher_errors[0].metric_name == "Errors" && aws_cloudwatch_metric_alarm.launcher_lost_starts[0].namespace == "Minecraft/Launcher" && aws_cloudwatch_metric_alarm.launcher_lost_starts[0].metric_name == "LostStarts" && aws_cloudwatch_metric_alarm.launcher_lost_starts[0].dimensions["FunctionName"] == "minecraft-test-dev-launcher" && aws_sns_topic_subscription.launcher_alerts[0].endpoint == "operator@example.invalid"
+    condition     = aws_ssm_parameter.launcher_state[0].type == "String" && aws_cloudwatch_log_group.launcher[0].retention_in_days == 30 && toset([for query in aws_cloudwatch_metric_alarm.launcher_failing[0].metric_query : "${query.metric[0].namespace}/${query.metric[0].metric_name}/${query.metric[0].dimensions["FunctionName"]}" if length(query.metric) > 0]) == toset(["AWS/Lambda/Errors/minecraft-test-dev-launcher", "AWS/Lambda/AsyncEventsDropped/minecraft-test-dev-launcher", "Minecraft/Launcher/StartFailures/minecraft-test-dev-launcher"]) && aws_sns_topic_subscription.launcher_alerts[0].endpoint == "operator@example.invalid"
     error_message = "State must be a plain parameter, logs must expire after 30 days, and a failed start must email the private budget recipient."
   }
 }

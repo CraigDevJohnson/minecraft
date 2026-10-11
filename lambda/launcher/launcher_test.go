@@ -388,7 +388,9 @@ func TestASecondStartRefusedBecauseTheFirstWonKeepsTheStart(t *testing.T) {
 	r.ec2.launch = now
 	r.ec2.startErr = errors.New("IncorrectInstanceState")
 	status, started, err := r.launcher.Start(context.Background())
-	if err != nil || started || status.State != Starting || r.followUps != 0 {
+	// The start stands. Its follow-up is handed off again, since EC2 may have accepted this start and lost
+	// the answer; a second follow-up repeats harmlessly.
+	if err != nil || !started || status.State != Starting || r.followUps != 1 {
 		t.Fatalf("state=%s started=%v err=%v followUps=%d", status.State, started, err, r.followUps)
 	}
 	if session := r.session(t); session.Phase != Starting {

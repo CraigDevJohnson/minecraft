@@ -168,14 +168,12 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 			return l.answer(Unknown, Session{}), false, err
 		}
 		if _, err := l.EC2.StartInstances(ctx, &ec2.StartInstancesInput{InstanceIds: []string{l.Config.HostID}}); err != nil {
-			// Two Members starting at once both see the host stopped. EC2 refuses the second because the first
-			// already moved it on, and that start's record and follow-up must stand.
-			if h, describeErr := l.describeHost(ctx); describeErr == nil && h.state != ec2types.InstanceStateNameStopped {
-				state, decideErr := l.decide(ctx, h, session)
-				if decideErr != nil {
-					return l.answer(Unknown, l.current(h, session)), false, decideErr
-				}
-				return l.answer(state, l.current(h, session)), false, nil
+			// Two Members starting at once both see the host stopped, and EC2 refuses the second because the
+			// first already moved it on. Or EC2 accepted this start and its answer was lost. Either way the host is
+			// on its way, so the start stands and gets a follow-up: a second one repeats harmlessly.
+			if h, describeErr := l.describeHost(ctx); describeErr == nil &&
+				(h.state == ec2types.InstanceStateNamePending || h.state == ec2types.InstanceStateNameRunning) {
+				return l.answer(Starting, session), true, l.followUp(ctx)
 			}
 			_ = l.saveSession(ctx, Session{RequestedAt: now, Phase: Failed, Detail: "EC2 refused the start"})
 			return l.answer(Unknown, Session{}), false, fmt.Errorf("start host: %w", err)
