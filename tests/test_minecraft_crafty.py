@@ -45,6 +45,7 @@ class FakeAPI:
     def request(self, method, path, body=None):
         if path == "/api/v2/servers" and method == "POST":
             self.created.append(body)
+            self.no_servers = False
             return {"status": "ok", "data": {"new_server_id": SERVER_ID}}
         if path == "/api/v2/servers":
             if self.no_servers:
@@ -559,13 +560,34 @@ class ManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             api = FakeAPI()
             api.no_servers = True
-            adapter = crafty.Adapter(config(Path(directory)), api, FakeHost(api))
+            host = FakeHost(api)
+            adapter = crafty.Adapter(config(Path(directory)), api, host)
+            folder = Path(directory) / "crafty" / "servers" / SERVER_ID
+            waits, sleep = [], host.sleep
+
+            def unpack_later(seconds):  # Crafty unpacks in the background after the request returns
+                waits.append(seconds)
+                sleep(seconds)
+                if len(waits) == 2:
+                    folder.mkdir(parents=True)
+                    (folder / "paper.jar").write_bytes(b"jar")
+
+            host.sleep = unpack_later
             self.assertEqual(adapter.import_server("family", "family.zip", 5), {"instance": "family", "server_id": SERVER_ID})
+            self.assertEqual(len(waits), 2)
             (body,) = api.created
             self.assertEqual(body["name"], "family")
             imported = body["minecraft_java_create_data"]["import_server_create_data"]
             self.assertEqual((imported["archive_name"], imported["jarfile"], imported["mem_max"], imported["server_properties_port"]),
                              ("family.zip", "paper.jar", 5, 25565))
+
+    def test_import_server_fails_when_crafty_never_unpacks_the_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api = FakeAPI()
+            api.no_servers = True
+            adapter = crafty.Adapter(config(Path(directory)), api, FakeHost(api))
+            with self.assertRaises(crafty.CraftyError):
+                adapter.import_server("family", "family.zip", 5)
 
     def test_import_server_refuses_an_existing_server_or_a_path(self):
         with tempfile.TemporaryDirectory() as directory:

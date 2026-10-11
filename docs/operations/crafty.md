@@ -75,7 +75,7 @@ sudo /usr/local/sbin/minecraft-instance import-server family --archive-name fami
 sudo rm -rf /srv/minecraft/crafty/import/family /srv/minecraft/crafty/import/upload/family.zip
 ```
 
-The imported server runs `paper.jar` on the container's default Java 25 with auto-start off, because the workstation `start` command starts the server. The staged `eula.txt` has no trailing newline on purpose: Crafty 4.11 compares its first line exactly and otherwise refuses every start without logging an error.
+`import-server` returns only after Crafty has finished unpacking the archive in the background, so the cleanup on the last line cannot remove it too early. The imported server runs `paper.jar` on the container's default Java 25 with auto-start off, because the workstation `start` command starts the server. The staged `eula.txt` has no trailing newline on purpose: Crafty 4.11 compares its first line exactly and otherwise refuses every start without logging an error.
 
 ## Set up the worlds
 

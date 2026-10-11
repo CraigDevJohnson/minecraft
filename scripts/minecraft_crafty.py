@@ -287,6 +287,16 @@ class Adapter:
         server_id = created.get("new_server_id") if isinstance(created, dict) else None
         if not UUID.fullmatch(str(server_id)):
             raise CraftyError("Crafty did not report the new server")
+        # Crafty unpacks the archive in a background thread after the request returns. The archive
+        # must stay in place until then, so wait until Crafty clears its importing flag and the jar is there.
+        server = self.server(instance)
+        jar = self.server_dir(server) / "paper.jar"
+
+        def unpacked() -> bool:
+            stats = self.api.request("GET", f"/api/v2/servers/{server['server_id']}/stats").get("data")
+            return isinstance(stats, dict) and not stats.get("importing") and jar.is_file()
+
+        self.wait(unpacked, self.timeouts["start"], "Crafty did not finish unpacking the archive; check its import log")
         return {"instance": instance, "server_id": server_id}
 
     # Recorded backup state ------------------------------------------------------------------
