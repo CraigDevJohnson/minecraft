@@ -221,27 +221,30 @@ variable "idle_stop" {
 }
 
 variable "launcher" {
-  description = "Optional backend for The Lobby's Minecraft Launcher: status and start through a Function URL only site_role_arn may call. package_path is the zip built by `task lambda:package:launcher`; permissions_boundary_arn is the administrator-created launcher boundary; the function is named <resource_prefix>-<site_environment>-launcher; null deploys none of its resources."
+  description = "Optional backend for The Lobby's Minecraft Launcher: status and start through a Function URL only the site may call. sites maps each Lobby environment the launcher serves (dev, prod) to that site's IAM role, and gets one function per environment, named <resource_prefix>-<environment>-launcher, all sharing one start record because they start the same host. package_path is the zip built by `task lambda:package:launcher`; permissions_boundary_arn is the administrator-created launcher boundary; null deploys none of its resources."
   type = object({
     package_path               = string
-    site_role_arn              = string
-    site_environment           = string
+    sites                      = map(string)
     server_name                = optional(string, "Family server")
     cloudflare_token_parameter = optional(string)
     permissions_boundary_arn   = string
   })
   default = null
   validation {
-    condition     = var.launcher == null || try(can(regex("^arn:aws:iam::[0-9]{12}:role/.+$", var.launcher.site_role_arn)) && split(":", var.launcher.site_role_arn)[4] == var.account_id, false)
-    error_message = "launcher.site_role_arn must name the site's IAM role in the target account."
+    condition     = var.launcher == null || try(length(var.launcher.sites) > 0, false)
+    error_message = "launcher.sites must name at least one Lobby environment and its site role, such as { dev = \"arn:aws:iam::<account>:role/site-dev-server\" }."
+  }
+  validation {
+    condition     = var.launcher == null || try(alltrue([for environment in keys(var.launcher.sites) : can(regex("^[a-z][a-z0-9]{0,11}$", environment))]), false)
+    error_message = "Each launcher.sites key must be the calling site's environment name, such as dev or prod: up to 12 lowercase letters and digits."
+  }
+  validation {
+    condition     = var.launcher == null || try(alltrue([for role_arn in values(var.launcher.sites) : can(regex("^arn:aws:iam::[0-9]{12}:role/.+$", role_arn)) && split(":", role_arn)[4] == var.account_id]), false)
+    error_message = "Each launcher.sites value must name that site's IAM role in the target account."
   }
   validation {
     condition     = var.launcher == null || try(var.launcher.cloudflare_token_parameter == null || can(regex("^/${var.resource_prefix}/[A-Za-z0-9/_.-]+$", var.launcher.cloudflare_token_parameter)), false)
     error_message = "launcher.cloudflare_token_parameter must be an SSM parameter under /<resource_prefix>/."
-  }
-  validation {
-    condition     = var.launcher == null || try(can(regex("^[a-z][a-z0-9]{0,11}$", var.launcher.site_environment)), false)
-    error_message = "launcher.site_environment must be the calling site's environment name, such as dev or prod: up to 12 lowercase letters and digits."
   }
   validation {
     condition     = var.launcher == null || try(length(trimspace(var.launcher.server_name)) > 0 && length(var.launcher.server_name) <= 60, false)
