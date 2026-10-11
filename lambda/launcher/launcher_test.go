@@ -37,11 +37,16 @@ type fakeEC2 struct {
 	err      error
 	startErr error
 	starts   int
+	// onDescribe runs at each DescribeInstances, before its answer.
+	onDescribe func()
 }
 
 func (f *fakeEC2) DescribeInstances(context.Context, *ec2.DescribeInstancesInput, ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.onDescribe != nil {
+		f.onDescribe()
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -370,14 +375,43 @@ func TestStartRecordsBeforeEC2(t *testing.T) {
 	}
 }
 
-func TestStartRefusedByEC2IsRecordedFailed(t *testing.T) {
+func TestStartRefusedByEC2FailsOnceTheHostStaysStopped(t *testing.T) {
 	r := newRig(ec2types.InstanceStateNameStopped, 0)
 	r.ec2.startErr = &smithy.GenericAPIError{Code: "InsufficientInstanceCapacity"}
 	status, started, err := r.launcher.Start(context.Background())
-	if err == nil || started || status.State != Unknown || r.followUps != 0 {
-		t.Fatalf("state=%s started=%v err=%v", status.State, started, err)
+	// The refusal is counted, but one stale read can't prove no other start moved the host: the follow-up decides.
+	if err == nil || !started || status.State != Starting || r.followUps != 1 || r.session(t).Phase != Starting {
+		t.Fatalf("state=%s started=%v err=%v followUps=%d", status.State, started, err, r.followUps)
 	}
-	if session := r.session(t); session.Phase != Failed {
+	// A description lagging a start by seconds doesn't fail it.
+	reads := 0
+	r.launcher.Now = func() time.Time {
+		reads++
+		if reads > 3 {
+			return now.Add(stoppedGrace)
+		}
+		return now
+	}
+	if err := r.launcher.FinishStart(context.Background()); err == nil || !strings.Contains(err.Error(), "did not start") {
+		t.Fatalf("err=%v", err)
+	}
+	if reads <= 3 {
+		t.Fatalf("failed after %d reads of the clock", reads)
+	}
+	if session := r.session(t); session.Phase != Failed || len(r.pointedAt) != 0 {
+		t.Fatalf("session %+v pointed=%v", session, r.pointedAt)
+	}
+}
+
+func TestAnOlderFollowUpThatCannotReadTheHostLeavesARetryAlone(t *testing.T) {
+	r := finishRig(t)
+	retry := Session{RequestedAt: now.Add(time.Minute), Phase: Starting}
+	r.ec2.err = errors.New("throttled")
+	r.ec2.onDescribe = func() { r.setSession(t, retry) }
+	if err := r.launcher.FinishStart(context.Background()); err == nil {
+		t.Fatal("no error")
+	}
+	if session := r.session(t); session != retry {
 		t.Fatalf("session %+v", session)
 	}
 }
@@ -433,7 +467,7 @@ func TestARefusalMeetingAnotherMembersStartKeepsIt(t *testing.T) {
 	r.ec2.launch = now
 	r.ec2.startErr = &smithy.GenericAPIError{Code: "RequestLimitExceeded"}
 	status, started, err := r.launcher.Start(context.Background())
-	if err != nil || !started || status.State != Starting || r.session(t).Phase != Starting {
+	if err == nil || !started || status.State != Starting || r.session(t).Phase != Starting {
 		t.Fatalf("state=%s started=%v err=%v", status.State, started, err)
 	}
 }
@@ -571,6 +605,7 @@ func TestFinishStartRecordsAFailedGame(t *testing.T) {
 func TestFinishStartEndsWithinItsStartsDeadline(t *testing.T) {
 	// The follow-up waited in Lambda's queue: it gets only what is left of the start's deadline.
 	r := finishRig(t)
+	r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameRunning}
 	r.launcher.Now = func() time.Time { return now.Add(startDeadline - finishMargin - 20*time.Millisecond) }
 	r.ssm.online = []bool{false}
 	if err := r.launcher.FinishStart(context.Background()); err == nil || !strings.Contains(err.Error(), "SSM") {

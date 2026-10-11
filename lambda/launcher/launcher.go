@@ -46,6 +46,9 @@ const (
 	finishMargin = 30 * time.Second
 	// commandDelivery is how long SSM may hold the game start before delivering it, in seconds (its minimum).
 	commandDelivery = 30
+	// stoppedGrace is how long a follow-up waits for EC2 to show the host leaving stopped. EC2's description
+	// lags a start by seconds; a host still stopped after this was not started.
+	stoppedGrace = 2 * time.Minute
 )
 
 // pollEvery is how often the follow-up run checks EC2, SSM and the remote start. Tests shorten it.
@@ -173,19 +176,18 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 		if err := l.saveSession(ctx, session); err != nil {
 			return l.answer(Unknown, Session{}), false, err
 		}
-		if _, err := l.EC2.StartInstances(ctx, &ec2.StartInstancesInput{InstanceIds: []string{l.Config.HostID}}); err != nil {
-			// Only EC2's own answer refusing this start is final. IncorrectInstanceState means another Member's
-			// start moved the host on first, and an error without EC2's answer may hide an accepted start. In both
-			// the start stands and gets a follow-up, which repeats harmlessly or fails at the start's deadline.
-			var refused smithy.APIError
-			if errors.As(err, &refused) && refused.ErrorCode() != "IncorrectInstanceState" && !l.hostMoved(ctx) {
-				// A refusal, such as throttling, can meet another Member's accepted start: record the failure
-				// only while the record is still this request's and the host has not moved.
-				_ = l.fail(ctx, session, errors.New("EC2 refused the start"))
-				return l.answer(Unknown, Session{}), false, fmt.Errorf("start host: %w", err)
-			}
+		_, startErr := l.EC2.StartInstances(ctx, &ec2.StartInstancesInput{InstanceIds: []string{l.Config.HostID}})
+		// No error here fails the start. IncorrectInstanceState means another Member's start moved the host on
+		// first, an error without EC2's answer may hide an accepted start, and a refusal such as throttling can
+		// meet another Member's accepted start that a fresh description does not show yet. The start stands and
+		// its follow-up decides: it repeats harmlessly, or records the failure once the host has stayed stopped.
+		var refused smithy.APIError
+		if errors.As(startErr, &refused) && refused.ErrorCode() != "IncorrectInstanceState" {
+			startErr = fmt.Errorf("start host: %w", startErr)
+		} else {
+			startErr = nil
 		}
-		return l.answer(Starting, session), true, l.followUp(ctx)
+		return l.answer(Starting, session), true, errors.Join(startErr, l.followUp(ctx))
 	case ec2types.InstanceStateNameRunning, ec2types.InstanceStateNamePending:
 		state, err := l.decide(ctx, h, session)
 		if err != nil {
@@ -208,12 +210,6 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 		}
 		return l.answer(state, l.current(h, session)), false, nil
 	}
-}
-
-// hostMoved reports whether a fresh description shows the host pending or running.
-func (l *Launcher) hostMoved(ctx context.Context) bool {
-	h, err := l.describeHost(ctx)
-	return err == nil && (h.state == ec2types.InstanceStateNamePending || h.state == ec2types.InstanceStateNameRunning)
 }
 
 // unknown answers when the host cannot be read. A saved DNS failure still hides the address: it may be this run's.
@@ -380,9 +376,10 @@ func (l *Launcher) FinishStart(ctx context.Context) error {
 		ctx, cancel = context.WithTimeout(ctx, remaining)
 		defer cancel()
 	}
-	h, err := l.waitRunning(ctx)
+	h, err := l.waitRunning(ctx, requested.RequestedAt)
 	if err != nil {
-		return l.fail(ctx, Session{}, err)
+		// Only the start this follow-up was sent for may be failed: a retry recorded meanwhile is left alone.
+		return l.fail(ctx, requested, err)
 	}
 	session, err := l.loadSession(ctx)
 	if err != nil {
@@ -462,7 +459,9 @@ func (l *Launcher) fail(ctx context.Context, session Session, cause error) error
 	return errors.Join(cause, l.saveSession(ctx, session))
 }
 
-func (l *Launcher) waitRunning(ctx context.Context) (host, error) {
+// waitRunning waits for the host to run with a public address. A host still stopped stoppedGrace after the
+// start was requested was not started.
+func (l *Launcher) waitRunning(ctx context.Context, requestedAt time.Time) (host, error) {
 	for {
 		h, err := l.describeHost(ctx)
 		if err != nil {
@@ -473,8 +472,12 @@ func (l *Launcher) waitRunning(ctx context.Context) (host, error) {
 			if net.ParseIP(h.publicIP) != nil {
 				return h, nil
 			}
-		case ec2types.InstanceStateNamePending, ec2types.InstanceStateNameStopped:
-			// Stopped is EC2's eventual consistency right after StartInstances.
+		case ec2types.InstanceStateNameStopped:
+			// Stopped is EC2's eventual consistency right after StartInstances, for a few seconds.
+			if !requestedAt.IsZero() && l.Now().Sub(requestedAt) >= stoppedGrace {
+				return host{}, errors.New("EC2 did not start the host")
+			}
+		case ec2types.InstanceStateNamePending:
 		default:
 			return host{}, fmt.Errorf("host cannot reach running from %s", h.state)
 		}
