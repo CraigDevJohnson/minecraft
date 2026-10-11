@@ -1,6 +1,6 @@
 # ADR 0002: Dynamic public IPv4 with a Cloudflare hostname
 
-Status: Accepted, 2026-10-03.
+Status: Accepted, 2026-10-03. Starts from The Lobby's Minecraft Launcher are governed by [ADR 0005](0005-lobby-launcher-starts-from-aws.md) instead.
 
 The host runs only during play, but its Elastic IP billed all month: about $3.65, roughly 43% of the idle bill. An auto-assigned public IPv4 address has the same hourly rate and bills only while the host runs. It changes on every start, so players need a stable name that follows the host.
 

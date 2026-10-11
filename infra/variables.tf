@@ -232,8 +232,8 @@ variable "launcher" {
   })
   default = null
   validation {
-    condition     = var.launcher == null || try(can(regex("^arn:aws:iam::[0-9]{12}:role/.+$", var.launcher.site_role_arn)), false)
-    error_message = "launcher.site_role_arn must name the site's IAM role."
+    condition     = var.launcher == null || try(can(regex("^arn:aws:iam::[0-9]{12}:role/.+$", var.launcher.site_role_arn)) && split(":", var.launcher.site_role_arn)[4] == var.account_id, false)
+    error_message = "launcher.site_role_arn must name the site's IAM role in the target account."
   }
   validation {
     condition     = var.launcher == null || try(var.launcher.cloudflare_token_parameter == null || can(regex("^/${var.resource_prefix}/[A-Za-z0-9/_.-]+$", var.launcher.cloudflare_token_parameter)), false)

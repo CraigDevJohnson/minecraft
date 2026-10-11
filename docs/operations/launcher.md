@@ -31,7 +31,7 @@ A DNS failure never stops the game. The run records it, the page shows no connec
 
 The function can start the host but never stop it. Stopping stays with the workstation `stop`, the idle stop, and EC2's own shutdown drain.
 
-The Cloudflare token is read at runtime from one SSM SecureString, `/<resource_prefix>/launcher/cloudflare-token` by default, which you create (G6 in aws-setup's `aws-design.md`). OpenTofu, the function's environment, state and logs hold only its name. The token is sent only to the fixed Cloudflare API, redirects are refused, and errors never include it.
+The Cloudflare token is read at runtime from one SSM SecureString, `/<resource_prefix>/launcher/cloudflare-token` by default, which you create (G6 in aws-setup's `aws-design.md`). [ADR 0005](../adr/0005-lobby-launcher-starts-from-aws.md) records why the token moves into AWS for these starts. OpenTofu, the function's environment, state and logs hold only its name. The token is sent only to the fixed Cloudflare API, redirects are refused, and errors never include it.
 
 ## Deploy
 

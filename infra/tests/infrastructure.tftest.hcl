@@ -909,3 +909,11 @@ run "reject_launcher_boundary_inside_the_resource_prefix" {
   }
   expect_failures = [var.launcher]
 }
+
+run "reject_launcher_site_role_in_another_account" {
+  command = plan
+  variables {
+    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", site_role_arn = "arn:aws:iam::999900001111:role/site-dev-server", site_environment = "dev", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
+  }
+  expect_failures = [var.launcher]
+}

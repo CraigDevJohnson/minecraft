@@ -629,6 +629,34 @@ func TestNoGameStartWithoutTimeToFinishIt(t *testing.T) {
 	}
 }
 
+func TestAnOlderFollowUpNeverOverwritesARetry(t *testing.T) {
+	r := finishRig(t)
+	retry := Session{RequestedAt: now.Add(time.Minute), Phase: Starting}
+	// The retry is recorded while this older follow-up is between its steps.
+	r.launcher.PointDNS = func(context.Context, string) error { r.setSession(t, retry); return nil }
+	if err := r.launcher.FinishStart(context.Background()); err == nil || len(r.ssm.commands) != 0 {
+		t.Fatalf("err=%v commands=%v", err, r.ssm.commands)
+	}
+	if session := r.session(t); session != retry {
+		t.Fatalf("session %+v", session)
+	}
+}
+
+func TestUnreadableStateHidesTheAddress(t *testing.T) {
+	r := newRig(ec2types.InstanceStateNameRunning, time.Hour)
+	r.ssm.getErr = errors.New("throttled")
+	if status, err := r.launcher.Status(context.Background()); err == nil || status.Connection.Java != nil {
+		t.Fatalf("status %+v err=%v", status, err)
+	}
+	if status, _, err := r.launcher.Start(context.Background()); err == nil || status.Connection.Java != nil {
+		t.Fatalf("status %+v err=%v", status, err)
+	}
+	r.ec2.err = errors.New("throttled")
+	if status, err := r.launcher.Status(context.Background()); err == nil || status.Connection.Java != nil {
+		t.Fatalf("status %+v err=%v", status, err)
+	}
+}
+
 func TestFinishStartGivesUpAtItsDeadline(t *testing.T) {
 	r := finishRig(t)
 	r.ssm.online = []bool{false}

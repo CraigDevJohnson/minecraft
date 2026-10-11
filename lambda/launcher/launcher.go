@@ -141,7 +141,7 @@ func (l *Launcher) Status(ctx context.Context) (Status, error) {
 	}
 	session, err := l.loadSession(ctx)
 	if err != nil {
-		return l.answer(Unknown, Session{}), err
+		return l.answer(Unknown, unreadable), err
 	}
 	state, err := l.decide(ctx, h, session)
 	if err != nil {
@@ -163,7 +163,7 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 	}
 	session, err := l.loadSession(ctx)
 	if err != nil {
-		return l.answer(Unknown, Session{}), false, err
+		return l.answer(Unknown, unreadable), false, err
 	}
 	now := l.Now().UTC()
 	switch h.state {
@@ -220,10 +220,14 @@ func (l *Launcher) hostMoved(ctx context.Context) bool {
 func (l *Launcher) unknown(ctx context.Context) Status {
 	session, err := l.loadSession(ctx)
 	if err != nil {
-		session = Session{}
+		session = unreadable
 	}
 	return l.answer(Unknown, session)
 }
+
+// unreadable stands in for launcher state that could not be read: whether DNS follows the host is unknown,
+// so the answer shows no address.
+var unreadable = Session{DNS: "failed"}
 
 func (l *Launcher) followUp(ctx context.Context) error {
 	if err := l.FollowUp(ctx); err != nil {
@@ -396,7 +400,9 @@ func (l *Launcher) FinishStart(ctx context.Context) error {
 	if err := l.PointDNS(ctx, h.publicIP); err != nil {
 		session.DNS = "failed"
 	}
-	if err := l.saveSession(ctx, session); err != nil {
+	if err := l.saveOwned(ctx, session); errors.Is(err, errFinished) {
+		return nil
+	} else if err != nil {
 		return err
 	}
 	if err := l.waitSSM(ctx); err != nil {
@@ -407,7 +413,9 @@ func (l *Launcher) FinishStart(ctx context.Context) error {
 	}
 	session.Phase = Ready
 	session.Detail = ""
-	if err := l.saveSession(ctx, session); err != nil {
+	if err := l.saveOwned(ctx, session); errors.Is(err, errFinished) {
+		return nil
+	} else if err != nil {
 		return err
 	}
 	if session.DNS == "failed" {
@@ -415,6 +423,25 @@ func (l *Launcher) FinishStart(ctx context.Context) error {
 	}
 	return nil
 }
+
+// saveOwned saves a follow-up's progress only while its start still owns the record, so a sibling follow-up
+// of an older start never overwrites a retry a Member began since.
+func (l *Launcher) saveOwned(ctx context.Context, session Session) error {
+	saved, err := l.loadSession(ctx)
+	if err != nil {
+		return err
+	}
+	if !saved.RequestedAt.Equal(session.RequestedAt) {
+		return errors.New("a later start owns the record")
+	}
+	if saved.Phase == Ready {
+		return errFinished
+	}
+	return l.saveSession(ctx, session)
+}
+
+// errFinished means a repeated follow-up found its start already finished by another.
+var errFinished = errors.New("the start already finished")
 
 func (l *Launcher) fail(ctx context.Context, session Session, cause error) error {
 	// The deadline that ended the start must not also lose its record.
