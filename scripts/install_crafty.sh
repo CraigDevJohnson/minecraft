@@ -79,7 +79,8 @@ LAUNCHER
 chmod 0755 /usr/local/sbin/minecraft-instance
 
 # Stopping the unit (including an EC2 stop without the operator's drain) archives first. The
-# containers always stop afterwards, but a failed drain still fails the unit so it shows in the journal.
+# containers always stop afterwards, but a failed drain or a failed container stop fails the unit, so it
+# shows in the journal and a container left running is never reported as a clean stop.
 # Every start re-verifies the retained disk, so Compose can never create a blank Crafty on the root disk.
 cat >/etc/systemd/system/minecraft-crafty.service <<'UNIT'
 [Unit]
@@ -94,7 +95,7 @@ RemainAfterExit=yes
 EnvironmentFile=/etc/minecraft/storage.conf
 ExecStartPre=/usr/local/sbin/minecraft-storage verify --volume-id $DATA_VOLUME_ID --filesystem-uuid $DATA_FILESYSTEM_UUID
 ExecStart=/usr/bin/docker compose -f /opt/minecraft-crafty/compose.yaml up --detach --wait
-ExecStop=/bin/sh -c '/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json host-drain; drained=$$?; /usr/bin/docker compose -f /opt/minecraft-crafty/compose.yaml stop; exit $$drained'
+ExecStop=/bin/sh -c '/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json host-drain; drained=$$?; /usr/bin/docker compose -f /opt/minecraft-crafty/compose.yaml stop; stopped=$$?; [ $$drained -eq 0 ] || exit $$drained; exit $$stopped'
 TimeoutStartSec=600
 TimeoutStopSec=900
 

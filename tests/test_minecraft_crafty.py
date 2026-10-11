@@ -73,6 +73,7 @@ class FakeHost:
         self.clock = 0.0
         self.calls = []
         self.stored = {}
+        self.metadata = {}
 
     def monotonic(self):
         return self.clock
@@ -94,6 +95,10 @@ class FakeHost:
     def lock(self, path):
         return contextlib.nullcontext()
 
+    def download(self, region, bucket, key, read):
+        self.calls.append(("s3", "cp-down", key))
+        read(io.BytesIO(self.stored[key]))
+
     def upload(self, region, bucket, key, expected_size, write):
         self.calls.append(("s3", "cp", key))
         sink = io.BytesIO()
@@ -112,7 +117,12 @@ class FakeHost:
             self.stored[key] = body
             return {}
         if operation == "head-object":
-            return {"ContentLength": len(self.stored[key])}
+            return {"ContentLength": len(self.stored[key]), "Metadata": self.metadata.get(key, {})}
+        if operation == "get-object":
+            if key not in self.stored:
+                raise crafty.CraftyError("AWS get-object failed")
+            Path(arguments[-1]).write_bytes(self.stored[key])
+            return {}
         if operation == "list-objects-v2":
             prefix = arguments[arguments.index("--prefix") + 1]
             return {"Contents": [{"Key": key} for key in self.stored if key.startswith(prefix)]}
@@ -211,6 +221,65 @@ class AdapterTests(unittest.TestCase):
         result = adapter.host_drain()
         self.assertEqual(host.stored, stored)
         self.assertEqual(result["instances"]["family"], {"instance": "family", "application": "stopped", "backup": "complete"})
+
+    def played_server(self):
+        folder = self.root / "crafty" / "servers" / SERVER_ID
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "level.dat").write_bytes(b"first session")
+        return folder
+
+    def test_shutdown_drain_archives_again_after_play_from_the_crafty_ui(self):
+        folder = self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        adapter.host_drain()
+        # The EC2 stop failed, and the admin then played and stopped from Crafty's own UI.
+        (folder / "level.dat").write_bytes(b"second session")
+        host.now = lambda: datetime.datetime(2026, 10, 10, 19, 0, 0, tzinfo=datetime.timezone.utc)
+        adapter.host_drain()
+        self.assertEqual(sum(call[:2] == ("s3", "cp") for call in host.calls), 2)
+
+    def test_restore_replaces_the_server_folder_with_a_verified_archive(self):
+        folder = self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        adapter.host_drain()
+        key = "instances/family/crafty/20261010T180000Z.tar.gz"
+        (folder / "level.dat").write_bytes(b"corrupted")
+        (folder / "stray.txt").write_bytes(b"x")
+        result = adapter.restore("family", key)
+        self.assertEqual((folder / "level.dat").read_bytes(), b"first session")
+        self.assertFalse((folder / "stray.txt").exists())
+        self.assertEqual(result["restored"], key)
+        self.assertEqual((Path(result["replaced"]) / "level.dat").read_bytes(), b"corrupted")
+
+    def test_restore_reads_the_checksum_older_archives_keep_in_metadata(self):
+        folder = self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        adapter.host_drain()
+        key = "instances/family/crafty/20261010T180000Z.tar.gz"
+        host.metadata[key] = {"sha256": host.stored.pop(key + ".sha256").split()[0].decode()}
+        (folder / "level.dat").write_bytes(b"corrupted")
+        adapter.restore("family", key)
+        self.assertEqual((folder / "level.dat").read_bytes(), b"first session")
+
+    def test_restore_refuses_a_running_server_a_bad_checksum_or_a_foreign_key(self):
+        folder = self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        key = "instances/family/crafty/20261010T180000Z.tar.gz"
+        with self.assertRaises(crafty.CraftyError):
+            adapter.restore("family", key)  # still running
+        adapter.host_drain()
+        (folder / "level.dat").write_bytes(b"current")
+        with self.assertRaises(crafty.CraftyError):
+            adapter.restore("family", "instances/other/crafty/20261010T180000Z.tar.gz")
+        host.stored[key + ".sha256"] = b"0" * 64 + b"  x\n"
+        with self.assertRaises(crafty.CraftyError):
+            adapter.restore("family", key)
+        self.assertEqual((folder / "level.dat").read_bytes(), b"current")
+        self.assertEqual(list((self.root / "crafty" / "staging").glob("restore-*")), [])
 
     def test_failed_prune_keeps_the_verified_backup(self):
         api = FakeAPI(running=True)

@@ -89,7 +89,9 @@ mvinv list
 
 Multiverse-Inventories keeps a world that is not in any group on its own inventory, so `creative` must not appear in the `default` group in `mvinv list`. If it does, run `mvinv remove-worlds default creative`.
 
-Portals are made in game by an operator (`op <JavaName>` from the console first). Build a frame at the `survival` spawn, run `/mvp wand`, select two opposite corners of the frame with the wand, then run `/mvp create to-creative w:creative`. Make the return portal in `creative` the same way with `/mvp create to-survival w:survival`.
+Portals are made in game by an operator (`op <JavaName>` from the console first). Build a frame at the `survival` spawn and run `/mvp wand`, which gives a wooden pickaxe. Left-click one corner block of the frame's opening and right-click the opposite corner, then run `/mvp create to-creative w:creative`. Make the return portal in `creative` the same way with `/mvp create to-survival w:survival`.
+
+Multiverse-Portals lets only players with `multiverse.portal.access.<portal>` use a portal, and this server installs no permissions plugin, so by default only operators get through. With the server stopped, set `enforce-portal-access: false` under `portal-usage` in `plugins/Multiverse-Portals/config.yml` in the server folder (`/srv/minecraft/crafty/servers/<server id>/`). Multiverse-Core's `enforce-access` is already `false`, so entering `creative` needs no further permission.
 
 Add each family player to the allowlist from the console: `whitelist add <JavaName>` for Java accounts and `fwhitelist add <Gamertag>` for Bedrock accounts, as in [allowlist](allowlist.md).
 
@@ -105,8 +107,20 @@ python3 scripts/minecraft_host.py --deployment operator-config/family/deployment
 
 `start` starts EC2, updates DNS, and asks Crafty to start the server, waiting until the Java port answers. `stop` asks Crafty to stop the server, streams an archive of the stopped server folder to `s3://<bucket>/instances/family/crafty/<UTC time>.tar.gz` (no second copy on the data disk and no 5 GB limit), verifies the stored size, writes its SHA-256 beside it as `<UTC time>.tar.gz.sha256`, keeps the newest 14 archives, then stops EC2 and parks DNS. If the archive fails, EC2 is not stopped. Once a stop has begun, `start` is refused until the host has been stopped and started again, so a stop can never race a new session. Stopping the host any other way still runs the same drain from `minecraft-crafty.service`; if that drain fails, the unit is marked failed in the journal.
 
+## Recover from an archive
+
+Every archive is the whole server folder: worlds, player data, plugin settings and the allowlist. To put one back, stop the server, pick a key from `aws s3 ls s3://<bucket>/instances/family/crafty/`, and on the host run:
+
+```sh
+sudo /usr/local/sbin/minecraft-instance restore family --key instances/family/crafty/<UTC time>.tar.gz
+```
+
+The command streams the archive from S3, checks it against its recorded SHA-256, and only then swaps it in. The folder it replaces is kept as `/srv/minecraft/crafty/staging/replaced-family-<UTC time>`; delete it once the restored server has been checked. Then start the server as usual.
+
+After losing the data disk, first rebuild the host through this runbook up to and including [Create the server](#create-the-server), which gives Crafty an empty `family` server, then run the same `restore`. Crafty's own login, API key and settings live on the data disk and are not in the archive, so they are set up again.
+
 ## Acceptance
 
 1. A Java client and a Bedrock client join the hostname, and an unlisted account is refused.
-2. Both players walk through the portal to `creative`, are in creative mode there, and keep separate inventories from `survival`.
+2. Both players, including one who is not an operator, walk through the portal to `creative`, are in creative mode there, and keep separate inventories from `survival`.
 3. `stop` stores an archive, and the next `start` comes back with the same worlds and inventories.

@@ -1,6 +1,6 @@
 # Family Minecraft operations
 
-Operate independent `survival` and `creative` instances for six family players using Java and Bedrock clients, with full infrastructure provisioning, persistent data, and verified recovery. On October 3, 2026, Craig directed that a separate creative world be stood up, advancing the original ongoing hobby scope of two or three instances. Each instance owns separate world data, ports, backups and lifecycle; further content can be selected as needed.
+Operate one `family` server instance for six family players using Java and Bedrock clients, with full infrastructure provisioning, persistent data, and verified recovery. On October 10, 2026, Craig chose to rebuild on Crafty Controller and Multiverse ([ADR 0004](docs/adr/0004-crafty-multiverse-rebuild.md)): one Paper server holds the `survival` and `creative` worlds, linked by portals, behind one join address. The instance owns one server folder, one pair of ports, one backup namespace and one lifecycle. The earlier independent `survival` and `creative` instances, described in the dated records below, are superseded and their test worlds were not kept.
 
 On October 3, 2026, Craig accepted the connected clients and waived requirements or validations involving consoles or family-member testing. Reported joins were Java on Mac, Bedrock on iPhone and two iPads, with four simultaneous players. PS5/Switch were untested and BedrockConnect was never configured; console guidance remains optional future help. Family-device acceptance is resolved by user acceptance/waiver, with unperformed checks recorded as unperformed rather than passed.
 
@@ -12,12 +12,14 @@ Craig also removed recovery authorization and maintenance windows and overall re
 
 - **Host:** the replaceable EC2 machine. Its running/stopped state controls compute billing.
 - **Endpoint:** the DNS hostname players use to reach the host. Its IPv4 address changes on every host start and is parked on a never-routed address while the host is stopped.
-- **Server instance:** one independently configured Minecraft runtime and content set, such as `survival` or `creative`. It owns its world data, ports, backup namespace, and lifecycle.
-- **World:** a playable map/dimension within an instance. An instance can include its Overworld, Nether, and End; those do not require separate machines.
+- **Server instance:** one independently configured Minecraft runtime and content set. The only one is `family`, run by Crafty Controller. It owns its server folder, ports, backup namespace, and lifecycle.
+- **World:** a playable map within an instance. `family` holds two Multiverse worlds, `survival` (with its Nether and End) and `creative`, each with its own inventories. Worlds share the instance's ports, archive and lifecycle.
+- **Crafty Controller:** the process manager and admin web UI on the host. It alone starts and stops the server; the lifecycle adapter asks it to through its loopback API.
+- **Archive:** one stopped-server folder stored in S3 on every stop, with its SHA-256. It is the recovery point for the `family` instance.
 - **Content manifest:** the exact runtime, plugins/mods, resource packs, mappings, versions, and integrity metadata needed to recreate an instance.
 - **Recovery point:** a verified, completed backup of the data and content configuration needed to recover an instance.
 
-GitHub issues define task acceptance criteria. The [server design](docs/superpowers/specs/2026-09-07-server-operations-design.md) records shared requirements; [ADR 0001](docs/adr/0001-independent-server-instances.md) records the runtime boundary and [ADR 0002](docs/adr/0002-dynamic-public-ipv4-with-cloudflare-hostname.md) the endpoint.
+GitHub issues define task acceptance criteria. The [server design](docs/superpowers/specs/2026-09-07-server-operations-design.md) records shared requirements; [ADR 0001](docs/adr/0001-independent-server-instances.md) records the earlier runtime boundary that [ADR 0004](docs/adr/0004-crafty-multiverse-rebuild.md) supersedes, and [ADR 0002](docs/adr/0002-dynamic-public-ipv4-with-cloudflare-hostname.md) the endpoint.
 
 An opt-in **host session** owns a temporary host, its replaceable root and orderly data attachment; the independent data disk remains retained in the first on-demand phase. An absent host is a valid version-2 deployment handoff, and the designated operator workstation recreates/configures it before instance start. [ADR 0003](docs/adr/0003-on-demand-host-sessions.md) records this accepted lifecycle and its separate live migration/recurring-policy evidence.
 

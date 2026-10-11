@@ -162,6 +162,23 @@ class Host:
         if code:
             raise CraftyError("AWS upload failed")
 
+    def download(self, region: str, bucket: str, key: str, read) -> None:
+        """Stream an object from S3 into `read`, so a restore needs no second copy on the data disk."""
+        command = ["aws", "--region", region, "--no-cli-pager", "s3", "cp", f"s3://{bucket}/{key}", "-", "--only-show-errors"]
+        try:
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            raise CraftyError("AWS download could not run") from exc
+        try:
+            read(process.stdout)
+            code = process.wait(timeout=1800)
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+        if code:
+            raise CraftyError("AWS download failed")
+
     @contextlib.contextmanager
     def lock(self, path: Path):
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -187,6 +204,30 @@ class _Counted:
         self.size += len(data)
         self.digest.update(data)
         return len(data)
+
+
+class _CountedReader:
+    """Read-through source that hashes an archive as it streams from S3."""
+
+    def __init__(self, source):
+        self.source, self.digest = source, hashlib.sha256()
+
+    def read(self, size: int = -1) -> bytes:
+        data = self.source.read(size)
+        self.digest.update(data)
+        return data
+
+
+def fingerprint(source: Path) -> list:
+    """Entry count, total size and newest change of a stopped server folder. Any session Crafty
+    runs rewrites logs and world files, and the change time cannot be set back with utime."""
+    count, size, newest = 0, 0, 0
+    for folder, names, files in os.walk(source):
+        for name in (".", *names, *files):
+            entry = os.lstat(os.path.join(folder, name))
+            count, size = count + 1, size + entry.st_size
+            newest = max(newest, entry.st_mtime_ns, entry.st_ctime_ns)
+    return [count, size, newest]
 
 
 class Adapter:
@@ -338,12 +379,82 @@ class Adapter:
         # Always archive: the server may also have been started and stopped from the Crafty UI,
         # so the only safe evidence that the latest play is stored is a fresh archive.
         try:
+            source = self.server_dir(server)
+            before = fingerprint(source) if source.is_dir() and not source.is_symlink() else None
             stored = self.archive(instance, server)
         except Exception:
             self.record(instance, backup="failed", boot_id=self.host.boot_id())
             raise
-        self.record(instance, backup="complete", **stored, boot_id=self.host.boot_id())
+        self.record(instance, backup="complete", **stored, boot_id=self.host.boot_id(), fingerprint=before)
         return {"instance": instance, "application": "stopped", "backup": "complete"}
+
+    def unchanged(self, instance: str) -> bool:
+        """Whether the stopped server folder is exactly as it was when its last archive was stored."""
+        try:
+            state = json.loads(self.state_path(instance).read_text())
+            recorded = state.get("fingerprint") if isinstance(state, dict) else None
+            return recorded is not None and recorded == fingerprint(self.server_dir(self.server(instance)))
+        except (OSError, ValueError, CraftyError):
+            return False
+
+    def restore(self, instance: str, key: str) -> dict:
+        """Replace the stopped server folder with a verified archive from S3. The folder it
+        replaces is kept under crafty/staging until the operator deletes it."""
+        with self.lifecycle():
+            prefix = f"instances/{instance}/crafty/"
+            if not re.fullmatch(re.escape(prefix) + r"[0-9]{8}T[0-9]{6}Z\.tar\.gz", key):
+                raise CraftyError("restore needs the key of one of this instance's archives")
+            server = self.server(instance)
+            if self.running(server):
+                raise CraftyError("stop the server before restoring it")
+            target, backup = self.server_dir(server), self.config["backup"]
+            staging = self.root / "crafty" / "staging"
+            staging.mkdir(mode=0o700, parents=True, exist_ok=True)
+            work = Path(tempfile.mkdtemp(dir=staging, prefix="restore-"))
+            try:
+                expected = self.archive_checksum(backup, key, work / "checksum")
+                counted = {}
+
+                def read(source) -> None:
+                    counted["source"] = _CountedReader(source)
+                    # The archive is this adapter's own, so keep its owners; the tar filter still
+                    # refuses absolute paths, links out of the folder and device files.
+                    with tarfile.open(fileobj=counted["source"], mode="r|gz") as bundle:
+                        bundle.extractall(work / "files", filter="tar", numeric_owner=True)
+                    while counted["source"].read(1024 * 1024):
+                        pass
+
+                try:
+                    self.host.download(backup["region"], backup["bucket"], key, read)
+                except (tarfile.TarError, EOFError) as exc:
+                    raise CraftyError("the archive could not be unpacked") from exc
+                digest = counted["source"].digest.hexdigest()
+                restored = work / "files" / instance
+                if digest != expected or not restored.is_dir() or restored.is_symlink():
+                    raise CraftyError("the archive does not match its recorded SHA-256")
+                replaced = None
+                if target.exists():
+                    replaced = staging / f"replaced-{instance}-{self.host.now().strftime('%Y%m%dT%H%M%SZ')}"
+                    target.rename(replaced)
+                restored.rename(target)
+                self.record(instance, backup="complete", key=key, sha256=digest, boot_id=self.host.boot_id(),
+                            fingerprint=fingerprint(target))
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+        return {"instance": instance, "restored": key, "replaced": str(replaced) if replaced else None}
+
+    def archive_checksum(self, backup: dict, key: str, scratch: Path) -> str:
+        """The archive's recorded SHA-256: the `.sha256` object beside it, or the object metadata
+        that archives stored before 2026-10-11 carry."""
+        try:
+            self.host.aws(backup["region"], "s3api", "get-object", "--bucket", backup["bucket"], "--key", f"{key}.sha256", str(scratch))
+            value = scratch.read_text().split()[0]
+        except (CraftyError, OSError, IndexError):
+            head = self.host.aws(backup["region"], "s3api", "head-object", "--bucket", backup["bucket"], "--key", key)
+            value = head.get("Metadata", {}).get("sha256", "")
+        if not SHA256.fullmatch(value):
+            raise CraftyError("the archive has no recorded SHA-256")
+        return value
 
     def archive(self, instance: str, server: dict) -> dict:
         """Cold archive of the stopped server directory, streamed to S3 and verified there.
@@ -408,8 +519,11 @@ class Adapter:
                 # The operator's stop already drained this boot; EC2's shutdown runs the drain again.
                 # Archive only if something has run since, so one session is not stored twice.
                 current = {name: self.status(name) for name in sorted(self.config["instances"])}
-                if all(value["application"] == "stopped" and value["backup"] in ("complete", "not-required")
-                       for value in current.values()):
+                # A session run from Crafty's own UI bypasses this adapter's state, so the stopped
+                # folder must also be exactly as archived.
+                if all(value["application"] == "stopped" and (value["backup"] == "not-required" or
+                                                              (value["backup"] == "complete" and self.unchanged(name)))
+                       for name, value in current.items()):
                     return {"draining": True, "instances": {name: {key: value[key] for key in ("instance", "application", "backup")}
                                                             for name, value in current.items()}}
             write_durably(self.root / "crafty" / STATE_DIR / "host-drain.json", {"boot_id": self.host.boot_id()})
@@ -560,6 +674,9 @@ def main(argv=None, *, api=None, host=None) -> int:
     create.add_argument("instance")
     create.add_argument("--archive-name", required=True)
     create.add_argument("--max-memory-gb", type=int, default=5)
+    restore = commands.add_parser("restore", help="replace the stopped server folder with a verified archive from S3")
+    restore.add_argument("instance")
+    restore.add_argument("--key", required=True)
     args = parser.parse_args(argv)
     try:
         if args.action == "stage-import":
@@ -576,6 +693,8 @@ def main(argv=None, *, api=None, host=None) -> int:
         handlers = {"start": adapter.start, "stop": adapter.stop, "status": adapter.status}
         if args.action in handlers:
             output = handlers[args.action](args.instance)
+        elif args.action == "restore":
+            output = adapter.restore(args.instance, args.key)
         elif args.action == "import-server":
             output = adapter.import_server(args.instance, args.archive_name, args.max_memory_gb)
         elif args.action == "host-drain":
