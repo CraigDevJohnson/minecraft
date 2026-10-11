@@ -340,6 +340,21 @@ class AdapterTests(unittest.TestCase):
                 adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
         self.assertEqual((folder / "level.dat").read_bytes(), b"current")
 
+    def test_a_server_started_during_the_archive_fails_the_stop(self):
+        self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        upload = host.upload
+
+        def upload_then_started(*arguments):
+            upload(*arguments)
+            api.is_running = True  # started from Crafty's own UI while the archive uploaded
+
+        host.upload = upload_then_started
+        with self.assertRaises(crafty.CraftyError):
+            adapter.host_drain()
+        self.assertEqual(adapter.backup_state("family"), "failed")
+
     def test_failed_prune_keeps_the_verified_backup(self):
         api = FakeAPI(running=True)
         adapter, host = self.adapter(api)
@@ -589,10 +604,30 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaises(crafty.CraftyError):
                 adapter.import_server("family", "family.zip", 5)
 
+    def test_import_server_rerun_resumes_waiting_for_an_unfinished_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api = FakeAPI()  # the server record exists, but its files are not unpacked yet
+            host = FakeHost(api)
+            adapter = crafty.Adapter(config(Path(directory)), api, host)
+            folder = Path(directory) / "crafty" / "servers" / SERVER_ID
+            sleep = host.sleep
+
+            def unpack_later(seconds):
+                sleep(seconds)
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "paper.jar").write_bytes(b"jar")
+
+            host.sleep = unpack_later
+            self.assertEqual(adapter.import_server("family", "family.zip", 5), {"instance": "family", "server_id": SERVER_ID})
+            self.assertEqual(api.created, [])
+
     def test_import_server_refuses_an_existing_server_or_a_path(self):
         with tempfile.TemporaryDirectory() as directory:
             api = FakeAPI()
             adapter = crafty.Adapter(config(Path(directory)), api, FakeHost(api))
+            folder = Path(directory) / "crafty" / "servers" / SERVER_ID
+            folder.mkdir(parents=True)
+            (folder / "paper.jar").write_bytes(b"jar")
             with self.assertRaises(crafty.CraftyError):
                 adapter.import_server("family", "family.zip", 5)
             api.no_servers = True

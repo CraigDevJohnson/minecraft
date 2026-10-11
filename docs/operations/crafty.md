@@ -115,7 +115,7 @@ Every archive is the whole server folder: worlds, player data, plugin settings a
 sudo /usr/local/sbin/minecraft-instance restore family --key instances/family/crafty/<UTC time>.tar.gz
 ```
 
-The command streams the archive from S3, checks it against its recorded SHA-256, and only then swaps it in. The folder it replaces is kept as `/srv/minecraft/crafty/staging/replaced-family-<UTC time>`; delete it once the restored server has been checked. If the command is cut off partway, such as by a power loss, and the server folder is missing afterwards, move that kept folder back to `/srv/minecraft/crafty/servers/<server id>` and run `restore` again. Then start the server as usual.
+The command streams the archive from S3, checks it against its recorded SHA-256, and only then swaps it in. It unpacks beside the current folder, so the data disk needs free space for one more copy of the server; [grow the disk](data-disk-capacity.md#grow-the-disk) first if `status` shows less than that. The folder it replaces is kept as `/srv/minecraft/crafty/staging/replaced-family-<UTC time>`; delete it once the restored server has been checked. If the command is cut off partway, such as by a power loss, and the server folder is missing afterwards, move that kept folder back to `/srv/minecraft/crafty/servers/<server id>` and run `restore` again. Then start the server as usual.
 
 After losing the data disk, first rebuild the host through this runbook up to and including [Create the server](#create-the-server), which gives Crafty an empty `family` server, then run the same `restore`. Crafty's own login, API key and settings live on the data disk and are not in the archive, so they are set up again.
 

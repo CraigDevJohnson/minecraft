@@ -275,7 +275,11 @@ class Adapter:
             raise CraftyError("maximum memory must be a whole number of GB from 1 through 64")
         servers = self.api.request("GET", "/api/v2/servers").get("data")
         if any(isinstance(server, dict) and server.get("server_name") == settings["server_name"] for server in servers or []):
-            raise CraftyError(f"Crafty already has a server named {settings['server_name']}")
+            # A rerun after a slow import resumes the wait; a finished server is never imported twice.
+            server = self.server(instance)
+            if (self.server_dir(server) / "paper.jar").is_file() and not self._importing(server):
+                raise CraftyError(f"Crafty already has a server named {settings['server_name']}")
+            return self._await_import(instance, server)
         created = self.api.request("POST", "/api/v2/servers", {
             "name": settings["server_name"], "roles": [], "monitoring_type": "minecraft_java",
             "minecraft_java_monitoring_data": {"host": "127.0.0.1", "port": settings["java_port"]},
@@ -287,17 +291,20 @@ class Adapter:
         server_id = created.get("new_server_id") if isinstance(created, dict) else None
         if not UUID.fullmatch(str(server_id)):
             raise CraftyError("Crafty did not report the new server")
+        return self._await_import(instance, self.server(instance))
+
+    def _importing(self, server: dict) -> bool:
+        stats = self.api.request("GET", f"/api/v2/servers/{server['server_id']}/stats").get("data")
+        return not isinstance(stats, dict) or bool(stats.get("importing"))
+
+    def _await_import(self, instance: str, server: dict) -> dict:
         # Crafty unpacks the archive in a background thread after the request returns. The archive
         # must stay in place until then, so wait until Crafty clears its importing flag and the jar is there.
-        server = self.server(instance)
         jar = self.server_dir(server) / "paper.jar"
-
-        def unpacked() -> bool:
-            stats = self.api.request("GET", f"/api/v2/servers/{server['server_id']}/stats").get("data")
-            return isinstance(stats, dict) and not stats.get("importing") and jar.is_file()
-
-        self.wait(unpacked, self.timeouts["start"], "Crafty did not finish unpacking the archive; check its import log")
-        return {"instance": instance, "server_id": server_id}
+        self.wait(lambda: not self._importing(server) and jar.is_file(), self.timeouts["start"],
+                  "Crafty has not finished unpacking the archive; rerun import-server to keep waiting, "
+                  "or delete the server in Crafty if its import log shows a failure")
+        return {"instance": instance, "server_id": server["server_id"]}
 
     # Recorded backup state ------------------------------------------------------------------
 
@@ -392,6 +399,10 @@ class Adapter:
             source = self.server_dir(server)
             before = fingerprint(source) if source.is_dir() and not source.is_symlink() else None
             stored = self.archive(instance, server)
+            # Crafty's own UI can start the server while the archive uploads. That archive may be
+            # inconsistent and the session must not be cut off, so the stop fails and is repeated.
+            if self.running(server) or fingerprint(source) != before:
+                raise CraftyError("the server changed while it was being archived; repeat the stop")
         except Exception:
             self.record(instance, backup="failed", boot_id=self.host.boot_id())
             raise
