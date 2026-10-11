@@ -18,16 +18,18 @@ validate_infra() {
 
 check_go() {
 	if ! command -v go >/dev/null 2>&1; then
-		printf 'missing Go toolchain for lambda/idlestop (see docs/development.md)\n' >&2
+		printf 'missing Go toolchain for lambda/ (see docs/development.md)\n' >&2
 		exit 1
 	fi
-	local unformatted
-	unformatted="$(cd "$root_dir/lambda/idlestop" && gofmt -l .)"
-	if [[ -n "$unformatted" ]]; then
-		printf 'gofmt needed:\n%s\n' "$unformatted" >&2
-		exit 1
-	fi
-	(cd "$root_dir/lambda/idlestop" && go vet ./... && go test -race -count=1 ./...)
+	local module unformatted
+	for module in idlestop launcher; do
+		unformatted="$(cd "$root_dir/lambda/$module" && gofmt -l .)"
+		if [[ -n "$unformatted" ]]; then
+			printf 'gofmt needed:\n%s\n' "$unformatted" >&2
+			exit 1
+		fi
+		(cd "$root_dir/lambda/$module" && go vet ./... && go test -race -count=1 ./...)
+	done
 }
 
 require_tool tofu

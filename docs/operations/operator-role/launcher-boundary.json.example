@@ -1,0 +1,29 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Sid": "ObserveHosts", "Effect": "Allow",
+     "Action": "ec2:DescribeInstances", "Resource": "*"},
+    {"Sid": "StartProjectHosts", "Effect": "Allow",
+     "Action": "ec2:StartInstances", "Resource": "arn:aws:ec2:us-west-2:123456789012:instance/*",
+     "Condition": {"StringEquals": {"aws:ResourceTag/Project": "minecraft"}}},
+    {"Sid": "StartGameOnProjectHosts", "Effect": "Allow",
+     "Action": "ssm:SendCommand", "Resource": "arn:aws:ec2:us-west-2:123456789012:instance/*",
+     "Condition": {"StringEquals": {"ssm:resourceTag/Project": "minecraft"}}},
+    {"Sid": "ShellCommandDocumentOnly", "Effect": "Allow",
+     "Action": "ssm:SendCommand", "Resource": "arn:aws:ssm:us-west-2::document/AWS-RunShellScript"},
+    {"Sid": "FollowStart", "Effect": "Allow",
+     "Action": ["ssm:GetCommandInvocation", "ssm:DescribeInstanceInformation"], "Resource": "*"},
+    {"Sid": "ProjectParametersOnly", "Effect": "Allow",
+     "Action": ["ssm:GetParameter", "ssm:PutParameter"],
+     "Resource": "arn:aws:ssm:us-west-2:123456789012:parameter/example-prefix/*"},
+    {"Sid": "DecryptSecureStringsThroughSsmOnly", "Effect": "Allow",
+     "Action": "kms:Decrypt", "Resource": "arn:aws:kms:us-west-2:123456789012:key/*",
+     "Condition": {"StringEquals": {"kms:ViaService": "ssm.us-west-2.amazonaws.com"},
+                   "ForAnyValue:StringEquals": {"kms:ResourceAliases": "alias/aws/ssm"}}},
+    {"Sid": "InvokeProjectFunctions", "Effect": "Allow",
+     "Action": "lambda:InvokeFunction", "Resource": "arn:aws:lambda:us-west-2:123456789012:function:example-prefix-*"},
+    {"Sid": "ProjectFunctionLogs", "Effect": "Allow",
+     "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+     "Resource": "arn:aws:logs:us-west-2:123456789012:log-group:/aws/lambda/example-prefix-*:*"}
+  ]
+}
