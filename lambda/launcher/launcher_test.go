@@ -426,6 +426,31 @@ func TestAStartStuckPendingFailsAndCanBeRetried(t *testing.T) {
 	}
 }
 
+func TestARefusalMeetingAnotherMembersStartKeepsIt(t *testing.T) {
+	// This request is throttled, but another Member's start moved the host on.
+	r := newRig(ec2types.InstanceStateNameStopped, 0)
+	r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameStopped, ec2types.InstanceStateNamePending}
+	r.ec2.launch = now
+	r.ec2.startErr = &smithy.GenericAPIError{Code: "RequestLimitExceeded"}
+	status, started, err := r.launcher.Start(context.Background())
+	if err != nil || !started || status.State != Starting || r.session(t).Phase != Starting {
+		t.Fatalf("state=%s started=%v err=%v", status.State, started, err)
+	}
+}
+
+func TestUnreadableHostKeepsAFailedDNSHidden(t *testing.T) {
+	r := newRig(ec2types.InstanceStateNameRunning, 5*time.Minute)
+	r.setSession(t, Session{RequestedAt: now.Add(-6 * time.Minute), LaunchTime: now.Add(-5 * time.Minute), Phase: Ready, DNS: "failed"})
+	r.ec2.err = errors.New("throttled")
+	status, err := r.launcher.Status(context.Background())
+	if err == nil || status.State != Unknown || status.Connection.Java != nil {
+		t.Fatalf("status %+v err=%v", status, err)
+	}
+	if status, _, err := r.launcher.Start(context.Background()); err == nil || status.Connection.Java != nil {
+		t.Fatalf("status %+v err=%v", status, err)
+	}
+}
+
 func TestLostFollowUpStillReportsTheStart(t *testing.T) {
 	r := newRig(ec2types.InstanceStateNameStopped, 0)
 	r.followErr = errors.New("throttled")
@@ -580,6 +605,27 @@ func TestARepeatedFollowUpLeavesAFinishedStartReady(t *testing.T) {
 	}
 	if session := r.session(t); session != finished {
 		t.Fatalf("session %+v", session)
+	}
+}
+
+func TestARepeatedFollowUpThatCannotReadTheHostLeavesReadyAlone(t *testing.T) {
+	r := finishRig(t)
+	finished := Session{RequestedAt: now, LaunchTime: now.Add(30 * time.Second), Phase: Ready, DNS: "current"}
+	r.setSession(t, finished)
+	if err := r.launcher.fail(context.Background(), Session{}, errors.New("throttled")); err == nil {
+		t.Fatal("no error")
+	}
+	if session := r.session(t); session != finished {
+		t.Fatalf("session %+v", session)
+	}
+}
+
+func TestNoGameStartWithoutTimeToFinishIt(t *testing.T) {
+	r := finishRig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := r.launcher.FinishStart(ctx); err == nil || len(r.ssm.commands) != 0 {
+		t.Fatalf("err=%v commands=%v", err, r.ssm.commands)
 	}
 }
 

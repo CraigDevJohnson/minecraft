@@ -44,6 +44,8 @@ const (
 	// finishMargin ends a follow-up this long before its start's deadline, so it has written its last state
 	// before the start is reported failed and a Member can start again.
 	finishMargin = 30 * time.Second
+	// commandDelivery is how long SSM may hold the game start before delivering it, in seconds (its minimum).
+	commandDelivery = 30
 )
 
 // pollEvery is how often the follow-up run checks EC2, SSM and the remote start. Tests shorten it.
@@ -135,7 +137,7 @@ func (l *Launcher) Status(ctx context.Context) (Status, error) {
 	}
 	h, err := l.describeHost(ctx)
 	if err != nil {
-		return l.answer(Unknown, Session{}), err
+		return l.unknown(ctx), err
 	}
 	session, err := l.loadSession(ctx)
 	if err != nil {
@@ -157,7 +159,7 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 	}
 	h, err := l.describeHost(ctx)
 	if err != nil {
-		return l.answer(Unknown, Session{}), false, err
+		return l.unknown(ctx), false, err
 	}
 	session, err := l.loadSession(ctx)
 	if err != nil {
@@ -176,8 +178,10 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 			// start moved the host on first, and an error without EC2's answer may hide an accepted start. In both
 			// the start stands and gets a follow-up, which repeats harmlessly or fails at the start's deadline.
 			var refused smithy.APIError
-			if errors.As(err, &refused) && refused.ErrorCode() != "IncorrectInstanceState" {
-				_ = l.saveSession(ctx, Session{RequestedAt: now, Phase: Failed, Detail: "EC2 refused the start"})
+			if errors.As(err, &refused) && refused.ErrorCode() != "IncorrectInstanceState" && !l.hostMoved(ctx) {
+				// A refusal, such as throttling, can meet another Member's accepted start: record the failure
+				// only while the record is still this request's and the host has not moved.
+				_ = l.fail(ctx, session, errors.New("EC2 refused the start"))
 				return l.answer(Unknown, Session{}), false, fmt.Errorf("start host: %w", err)
 			}
 		}
@@ -204,6 +208,21 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 		}
 		return l.answer(state, l.current(h, session)), false, nil
 	}
+}
+
+// hostMoved reports whether a fresh description shows the host pending or running.
+func (l *Launcher) hostMoved(ctx context.Context) bool {
+	h, err := l.describeHost(ctx)
+	return err == nil && (h.state == ec2types.InstanceStateNamePending || h.state == ec2types.InstanceStateNameRunning)
+}
+
+// unknown answers when the host cannot be read. A saved DNS failure still hides the address: it may be this run's.
+func (l *Launcher) unknown(ctx context.Context) Status {
+	session, err := l.loadSession(ctx)
+	if err != nil {
+		session = Session{}
+	}
+	return l.answer(Unknown, session)
 }
 
 func (l *Launcher) followUp(ctx context.Context) error {
@@ -405,10 +424,11 @@ func (l *Launcher) fail(ctx context.Context, session Session, cause error) error
 	if err != nil {
 		return errors.Join(cause, err)
 	}
+	if saved.Phase == Ready || !session.RequestedAt.IsZero() && !saved.RequestedAt.Equal(session.RequestedAt) {
+		return cause // a repeated follow-up already finished this start, or a later start owns the record now
+	}
 	if session.RequestedAt.IsZero() {
 		session = saved
-	} else if !saved.RequestedAt.Equal(session.RequestedAt) || saved.Phase == Ready {
-		return cause // a later start owns the record now, or a repeated follow-up already finished this one
 	}
 	session.Phase = Failed
 	session.Detail = cause.Error()
@@ -457,16 +477,20 @@ func (l *Launcher) waitSSM(ctx context.Context) error {
 }
 
 func (l *Launcher) startGame(ctx context.Context) error {
-	deadline, ok := ctx.Deadline()
+	// Delivery and execution together end before this run's deadline, so the remote start never outlives the
+	// start it belongs to and overlaps a retry.
 	timeout := 600
-	if ok {
-		timeout = max(30, int(time.Until(deadline).Seconds())-15)
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = int(time.Until(deadline).Seconds()) - commandDelivery - 15
+		if timeout < 30 {
+			return errors.New("too little time is left to start the game")
+		}
 	}
 	output, err := l.SSM.SendCommand(ctx, &ssm.SendCommandInput{
 		InstanceIds:    []string{l.Config.HostID},
 		DocumentName:   aws.String("AWS-RunShellScript"),
 		Comment:        aws.String("minecraft launcher start"),
-		TimeoutSeconds: aws.Int32(60),
+		TimeoutSeconds: aws.Int32(commandDelivery),
 		Parameters: map[string][]string{
 			"commands":         {remoteCommand + " start " + l.Config.Instance},
 			"executionTimeout": {strconv.Itoa(timeout)},
