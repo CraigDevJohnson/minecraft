@@ -58,7 +58,8 @@ func LoadHostAdapter(fsys fs.FS) (*HostAdapter, error) {
 
 // Script answers shell lines, for a script already running under `set -eu`, that leave the host's adapter
 // exactly as this launcher carries it. A host whose files already match changes nothing. Otherwise the files
-// are unpacked beside the installed ones, checked against their SHA-256 and renamed into place one at a time.
+// are unpacked beside the installed ones, checked against their SHA-256, renamed into place one at a time and
+// checked once more where they landed.
 // Each rename is atomic, so an adapter command never reads a partly written file. The lines print nothing to
 // standard output, which stays the following command's answer.
 func (a *HostAdapter) Script() string {
@@ -90,8 +91,10 @@ func (a *HostAdapter) script(directory string) string {
 		"chmod 0644 "+strings.Join(a.names, " "),
 	)
 	for _, name := range a.names {
-		lines = append(lines, `mv -f `+name+` "$adapter/`+name+`"`)
+		// -T replaces whatever holds the name, even a directory, rather than moving the file into it.
+		lines = append(lines, `mv -fT `+name+` "$adapter/`+name+`"`)
 	}
+	lines = append(lines, `cd "$adapter"`, sums+" | sha256sum --check --status --strict")
 	return strings.Join(append(lines, ")", "fi"), "\n")
 }
 

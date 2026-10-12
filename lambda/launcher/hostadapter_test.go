@@ -163,6 +163,21 @@ func TestAdapterInstallFailsWithoutTheCraftyInstallOrOnACorruptCopy(t *testing.T
 	if err := os.Mkdir(directory, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(filepath.Join(directory, "minecraft_content.py"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runOnHost(t, loadAdapter(t, fakeAdapterFiles("v2")), directory); err == nil {
+		t.Fatal("a directory in place of an adapter file must fail the command, not take the file inside it")
+	}
+	if info, err := os.Stat(filepath.Join(directory, "minecraft_content.py")); err != nil || !info.IsDir() {
+		t.Fatalf("the directory must be left for an operator to look at: %v", err)
+	}
+	if err := os.Remove(filepath.Join(directory, "minecraft_content.py")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range adapterFiles {
+		_ = os.Remove(filepath.Join(directory, name))
+	}
 	adapter := loadAdapter(t, fakeAdapterFiles("v2"))
 	adapter.sums[2] = strings.Repeat("0", 64) // what arrives does not match what the launcher pinned
 	if _, err := runOnHost(t, adapter, directory); err == nil {

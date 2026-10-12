@@ -625,11 +625,18 @@ class Adapter:
         entries = console.read_allowlist(instance)
         listed = [entry for entry in entries if isinstance(entry.get("name"), str) and entry["name"].lower() == name.lower()]
         if not listed:
+            # A removal whose reload never reached the server leaves the entry in its memory only: reload anyway,
+            # so a retry finishes it.
+            console.rcon(instance, "whitelist reload")
             return {**result, "allowlist": "not-listed"}
         if len(listed) != 1:
             raise CraftyError("the allowlist holds that name more than once")
-        console.write_allowlist([entry for entry in entries if entry is not listed[0]])
+        console.write_allowlist([entry for entry in entries if entry is not listed[0]], entries)
         console.rcon(instance, "whitelist reload")
+        # The server writes its whole list on every change, so one made before the reload would bring the entry back.
+        if any(isinstance(entry.get("name"), str) and entry["name"].lower() == name.lower()
+               for entry in console.read_allowlist(instance)):
+            raise CraftyError("the server allowlist changed during the removal; inspect private server state before retrying")
         return {**result, "allowlist": "updated"}
 
 
@@ -663,8 +670,9 @@ class _Console:
                 self.sleep(1)
         raise AssertionError("unreachable")
 
-    def write_allowlist(self, entries: list) -> None:
-        """Replace whitelist.json atomically, keeping the owner and mode the server's own account needs."""
+    def write_allowlist(self, entries: list, expected: list) -> None:
+        """Replace whitelist.json, read as expected, atomically and durably, keeping the owner and mode the
+        server's own account needs."""
         current = os.lstat(self.path)
         if not stat.S_ISREG(current.st_mode):
             raise CraftyError("the server allowlist is not a regular file")
@@ -678,10 +686,18 @@ class _Console:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+            # The server or the Crafty console may have changed the list since it was read; never write over that.
+            if self.read_allowlist("") != expected:
+                raise CraftyError("the server allowlist changed during the removal; retry it")
             os.replace(partial, self.path)
         except BaseException:
             Path(partial).unlink(missing_ok=True)
             raise
+        folder = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(folder)
+        finally:
+            os.close(folder)
 
 
 def read_player_file(path: Path) -> dict:

@@ -5,6 +5,7 @@ import io
 import json
 import os
 import socket
+import stat
 import threading
 from pathlib import Path
 import sys
@@ -517,12 +518,43 @@ class AllowlistTests(unittest.TestCase):
     def test_a_name_mojang_no_longer_knows_leaves_the_file_and_the_server_reloads_it(self):
         self.write([JAVA, RENAMED])
         self.allowlist.chmod(0o640)
-        result = self.adapter.allowlist("family", "remove", "java", {"name": "old_name"})
+        synced = []
+        real_fsync = os.fsync
+
+        def fsync(descriptor):
+            synced.append(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+            real_fsync(descriptor)
+
+        with unittest.mock.patch.object(crafty.os, "fsync", fsync):
+            result = self.adapter.allowlist("family", "remove", "java", {"name": "old_name"})
         self.assertEqual(result, {"instance": "family", "edition": "java", "operation": "remove", "allowlist": "updated"})
         self.assertEqual(self.entries(), [JAVA])
         self.assertEqual(self.api.console, [(SERVER_ID, "whitelist reload")])
         self.assertEqual(self.allowlist.stat().st_mode & 0o777, 0o640)
         self.assertEqual([path.name for path in self.server_dir.iterdir()], ["whitelist.json"])
+        self.assertEqual(synced, [False, True], "the file, then the folder holding the rename")
+
+    def test_the_removal_never_writes_over_a_change_made_while_it_ran(self):
+        self.write([JAVA, RENAMED])
+        real_fsync = os.fsync
+
+        def fsync(descriptor):
+            real_fsync(descriptor)
+            if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                self.write([JAVA, RENAMED, BEDROCK])  # an add from the Crafty console, mid-removal
+
+        with unittest.mock.patch.object(crafty.os, "fsync", fsync), self.assertRaises(crafty.CraftyError):
+            self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertEqual(self.entries(), [JAVA, RENAMED, BEDROCK])
+        self.assertEqual(self.api.console, [])
+        self.assertEqual([path.name for path in self.server_dir.iterdir()], ["whitelist.json"])
+
+    def test_the_removal_fails_when_the_server_writes_the_entry_back_before_its_reload(self):
+        self.write([JAVA, RENAMED])
+        self.server_applies({"whitelist reload": lambda entries: entries + [RENAMED]})
+        with self.assertRaises(crafty.CraftyError) as caught:
+            self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertNotIn("Old_Name", str(caught.exception))
 
     def test_the_rewrite_never_follows_a_link_swapped_in_for_its_temporary_file(self):
         self.write([JAVA, RENAMED])
@@ -534,11 +566,12 @@ class AllowlistTests(unittest.TestCase):
 
         def swap(descriptor):
             real_fsync(descriptor)
-            [partial] = [path for path in self.server_dir.iterdir() if path.name.startswith(".whitelist.")]
-            partial.rename(self.server_dir / "moved")
-            partial.symlink_to(victim)
+            for partial in [path for path in self.server_dir.iterdir() if path.name.startswith(".whitelist.")]:
+                partial.rename(self.server_dir / "moved")
+                partial.symlink_to(victim)
 
-        with unittest.mock.patch.object(crafty.os, "fsync", swap):
+        # The rename puts the link in place of whitelist.json, which the check after the reload refuses to follow.
+        with unittest.mock.patch.object(crafty.os, "fsync", swap), self.assertRaises(OSError):
             self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
         self.assertEqual(victim.stat().st_mode & 0o7777, 0o600)
         self.assertEqual(victim.read_text(), "host file")
@@ -549,7 +582,8 @@ class AllowlistTests(unittest.TestCase):
         result = self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
         self.assertEqual(result["allowlist"], "not-listed")
         self.assertEqual(self.entries(), [JAVA])
-        self.assertEqual(self.api.console, [])
+        # An earlier removal may have changed the file without its reload reaching the server.
+        self.assertEqual(self.api.console, [(SERVER_ID, "whitelist reload")])
 
     def test_only_a_java_removal_may_name_a_player_without_a_uuid(self):
         self.write([RENAMED])
