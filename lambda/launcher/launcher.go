@@ -94,6 +94,9 @@ type Session struct {
 	// stop owes its parking.
 	DNS    string `json:"dns,omitempty"`
 	Detail string `json:"detail,omitempty"`
+	// Force marks a stop asked with the force flag. One without it asks the game again, just before the
+	// drain, whether anybody is playing.
+	Force bool `json:"force,omitempty"`
 	// A stop's drain command on the host, once sent, so a fresh run can follow it where the last one ended.
 	DrainCommandID string    `json:"drain_command_id,omitempty"`
 	DrainSentAt    time.Time `json:"drain_sent_at,omitzero"`
@@ -478,21 +481,26 @@ func (l *Launcher) fail(ctx context.Context, session Session, cause error) error
 }
 
 func (l *Launcher) failWith(ctx context.Context, session Session, cause error, phase string) error {
+	return errors.Join(cause, l.record(ctx, session, cause, phase))
+}
+
+// record ends a request's record in phase with cause as its reason, and answers only whether that was saved.
+func (l *Launcher) record(ctx context.Context, session Session, cause error, phase string) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	saved, err := l.loadSession(ctx)
 	if err != nil {
-		return errors.Join(cause, err)
+		return err
 	}
 	if finished(saved) || !session.RequestedAt.IsZero() && !saved.RequestedAt.Equal(session.RequestedAt) {
-		return cause // a repeated follow-up already finished this request, or a later request owns the record now
+		return nil // a repeated follow-up already finished this request, or a later request owns the record now
 	}
 	if session.RequestedAt.IsZero() {
 		session = saved
 	}
 	session.Phase = phase
 	session.Detail = cause.Error()
-	return errors.Join(cause, l.saveSession(ctx, session))
+	return l.saveSession(ctx, session)
 }
 
 // waitRunning waits for the host to run with a public address. A host still stopped stoppedGrace after the

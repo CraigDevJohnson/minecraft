@@ -296,14 +296,49 @@ func TestStartIsUnchangedWhileOurStopRuns(t *testing.T) {
 }
 
 // stopRig has a stop of this function recorded against a running host, with the host answering a drain and a
-// fresh host status, then stopping.
+// fresh host status, then stopping. The host is described running twice: before the drain, for the player
+// check, and after it.
 func stopRig(t *testing.T) *rig {
 	r := newRig(ec2types.InstanceStateNameRunning, time.Hour)
-	r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameRunning, ec2types.InstanceStateNameStopping, ec2types.InstanceStateNameStopped}
+	r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameRunning, ec2types.InstanceStateNameRunning, ec2types.InstanceStateNameStopping, ec2types.InstanceStateNameStopped}
 	r.ssm.online = []bool{false, true}
 	r.ssm.invocation = []ssm.GetCommandInvocationOutput{{Status: ssmtypes.CommandInvocationStatusInProgress}, success(drainOutput), success(statusOutput)}
 	r.setSession(t, Session{RequestedAt: now, LaunchTime: now.Add(-time.Hour), Phase: Stopping})
 	return r
+}
+
+func TestFinishStopStandsDownWhenSomebodyJoinedAfterTheRequest(t *testing.T) {
+	r := stopRig(t)
+	r.gameUp, r.players = true, 2
+	if err := r.launcher.FinishStop(context.Background()); err != nil {
+		t.Fatalf("a player who joined is a refusal, not a failure to alarm on: %v", err)
+	}
+	if len(r.ssm.commands) != 0 || r.ec2.stops != 0 || len(r.pointedAt) != 0 {
+		t.Fatalf("nothing may drain under a player: commands=%v stops=%d pointed=%v", r.ssm.commands, r.ec2.stops, r.pointedAt)
+	}
+	if session := r.session(t); session.Phase != StopFailed || session.Detail != "2 players are online" {
+		t.Fatalf("session %+v", session)
+	}
+	r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameRunning}
+	if status, err := r.launcher.Status(context.Background()); err != nil || status.State != Ready {
+		t.Fatalf("the game they joined is ready: state=%s err=%v", status.State, err)
+	}
+}
+
+func TestAForcedStopDrainsWhoeverIsPlaying(t *testing.T) {
+	r := newRig(ec2types.InstanceStateNameRunning, time.Hour)
+	r.gameUp, r.players = true, 2
+	if _, stopped, err := r.launcher.Stop(context.Background(), true); err != nil || !stopped || !r.session(t).Force {
+		t.Fatalf("stopped=%v err=%v session=%+v; the record keeps the force flag for the follow-up", stopped, err, r.session(t))
+	}
+	r = stopRig(t)
+	session := r.session(t)
+	session.Force = true
+	r.setSession(t, session)
+	r.gameUp, r.players = true, 2
+	if err := r.launcher.FinishStop(context.Background()); err != nil || r.ec2.stops != 1 || len(r.pinged) != 0 {
+		t.Fatalf("err=%v stops=%d pinged=%v", err, r.ec2.stops, r.pinged)
+	}
 }
 
 func TestFinishStopRunsTheWorkstationSteps(t *testing.T) {

@@ -85,6 +85,12 @@ class ServerControlRoleTests(unittest.TestCase):
         self.assertNotRegex(deploy, r"(?m)^  (push|pull_request|pull_request_target|schedule|workflow_run|repository_dispatch|release|issue_comment):")
         self.assertIn("MODE: ${{ inputs.mode || 'plan' }}", deploy)
         self.assertNotIn("|| 'apply'", deploy)
+        # An apply run applies only the plan whose digest Craig gives it, read from the plan run's summary; the
+        # digest reaches the script through the environment, never the script's text.
+        self.assertIn("APPROVED_PLAN: ${{ inputs.plan }}", deploy)
+        self.assertEqual(deploy.count("inputs.plan"), 1)
+        # OpenTofu's errors reach the log unfiltered, so the private inputs' values are masked before it runs.
+        self.assertLess(deploy.index("scripts/mask_private_inputs.py"), deploy.index("bash scripts/deploy_tofu.sh"))
 
 
 if __name__ == "__main__":

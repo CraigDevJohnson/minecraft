@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: DEPLOY_DIR=<dir> deploy_tofu.sh plan|apply
+# Usage: DEPLOY_DIR=<dir> [APPROVED_PLAN=<digest>] deploy_tofu.sh plan|apply
 #
 # Runs the infra root the way the Deploy workflow does. DEPLOY_DIR holds the
 # private inputs the workflow wrote from its environment secrets,
@@ -8,7 +8,14 @@
 # show the private inputs, so only the resource headers, the progress lines and
 # the totals reach the log and the job summary, and the progress lines lose
 # their "[id=...]" suffix, which carries physical ids such as bucket names.
-# OpenTofu's own errors still go to the log, because they are written to stderr.
+# OpenTofu's own errors still go to the log, because they are written to
+# stderr; the workflow masks the private inputs' values first.
+#
+# Every plan ends with its digest (scripts/plan_digest.py). An apply run plans
+# again and applies only when that plan's digest is APPROVED_PLAN, the digest
+# Craig copied from the plan run he read, so what applies is exactly what he
+# approved; if main, the private inputs or the state changed since, it stops
+# before applying and posts the new plan and its digest instead.
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -25,6 +32,11 @@ deploy_dir="${DEPLOY_DIR:-}"
 if [[ -z "$deploy_dir" ]]; then
 	printf 'DEPLOY_DIR must name the directory holding deployment.tfvars, backend.hcl and packages/\n' >&2
 	exit 2
+fi
+approved="${APPROVED_PLAN:-}"
+if [[ "$mode" == apply && ! "$approved" =~ ^[0-9a-f]{16}$ ]]; then
+	printf '::error::An apply run needs the plan digest from the summary of the plan run you read: run Deploy with mode apply and that digest as plan.\n' >&2
+	exit 1
 fi
 for required in deployment.tfvars backend.hcl packages/launcher.zip packages/idle-stop.zip; do
 	if [[ ! -f "$deploy_dir/$required" ]]; then
@@ -66,8 +78,21 @@ if [[ "$status" -ne 0 ]]; then
 	printf '::error::tofu plan failed (exit %s); see the messages above\n' "$status" >&2
 	exit "$status"
 fi
+if ! digest="$("$tofu" -chdir="$root_dir/infra" show -json "$deploy_dir/tfplan" | python3 "$root_dir/scripts/plan_digest.py")"; then
+	printf '::error::the saved plan could not be read for its digest\n' >&2
+	exit 1
+fi
+printf "\nPlan digest: \`%s\`\n" "$digest" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
 if [[ "$mode" == plan ]]; then
+	printf "\nTo apply exactly this plan, run Deploy again with mode \`apply\` and plan \`%s\`.\n" "$digest" |
+		tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
 	exit 0
+fi
+if [[ "$digest" != "$approved" ]]; then
+	printf "\nNothing was applied: this plan (digest \`%s\`) is not the plan you approved (\`%s\`), because main, the private inputs or the state changed since. Read the plan above; to apply it, run Deploy with mode \`apply\` and plan \`%s\`.\n" \
+		"$digest" "$approved" "$digest" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+	printf '::error::the plan differs from the approved plan; nothing was applied\n' >&2
+	exit 1
 fi
 
 "$tofu" -chdir="$root_dir/infra" apply -input=false -no-color -lock-timeout=5m \

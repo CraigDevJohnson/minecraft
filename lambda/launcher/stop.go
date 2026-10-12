@@ -102,7 +102,7 @@ func (l *Launcher) Stop(ctx context.Context, force bool) (Status, bool, error) {
 	}
 	// Record the stop before anything else, so every status read from here on shows it, and tie it to this
 	// run of the host: a later run never inherits it.
-	session = Session{RequestedAt: l.Now().UTC(), LaunchTime: h.launchTime, Phase: Stopping}
+	session = Session{RequestedAt: l.Now().UTC(), LaunchTime: h.launchTime, Phase: Stopping, Force: force}
 	if err := l.saveSession(ctx, session); err != nil {
 		return l.answer(Unknown, Session{}), false, err
 	}
@@ -187,9 +187,14 @@ func (l *Launcher) FinishStop(ctx context.Context) error {
 	runCtx, cancel := context.WithTimeout(ctx, deadline.Sub(l.Now()))
 	defer cancel()
 	err = l.stopSteps(runCtx, &session)
+	var online ErrPlayersOnline
 	switch {
 	case err == nil, errors.Is(err, errFinished):
 		return nil
+	case errors.As(err, &online):
+		// Somebody joined after the request found nobody playing: the stop stands down and the game keeps
+		// running. That is a refusal like the request's own, not a failure to alarm on.
+		return l.record(ctx, session, err, StopFailed)
 	case ctx.Err() != nil && l.Now().Before(deadline):
 		// This run's own time ended first: another run takes it from here.
 		handoff, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -206,6 +211,11 @@ func (l *Launcher) stopSteps(ctx context.Context, session *Session) error {
 	if session.DrainCommandID == "" {
 		if err := l.waitSSM(ctx); err != nil {
 			return err
+		}
+		if !session.Force {
+			if err := l.nobodyJoined(ctx); err != nil {
+				return err
+			}
 		}
 		id, err := l.sendCommand(ctx, remoteCommand+" host-drain", "minecraft launcher stop", drainTimeoutSeconds)
 		if err != nil {
@@ -269,6 +279,22 @@ func (l *Launcher) stopSteps(ctx context.Context, session *Session) error {
 	}
 	if parkErr != nil {
 		return fmt.Errorf("the host stopped but DNS was not parked: %w", parkErr)
+	}
+	return nil
+}
+
+// nobodyJoined asks the game once more, just before the drain, whether anybody is playing: this run may begin a
+// moment after the request found nobody online. A game that does not answer has nobody to protect.
+func (l *Launcher) nobodyJoined(ctx context.Context) error {
+	h, err := l.describeHost(ctx)
+	if err != nil {
+		return err
+	}
+	if h.state != ec2types.InstanceStateNameRunning {
+		return nil
+	}
+	if players, up := l.gameAnswers(ctx, h.publicIP); up && players > 0 {
+		return ErrPlayersOnline{Players: players}
 	}
 	return nil
 }

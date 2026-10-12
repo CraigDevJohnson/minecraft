@@ -1,7 +1,9 @@
 # Deploys the infra root from GitHub Actions as the operator role. It runs
-# only when Craig starts it by hand (Run workflow): mode plan posts the plan to
-# the run summary, and mode apply, which he starts after reading that plan, is
-# his approval of that change. No push starts it, because every run holds the
+# only when Craig starts it by hand (Run workflow): mode plan posts the plan and
+# its digest to the run summary, and mode apply, which he starts after reading
+# that plan and gives its digest, is his approval of that change. An apply run
+# plans again and applies only a plan with that digest, so it applies exactly
+# the plan he read or nothing. No push starts it, because every run holds the
 # operator's write credentials, and the job runs only when Craig's own account
 # started the run (and any re-run of it), so another collaborator or an app
 # with write access cannot start it either. The one job runs in the deploy GitHub
@@ -22,6 +24,10 @@ on:
         type: choice
         options: [plan, apply]
         default: plan
+      plan:
+        description: For apply, the plan digest from the summary of the plan run you read
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -80,6 +86,8 @@ jobs:
           printf '%s\n' "$DEPLOYMENT_TFVARS" > "$RUNNER_TEMP/deploy/deployment.tfvars"
           printf '%s\n' "$BACKEND_CONFIG" > "$RUNNER_TEMP/deploy/backend.hcl"
           printf '::add-mask::%s\n' '793680745829'
+          # OpenTofu's errors reach the log unfiltered and may quote an input.
+          python3 scripts/mask_private_inputs.py "$RUNNER_TEMP/deploy/deployment.tfvars" "$RUNNER_TEMP/deploy/backend.hcl"
       - name: Obtain the operator role's credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
@@ -94,9 +102,10 @@ jobs:
           mask-aws-account-id: true
           retry-max-attempts: 2
           action-timeout-s: 60
-      - name: Plan, and in apply mode apply the saved plan
+      - name: Plan, and in apply mode apply the approved plan
         env:
           DEPLOY_DIR: ${{ runner.temp }}/deploy
           MODE: ${{ inputs.mode || 'plan' }}
+          APPROVED_PLAN: ${{ inputs.plan }}
           AWS_EC2_METADATA_DISABLED: 'true'
         run: bash scripts/deploy_tofu.sh "$MODE"
