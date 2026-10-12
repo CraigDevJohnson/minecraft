@@ -98,6 +98,7 @@ type fakeSSM struct {
 	putErr     error
 	online     []bool // successive SSM ping answers; the last repeats
 	commands   []string
+	limits     []string                         // each command's executionTimeout
 	invocation []ssm.GetCommandInvocationOutput // successive answers; the last repeats
 }
 
@@ -134,6 +135,7 @@ func (f *fakeSSM) SendCommand(_ context.Context, input *ssm.SendCommandInput, _ 
 		panic("sent a command to another host or document")
 	}
 	f.commands = append(f.commands, input.Parameters["commands"]...)
+	f.limits = append(f.limits, input.Parameters["executionTimeout"]...)
 	return &ssm.SendCommandOutput{Command: &ssmtypes.Command{CommandId: aws.String(commandID)}}, nil
 }
 
@@ -580,7 +582,7 @@ func TestFinishStartRunsTheWorkstationSteps(t *testing.T) {
 	if strings.Join(r.pointedAt, ",") != address {
 		t.Fatalf("DNS pointed at %v", r.pointedAt)
 	}
-	if strings.Join(r.ssm.commands, "|") != "/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json start family" {
+	if strings.Join(r.ssm.commands, "|") != "set -eu\n/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json start family" {
 		t.Fatalf("commands %v", r.ssm.commands)
 	}
 	session := r.session(t)

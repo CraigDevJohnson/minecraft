@@ -21,11 +21,14 @@ import (
 // docs/operations/allowlist.md describes for the workstation, with the player's verified identity looked up
 // first so a typo never reaches the server.
 const (
-	// allowlistTimeout bounds the whole change: SSM delivery, the adapter's own 60-second verification and
-	// margin. The caller waits for the answer.
-	allowlistTimeout = 3 * time.Minute
-	// allowlistExecutionSeconds is the adapter's execution limit on the host.
-	allowlistExecutionSeconds = 120
+	// allowlistTimeout bounds the whole change: SSM delivery, the adapter's execution limit and margin. The
+	// caller waits for the answer.
+	allowlistTimeout = 6 * time.Minute
+	// allowlistExecutionSeconds is the adapter's execution limit on the host. It covers every bounded step, so
+	// a slow but working Crafty never cuts off a change already sent: the adapter install, up to four Crafty
+	// API calls of up to 30 seconds each (the server list, its stats, then the console line, or a name-only
+	// removal's reload and list), the 60-second verification, and margin.
+	allowlistExecutionSeconds = 240
 )
 
 var javaName = regexp.MustCompile(`^[A-Za-z0-9_]{3,16}$`)
@@ -46,9 +49,10 @@ type AllowlistResult struct {
 }
 
 // Player is the verified identity the adapter's --player-file carries: the server's UUID for the account, in
-// canonical lowercase form, and the account's name.
+// canonical lowercase form, and the account's name. A Java removal of a name Mojang no longer knows carries
+// the name alone, and the adapter removes the entry the allowlist holds under it.
 type Player struct {
-	UUID string `json:"uuid"`
+	UUID string `json:"uuid,omitempty"`
 	Name string `json:"name"`
 }
 
@@ -126,15 +130,20 @@ func (l *Launcher) Allowlist(ctx context.Context, request AllowlistRequest) (All
 		return AllowlistResult{}, ErrServerNotReady{State: state}
 	}
 	player, err := l.LookupPlayer(ctx, request.Edition, request.Name)
-	if errors.Is(err, ErrPlayerNotFound) || errors.Is(err, ErrLinkedAccount) {
+	byName := false
+	switch {
+	case errors.Is(err, ErrPlayerNotFound) && request.Operation == "remove" && request.Edition == "java":
+		// Mojang no longer knows the name, as after a rename, but the allowlist may still hold it: the adapter
+		// removes the entry it holds under that name, or answers that it holds none.
+		player, byName = Player{Name: request.Name}, true
+	case errors.Is(err, ErrPlayerNotFound) || errors.Is(err, ErrLinkedAccount):
 		return AllowlistResult{}, err
-	}
-	if err != nil {
+	case err != nil:
 		return AllowlistResult{}, fmt.Errorf("look up player: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, allowlistTimeout)
 	defer cancel()
-	id, err := l.sendCommand(ctx, allowlistScript(l.Config.Instance, request, player), "minecraft launcher allowlist", allowlistExecutionSeconds)
+	id, err := l.sendCommand(ctx, l.onHost(allowlistScript(l.Config.Instance, request, player)), "minecraft launcher allowlist", allowlistExecutionSeconds)
 	if err != nil {
 		return AllowlistResult{}, fmt.Errorf("send allowlist change: %w", err)
 	}
@@ -146,10 +155,10 @@ func (l *Launcher) Allowlist(ctx context.Context, request AllowlistRequest) (All
 		case err != nil:
 			return AllowlistResult{}, fmt.Errorf("follow allowlist change: %w", err)
 		case invocation.Status == ssmtypes.CommandInvocationStatusSuccess:
-			return checkAllowlisted(aws.ToString(invocation.StandardOutputContent), invocation.ResponseCode, l.Config.Instance, request)
+			return checkAllowlisted(aws.ToString(invocation.StandardOutputContent), invocation.ResponseCode, l.Config.Instance, request, byName)
 		case invocation.Status == ssmtypes.CommandInvocationStatusPending, invocation.Status == ssmtypes.CommandInvocationStatusInProgress, invocation.Status == ssmtypes.CommandInvocationStatusDelayed:
 		default:
-			return AllowlistResult{}, fmt.Errorf("allowlist change ended with status %s", invocation.Status)
+			return AllowlistResult{}, fmt.Errorf("allowlist change %s ended with status %s%s", id, invocation.Status, adapterError(aws.ToString(invocation.StandardOutputContent)))
 		}
 		if err := l.pause(ctx, "the allowlist change did not finish"); err != nil {
 			return AllowlistResult{}, err
@@ -159,11 +168,11 @@ func (l *Launcher) Allowlist(ctx context.Context, request AllowlistRequest) (All
 
 // allowlistScript writes the player's identity to a private file on the host (mktemp creates it with mode
 // 0600), runs the adapter on it, and removes it. The identity travels base64-encoded, so the script carries
-// only characters the single quotes keep literal; the instance, operation and edition were validated.
+// only characters the single quotes keep literal; the instance, operation and edition were validated. It runs
+// under `set -eu` after the adapter's installation (onHost).
 func allowlistScript(instance string, request AllowlistRequest, player Player) string {
 	encoded, _ := json.Marshal(player)
 	return strings.Join([]string{
-		"set -eu",
 		`player="$(mktemp)"`,
 		`trap 'rm -f "$player"' EXIT`,
 		"printf '%s' '" + base64.StdEncoding.EncodeToString(encoded) + "' | base64 -d > \"$player\"",
@@ -171,14 +180,32 @@ func allowlistScript(instance string, request AllowlistRequest, player Player) s
 	}, "\n")
 }
 
-// checkAllowlisted reads the adapter's answer: the change it reports must be the one asked for.
-func checkAllowlisted(output string, code int32, instance string, request AllowlistRequest) (AllowlistResult, error) {
+// checkAllowlisted reads the adapter's answer: the change it reports must be the one asked for. A removal by
+// name alone may also learn that the allowlist holds no such name, which is a player not found.
+func checkAllowlisted(output string, code int32, instance string, request AllowlistRequest, byName bool) (AllowlistResult, error) {
 	if code != 0 {
-		return AllowlistResult{}, errors.New("the host's adapter refused the allowlist change")
+		return AllowlistResult{}, errors.New("the host's adapter refused the allowlist change" + adapterError(output))
 	}
 	var result AllowlistResult
-	if json.Unmarshal([]byte(output), &result) != nil || result.Instance != instance || result.Edition != request.Edition || result.Operation != request.Operation || (result.Allowlist != "updated" && result.Allowlist != "unchanged") {
+	if json.Unmarshal([]byte(output), &result) != nil || result.Instance != instance || result.Edition != request.Edition || result.Operation != request.Operation {
 		return AllowlistResult{}, errors.New("the host's adapter did not confirm the allowlist change")
 	}
-	return result, nil
+	switch {
+	case result.Allowlist == "updated" || result.Allowlist == "unchanged":
+		return result, nil
+	case result.Allowlist == "not-listed" && byName:
+		return AllowlistResult{}, ErrPlayerNotFound
+	}
+	return AllowlistResult{}, errors.New("the host's adapter did not confirm the allowlist change")
+}
+
+// adapterError answers the adapter's own diagnostic, which is fixed text that names no player, for the log.
+func adapterError(output string) string {
+	var answer struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(output), &answer) != nil || answer.Error == "" || len(answer.Error) > 200 {
+		return ""
+	}
+	return ": " + answer.Error
 }

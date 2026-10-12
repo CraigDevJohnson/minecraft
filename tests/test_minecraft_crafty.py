@@ -5,6 +5,7 @@ import io
 import json
 import os
 import socket
+import stat
 import threading
 from pathlib import Path
 import sys
@@ -41,8 +42,17 @@ class FakeAPI:
         self.actions = []
         self.created = []
         self.no_servers = False
+        self.console = []
+        self.on_console = None
 
-    def request(self, method, path, body=None):
+    def request(self, method, path, body=None, text=None):
+        if path.endswith("/stdin"):
+            if not self.is_running:
+                raise crafty.CraftyError("Crafty API POST request was refused")
+            self.console.append((path.split("/")[-2], text))
+            if self.on_console:
+                self.on_console(text)
+            return {"status": "ok"}
         if path == "/api/v2/servers" and method == "POST":
             self.created.append(body)
             self.no_servers = False
@@ -438,6 +448,396 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(result["instances"]["family"], {"instance": "family", "application": "stopped", "backup": "not-required", "ready": False})
 
 
+# Made-up players: a Java account and a Bedrock gamertag with its Floodgate UUID.
+JAVA = {"uuid": "6b1f3c2e-9d4a-4f5e-8a7b-0c1d2e3f4a5b", "name": "Sample_Java"}
+BEDROCK = {"uuid": "00000000-0000-0000-0009-01eed05d1009", "name": "Sample Player"}
+RENAMED = {"uuid": "2f4e6a8c-1b3d-4e5f-9a0b-c1d2e3f4a5b6", "name": "Old_Name"}
+
+
+class AllowlistTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.server_dir = self.root / "crafty" / "servers" / SERVER_ID
+        self.server_dir.mkdir(parents=True)
+        self.allowlist = self.server_dir / "whitelist.json"
+        self.write([])
+        self.log = self.server_dir / "logs" / "latest.log"
+        self.log.parent.mkdir()
+        # An earlier session's answers, which must never count for a later reload.
+        self.log.write_text("[09:59:58] [Server thread/INFO]: Reloaded the whitelist\n"
+                            "[09:59:59] [Server thread/INFO]: There are no whitelisted players\n")
+        self.commands = {}
+        self.answers = True  # whether the server answers reload and list in its log
+        self.memory = None  # the list the server holds after its last reload; None for the file's
+        self.api = FakeAPI(running=True)
+        self.api.on_console = self.play
+        self.host = FakeHost(self.api)
+        self.adapter = crafty.Adapter(config(self.root), self.api, self.host)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def write(self, entries):
+        self.allowlist.write_text(json.dumps(entries))
+
+    def entries(self):
+        return json.loads(self.allowlist.read_text())
+
+    def server_applies(self, commands):
+        """Each console line in commands changes whitelist.json the way the game would."""
+        self.commands = commands
+
+    def say(self, text):
+        with self.log.open("a") as log:
+            log.write(f"[10:00:00] [Server thread/INFO]: {text}\n")
+
+    def play(self, line):
+        """Play the server: apply the line's change, then answer a reload or a list in the log as the game does."""
+        if line in self.commands:
+            self.write(self.commands[line](self.entries()))
+        if not self.answers:
+            return
+        if line == "whitelist reload":
+            self.memory = self.loaded()
+            self.say("Reloaded the whitelist")
+        elif line == "whitelist list":
+            names = [entry["name"] for entry in (self.loaded() if self.memory is None else self.memory)]
+            self.say(f"There are {len(names)} whitelisted player(s): {', '.join(names)}" if names else "There are no whitelisted players")
+
+    def loaded(self):
+        """The list the game would load from whitelist.json: nothing from a file it cannot read."""
+        try:
+            return self.entries()
+        except ValueError:
+            return []
+
+    def server_files(self):
+        return sorted(path.name for path in self.server_dir.iterdir())
+
+    def test_java_add_sends_one_console_line_and_confirms_the_uuid(self):
+        self.server_applies({"whitelist add Sample_Java": lambda entries: entries + [JAVA]})
+        result = self.adapter.allowlist("family", "add", "java", dict(JAVA))
+        self.assertEqual(result, {"instance": "family", "edition": "java", "operation": "add", "allowlist": "updated"})
+        self.assertEqual(self.api.console, [(SERVER_ID, "whitelist add Sample_Java")])
+
+    def test_a_listed_player_is_unchanged_without_a_console_line(self):
+        self.write([JAVA])
+        result = self.adapter.allowlist("family", "add", "java", dict(JAVA))
+        self.assertEqual(result["allowlist"], "unchanged")
+        self.assertEqual(self.api.console, [])
+
+    def test_java_remove_by_uuid_waits_for_the_entry_to_leave(self):
+        self.write([JAVA, BEDROCK])
+        self.server_applies({"whitelist remove Sample_Java": lambda entries: [e for e in entries if e != JAVA]})
+        result = self.adapter.allowlist("family", "remove", "java", dict(JAVA))
+        self.assertEqual(result["allowlist"], "updated")
+        self.assertEqual(self.entries(), [BEDROCK])
+
+    def test_bedrock_changes_go_through_floodgate_with_the_gamertag_quoted(self):
+        self.server_applies({'fwhitelist add "Sample Player"': lambda entries: entries + [BEDROCK]})
+        result = self.adapter.allowlist("family", "add", "bedrock", dict(BEDROCK))
+        self.assertEqual(result, {"instance": "family", "edition": "bedrock", "operation": "add", "allowlist": "updated"})
+        self.assertEqual(self.api.console, [(SERVER_ID, 'fwhitelist add "Sample Player"')])
+
+    def test_a_change_the_server_never_makes_times_out_without_naming_the_player(self):
+        with self.assertRaises(crafty.CraftyError) as caught:
+            self.adapter.allowlist("family", "add", "java", dict(JAVA))
+        self.assertIn("timed out", str(caught.exception))
+        self.assertNotIn("Sample_Java", str(caught.exception))
+        self.assertNotIn(JAVA["uuid"], str(caught.exception))
+        self.assertEqual(self.host.clock, 60)
+
+    def test_a_name_mojang_no_longer_knows_leaves_the_file_and_the_server_reloads_it(self):
+        self.write([JAVA, RENAMED])
+        self.allowlist.chmod(0o640)
+        synced = []
+        real_fsync = os.fsync
+
+        def fsync(descriptor):
+            synced.append(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+            real_fsync(descriptor)
+
+        with unittest.mock.patch.object(crafty.os, "fsync", fsync):
+            result = self.adapter.allowlist("family", "remove", "java", {"name": "old_name"})
+        self.assertEqual(result, {"instance": "family", "edition": "java", "operation": "remove", "allowlist": "updated"})
+        self.assertEqual(self.entries(), [JAVA])
+        self.assertEqual(self.api.console, [(SERVER_ID, "whitelist reload"), (SERVER_ID, "whitelist list")])
+        self.assertEqual(self.memory, [JAVA])
+        self.assertEqual(self.allowlist.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(self.server_files(), ["logs", "whitelist.json"])
+        self.assertEqual(synced, [False, True], "the file, then the folder holding the rename")
+
+    def test_the_removal_never_writes_over_a_change_made_while_it_ran(self):
+        self.write([JAVA, RENAMED])
+        real_fsync = os.fsync
+
+        def fsync(descriptor):
+            real_fsync(descriptor)
+            if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                self.write([JAVA, RENAMED, BEDROCK])  # an add from the Crafty console, mid-removal
+
+        with unittest.mock.patch.object(crafty.os, "fsync", fsync), self.assertRaises(crafty.CraftyError):
+            self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertEqual(self.entries(), [JAVA, RENAMED, BEDROCK])
+        self.assertEqual(self.api.console, [])
+        self.assertEqual(self.server_files(), ["logs", "whitelist.json"])
+
+    def test_the_removal_fails_when_the_server_writes_the_entry_back_before_its_reload(self):
+        self.write([JAVA, RENAMED])
+        self.server_applies({"whitelist reload": lambda entries: entries + [RENAMED]})
+        with self.assertRaises(crafty.CraftyError) as caught:
+            self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertIn("still holds", str(caught.exception))
+        self.assertNotIn("Old_Name", str(caught.exception))
+
+    def test_the_rewrite_never_follows_a_link_swapped_in_for_its_temporary_file(self):
+        self.write([JAVA, RENAMED])
+        self.allowlist.chmod(0o2660)
+        victim = self.root / "victim"
+        victim.write_text("host file")
+        victim.chmod(0o600)
+        real_fsync = os.fsync
+
+        def swap(descriptor):
+            real_fsync(descriptor)
+            for partial in [path for path in self.server_dir.iterdir() if path.name.startswith(".whitelist.")]:
+                partial.rename(self.server_dir / "moved")
+                partial.symlink_to(victim)
+
+        # The rename puts the link in place of whitelist.json, which the check after the reload refuses to follow.
+        with unittest.mock.patch.object(crafty.os, "fsync", swap), self.assertRaises(OSError):
+            self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertEqual(victim.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(victim.read_text(), "host file")
+        self.assertEqual((self.server_dir / "moved").stat().st_mode & 0o7777, 0o660)
+
+    def test_a_name_the_allowlist_does_not_hold_is_reported_not_listed(self):
+        self.write([JAVA])
+        result = self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertEqual(result["allowlist"], "not-listed")
+        self.assertEqual(self.entries(), [JAVA])
+        # An earlier removal may have changed the file without its reload reaching the server.
+        self.assertEqual(self.api.console, [(SERVER_ID, "whitelist reload"), (SERVER_ID, "whitelist list")])
+
+    def test_a_retry_finishes_a_removal_whose_reload_never_reached_the_server(self):
+        self.write([JAVA])
+        self.memory = [JAVA, RENAMED]
+        self.assertEqual(self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})["allowlist"], "not-listed")
+        self.assertEqual(self.memory, [JAVA])
+
+    def test_a_reload_the_server_never_answers_fails_without_naming_the_player(self):
+        self.write([JAVA, RENAMED])
+        self.answers = False
+        with self.assertRaises(crafty.CraftyError) as caught:
+            self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertIn("did not confirm", str(caught.exception))
+        self.assertNotIn("old_name", str(caught.exception).lower())
+        self.assertEqual(self.host.clock, 60)
+        self.assertEqual(self.api.console, [(SERVER_ID, "whitelist reload"), (SERVER_ID, "whitelist list")])
+
+    def test_a_server_still_holding_the_name_after_its_reload_fails_the_removal(self):
+        # As if the server loaded some other file: it answers, but its list keeps the entry.
+        for start, player in (([JAVA, RENAMED], "updated"), ([JAVA], "not-listed")):
+            with self.subTest(player=player):
+                self.write(start)
+                self.api.on_console = lambda line: self.say("Reloaded the whitelist" if line == "whitelist reload"
+                                                            else "There are 2 whitelisted player(s): Sample_Java, Old_Name")
+                with self.assertRaises(crafty.CraftyError) as caught:
+                    self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+                self.assertIn("still holds", str(caught.exception))
+                self.assertNotIn("old_name", str(caught.exception).lower())
+
+    def test_only_whole_server_lines_after_the_reload_count(self):
+        # Each case would confirm the removal if any of its imitated, early or partly written lines counted.
+        reload = "[10:00:00] [Server thread/INFO]: Reloaded the whitelist\n"
+        empty = "[10:00:00] [Server thread/INFO]: There are no whitelisted players\n"
+        cases = {
+            "a list from before the reload": empty + reload,
+            "a reload imitated in chat or with /say": (
+                "[10:00:00] [Async Chat Thread - #0/INFO]: <Sample_Java> ]: Reloaded the whitelist\n"
+                "[10:00:00] [Async Chat Thread - #0/INFO]: [Not Secure] <Sample_Java> Reloaded the whitelist\n"
+                "[10:00:00] [Server thread/INFO]: [Sample_Java] Reloaded the whitelist\n"
+                "[10:00:00] [Server thread/INFO]: [.Sample_Player] Reloaded the whitelist\n"
+                "[10:00:00] [Server thread/INFO]: Reloaded the whitelist and more\n" + empty),
+            "a list imitated in chat or with /say": reload + (
+                "[10:00:00] [Async Chat Thread - #0/INFO]: <Sample_Java> There are no whitelisted players\n"
+                "[10:00:00] [Server thread/INFO]: [Sample_Java] There are no whitelisted players\n"),
+            "a list not yet whole": reload + "[10:00:00] [Server thread/INFO]: There are 2 whitelisted player(s): Sample_Java",
+        }
+        self.answers = False
+        for case, text in cases.items():
+            with self.subTest(case=case):
+                self.write([JAVA, RENAMED])
+                self.log.write_text("")
+
+                def answer(line, text=text):
+                    if line == "whitelist list":
+                        with self.log.open("a") as log:
+                            log.write(text)
+                self.api.on_console = answer
+                with self.assertRaises(crafty.CraftyError) as caught:
+                    self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+                self.assertIn("did not confirm", str(caught.exception))
+
+    def test_an_answer_under_a_logger_name_still_counts(self):
+        self.write([JAVA, RENAMED])
+        self.answers = False
+
+        def answer(line):
+            if line == "whitelist list":
+                self.say("[net.minecraft.server.MinecraftServer] Reloaded the whitelist")
+                self.say("[net.minecraft.server.MinecraftServer] There are 1 whitelisted player(s): Sample_Java")
+        self.api.on_console = answer
+        self.assertEqual(self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})["allowlist"], "updated")
+
+    def test_the_removal_fails_when_the_file_holds_the_entry_again_after_the_reload(self):
+        self.write([JAVA, RENAMED])
+
+        def rewrite(line):
+            self.play(line)
+            if line == "whitelist list":  # the server's list lacks the name, but the file holds it again
+                self.write([JAVA, RENAMED])
+        self.api.on_console = rewrite
+        with self.assertRaises(crafty.CraftyError) as caught:
+            self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertIn("changed during the removal", str(caught.exception))
+        self.assertNotIn("old_name", str(caught.exception).lower())
+
+    def test_a_log_lost_after_the_rewrite_says_to_inspect_before_retrying(self):
+        self.write([JAVA, RENAMED])
+        real_write = crafty._Console.write_allowlist
+
+        def write_then_roll(console, entries, expected):
+            real_write(console, entries, expected)
+            self.log.rename(self.log.parent / "2026-10-12-1.log")  # as log4j renames before it creates the new log
+
+        with unittest.mock.patch.object(crafty._Console, "write_allowlist", write_then_roll), \
+                self.assertRaises(crafty.CraftyError) as caught:
+            self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertIn("inspect private server state", str(caught.exception))
+        self.log.write_text("")
+        self.assertEqual(self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})["allowlist"], "not-listed")
+
+    def test_the_reload_is_confirmed_across_a_log_rollover(self):
+        self.write([JAVA, RENAMED])
+
+        def roll(line):
+            if line == "whitelist reload":
+                self.log.rename(self.log.parent / "2026-10-12-1.log")
+                self.log.write_text("")
+            self.play(line)
+        self.api.on_console = roll
+        self.assertEqual(self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})["allowlist"], "updated")
+
+    def test_a_linked_or_missing_log_is_never_read(self):
+        elsewhere = self.root / "elsewhere.log"
+        elsewhere.write_text("[10:00:00] [Server thread/INFO]: Reloaded the whitelist\n"
+                             "[10:00:00] [Server thread/INFO]: There are no whitelisted players\n")
+        self.log.unlink()
+        for linked in (True, False):
+            with self.subTest(linked=linked):
+                if linked:
+                    self.log.symlink_to(elsewhere)
+                else:
+                    self.log.unlink()
+                self.write([JAVA, RENAMED])
+                self.api.console.clear()
+                with self.assertRaises(crafty.CraftyError):
+                    self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+                self.assertEqual(self.api.console, [], "nothing is sent without a log to confirm it")
+                self.assertEqual(self.entries(), [JAVA, RENAMED])
+
+    def test_only_a_java_removal_may_name_a_player_without_a_uuid(self):
+        self.write([RENAMED])
+        for operation, edition, player in (("add", "java", {"name": "Old_Name"}), ("remove", "bedrock", {"name": "Old_Name"}),
+                                           ("remove", "java", {"name": "Old_Name", "extra": 1}), ("remove", "java", {"name": "no;way"})):
+            with self.subTest(operation=operation, edition=edition, player=player), self.assertRaises(crafty.CraftyError):
+                self.adapter.allowlist("family", operation, edition, player)
+        self.assertEqual(self.entries(), [RENAMED])
+        self.assertEqual(self.api.console, [])
+
+    def test_a_name_listed_twice_is_refused(self):
+        self.write([RENAMED, {"uuid": JAVA["uuid"], "name": "old_name"}])
+        with self.assertRaises(crafty.CraftyError):
+            self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertEqual(self.api.console, [])
+
+    def test_refuses_a_stopped_server_a_closed_port_or_a_draining_host(self):
+        self.api.is_running = False
+        with self.assertRaises(crafty.CraftyError):
+            self.adapter.allowlist("family", "add", "java", dict(JAVA))
+        self.api.is_running = True
+        self.host.port_open = lambda port: False
+        with self.assertRaises(crafty.CraftyError):
+            self.adapter.allowlist("family", "add", "java", dict(JAVA))
+        self.host.port_open = lambda port: True
+        state = self.root / "crafty" / crafty.STATE_DIR
+        state.mkdir(parents=True)
+        (state / "host-drain.json").write_text(json.dumps({"boot_id": "boot-1"}))
+        with self.assertRaises(crafty.CraftyError):
+            self.adapter.allowlist("family", "add", "java", dict(JAVA))
+        self.assertEqual(self.api.console, [])
+
+    def test_a_linked_allowlist_file_is_never_read_or_replaced(self):
+        target = self.root / "elsewhere.json"
+        target.write_text(json.dumps([RENAMED]))
+        self.allowlist.unlink()
+        self.allowlist.symlink_to(target)
+        for player, operation in ((dict(JAVA), "add"), ({"name": "Old_Name"}, "remove")):
+            with self.subTest(operation=operation), self.assertRaises(crafty.CraftyError):
+                self.adapter.allowlist("family", operation, "java", player)
+        self.assertEqual(json.loads(target.read_text()), [RENAMED])
+        self.assertEqual(self.api.console, [])
+
+    def test_bad_identity_evidence_is_refused(self):
+        self.write([{"uuid": "not-a-uuid", "name": "Old_Name"}])
+        for player, operation in ((dict(JAVA), "add"), ({"name": "Old_Name"}, "remove")):
+            with self.subTest(operation=operation), self.assertRaises(crafty.CraftyError):
+                self.adapter.allowlist("family", operation, "java", player)
+        self.assertEqual(self.api.console, [])
+
+    def test_console_refuses_anything_but_one_line(self):
+        for line in ("", "whitelist add A\nop A", "say a\rop A", "say \x00"):
+            with self.subTest(line=line), self.assertRaises(crafty.CraftyError):
+                self.adapter.console({"server_id": SERVER_ID}, line)
+        self.assertEqual(self.api.console, [])
+
+
+class CraftyAPITests(unittest.TestCase):
+    def api(self, answer):
+        api = crafty.CraftyAPI("https://127.0.0.1:8443/", "token")
+        sent = []
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class Opener:
+            def open(self, request, timeout):
+                sent.append(request)
+                return Response(answer)
+
+        api.opener = Opener()
+        return api, sent
+
+    def test_console_lines_travel_as_the_raw_request_body(self):
+        api, sent = self.api(b'{"status": "ok"}')
+        api.request("POST", f"/api/v2/servers/{SERVER_ID}/stdin", text="whitelist add Sample_Java")
+        self.assertEqual(sent[0].full_url, f"https://127.0.0.1:8443/api/v2/servers/{SERVER_ID}/stdin")
+        self.assertEqual(sent[0].data, b"whitelist add Sample_Java")
+        self.assertEqual(sent[0].get_header("Content-type"), "text/plain; charset=utf-8")
+        self.assertEqual(sent[0].get_header("Authorization"), "Bearer token")
+
+    def test_a_stopped_server_refuses_the_console_line(self):
+        api, _ = self.api(b'{"status": "error", "error": "SERVER_NOT_RUNNING"}')
+        with self.assertRaises(crafty.CraftyError):
+            api.request("POST", f"/api/v2/servers/{SERVER_ID}/stdin", text="whitelist reload")
+
+
 class HostTests(unittest.TestCase):
     def test_lifecycle_lock_refuses_a_second_command(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -486,6 +886,45 @@ class ConfigTests(unittest.TestCase):
             code = crafty.main(["--config", "/nonexistent/operator.json", "host-status"])
         self.assertEqual(code, 1)
         self.assertIn("error", json.loads(output.getvalue()))
+
+    def player_file(self, directory, value, mode=0o600):
+        path = Path(directory) / "player.json"
+        path.write_text(json.dumps(value))
+        path.chmod(mode)
+        return path
+
+    def test_cli_runs_the_launchers_allowlist_command(self):
+        # The exact command line lambda/launcher/allowlist.go sends, answered with the four fields it checks.
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write(config(Path(directory)))
+            server_dir = Path(directory) / "crafty" / "servers" / SERVER_ID
+            server_dir.mkdir(parents=True)
+            (server_dir / "whitelist.json").write_text("[]")
+            api = FakeAPI(running=True)
+            api.on_console = lambda line: (server_dir / "whitelist.json").write_text(json.dumps([JAVA]))
+            player = self.player_file(directory, JAVA)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = crafty.main(["--config", str(path), "allowlist", "family", "add", "--edition", "java",
+                                    "--player-file", str(player)], api=api, host=FakeHost(api))
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue()),
+                         {"instance": "family", "edition": "java", "operation": "add", "allowlist": "updated"})
+
+    def test_cli_refuses_a_shared_or_malformed_player_file_without_echoing_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write(config(Path(directory)))
+            for value, mode in ((JAVA, 0o644), ("[1, 2]", 0o600), ({"uuid": "bad", "name": "Sample_Java"}, 0o600)):
+                api = FakeAPI(running=True)
+                player = self.player_file(directory, value, mode)
+                output = io.StringIO()
+                with self.subTest(value=value, mode=mode), contextlib.redirect_stdout(output):
+                    code = crafty.main(["--config", str(path), "allowlist", "family", "remove", "--edition", "java",
+                                        "--player-file", str(player)], api=api, host=FakeHost(api))
+                self.assertEqual(code, 1)
+                self.assertIn("error", json.loads(output.getvalue()))
+                self.assertNotIn("Sample_Java", output.getvalue())
+                self.assertEqual(api.console, [])
 
     def test_cli_runs_host_status_through_the_adapter(self):
         with tempfile.TemporaryDirectory() as directory:

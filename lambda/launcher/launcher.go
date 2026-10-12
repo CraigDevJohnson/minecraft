@@ -136,7 +136,9 @@ type Launcher struct {
 	FollowUpStop func(ctx context.Context) error
 	// LookupPlayer resolves a Java name or Bedrock gamertag to the account the server knows.
 	LookupPlayer func(ctx context.Context, edition, name string) (Player, error)
-	Now          func() time.Time
+	// Adapter is the host adapter this launcher installs before it starts the game or changes the allowlist.
+	Adapter *HostAdapter
+	Now     func() time.Time
 }
 
 type host struct {
@@ -560,7 +562,7 @@ func (l *Launcher) startGame(ctx context.Context) error {
 			return errors.New("too little time is left to start the game")
 		}
 	}
-	id, err := l.sendCommand(ctx, remoteCommand+" start "+l.Config.Instance, "minecraft launcher start", timeout)
+	id, err := l.sendCommand(ctx, l.onHost(remoteCommand+" start "+l.Config.Instance), "minecraft launcher start", timeout)
 	if err != nil {
 		return fmt.Errorf("send game start: %w", err)
 	}
