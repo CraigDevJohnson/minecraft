@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Host adapter between the operator lifecycle commands and Crafty Controller.
 
-Installed as /usr/local/sbin/minecraft-instance, so the workstation's minecraft_host.py and the
-idle-stop Lambda keep sending the same `start`, `host-drain` and `host-status` requests. Crafty
-remains the only process manager: this adapter only asks Crafty's local API to start or stop the
-server, then makes a cold archive of the stopped server directory and stores it in S3.
+Installed as /usr/local/sbin/minecraft-instance, so the launcher, the idle-stop Lambda and the
+workstation's minecraft_host.py keep sending the same `start`, `host-drain`, `host-status` and
+`allowlist` requests. Crafty remains the only process manager: this adapter only asks Crafty's local
+API to start or stop the server or to run one console command, then makes a cold archive of the
+stopped server directory and stores it in S3.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import re
 import shutil
 import socket
 import ssl
+import stat
 import subprocess
 import sys
 import tarfile
@@ -37,11 +39,15 @@ from minecraft_content import _managed_file_bytes  # noqa: E402  (canonical Geys
 INSTANCE_ID = re.compile(r"[a-z][a-z0-9-]{0,31}")
 UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+JAVA_NAME = re.compile(r"[A-Za-z0-9_]{3,16}")
 CONTAINER_SERVERS = "/crafty/servers/"
 ARTIFACT_HOSTS = {"fill-data.papermc.io", "download.geysermc.org", "github.com"}
 STATE_DIR = "state"
 KEEP_ARCHIVES = 14
 STORAGE_FIELDS = ("size_bytes", "available_bytes", "used_percent")
+# Upper bounds on the two small files the allowlist action reads.
+PLAYER_FILE_LIMIT = 4096
+ALLOWLIST_LIMIT = 1024 * 1024
 
 
 class CraftyError(Exception):
@@ -87,12 +93,16 @@ class CraftyAPI:
         context.verify_mode = ssl.CERT_NONE
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
 
-    def request(self, method: str, path: str, body: dict | None = None) -> dict:
+    def request(self, method: str, path: str, body: dict | None = None, *, text: str | None = None) -> dict:
         headers = {"Authorization": f"Bearer {self.token}"}
         data = b"" if method == "POST" else None
         if body is not None:
             data = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
+        elif text is not None:
+            # Crafty's console endpoint takes the command line itself as the body.
+            data = text.encode()
+            headers["Content-Type"] = "text/plain; charset=utf-8"
         request = urllib.request.Request(self.base_url + path, method=method, data=data, headers=headers)
         try:
             with self.opener.open(request, timeout=30) as response:
@@ -572,6 +582,131 @@ class Adapter:
             results = {name: self._stop(name) for name in sorted(self.config["instances"])}
         return {"draining": True, "instances": results}
 
+    # Allowlist ------------------------------------------------------------------------------
+
+    def console(self, server: dict, line: str) -> None:
+        """Send one command line to the running server's console. Crafty answers whether it was delivered, not
+        what the server made of it, so callers confirm the effect in the server's own files."""
+        if not line or any(character in line for character in "\r\n\x00"):
+            raise CraftyError("a console command must be one line")
+        self.api.request("POST", f"/api/v2/servers/{server['server_id']}/stdin", text=line)
+
+    def allowlist(self, instance: str, operation: str, edition: str, player: dict) -> dict:
+        """Add or remove one verified player on the running server (docs/operations/allowlist.md)."""
+        from minecraft_access import AccessError, change_allowlist  # only this action needs it
+
+        with self.lifecycle():
+            if self.draining():
+                raise CraftyError("allowlist changes require a running instance outside host drain")
+            server = self.server(instance)
+            if not (self.running(server) and self.host.port_open(self.config["instances"][instance]["java_port"])):
+                raise CraftyError("allowlist changes require a running, ready server")
+            console = _Console(self, server)
+            try:
+                if "uuid" not in player:
+                    return self._remove_listed(console, instance, operation, edition, player)
+                return change_allowlist(console, instance, operation, edition, player)
+            except AccessError as exc:
+                raise CraftyError(str(exc)) from None
+
+    def _remove_listed(self, console: "_Console", instance: str, operation: str, edition: str, player: dict) -> dict:
+        """Remove the Java entry the allowlist holds under a name Mojang no longer knows, as after a rename.
+
+        Without a current account the server cannot resolve the name for `whitelist remove`, so the entry
+        leaves the file directly and the server reloads it."""
+        from minecraft_access import read_uuids
+
+        name = player.get("name")
+        if (operation != "remove" or edition != "java" or set(player) != {"name"}
+                or not isinstance(name, str) or not JAVA_NAME.fullmatch(name)):
+            raise CraftyError("only a Java removal may name a player without a UUID")
+        result = {"instance": instance, "edition": edition, "operation": operation}
+        read_uuids(console, instance)  # the same evidence checks as a change by UUID
+        entries = console.read_allowlist(instance)
+        listed = [entry for entry in entries if isinstance(entry.get("name"), str) and entry["name"].lower() == name.lower()]
+        if not listed:
+            return {**result, "allowlist": "not-listed"}
+        if len(listed) != 1:
+            raise CraftyError("the allowlist holds that name more than once")
+        console.write_allowlist([entry for entry in entries if entry is not listed[0]])
+        console.rcon(instance, "whitelist reload")
+        return {**result, "allowlist": "updated"}
+
+
+class _Console:
+    """The machine minecraft_access.change_allowlist drives: the server's console through Crafty, and the
+    whitelist.json in the server folder as the evidence of each change."""
+
+    def __init__(self, adapter: Adapter, server: dict):
+        self.adapter = adapter
+        self.server = server
+        self.monotonic = adapter.host.monotonic
+        self.sleep = adapter.host.sleep
+        self.path = adapter.server_dir(server) / "whitelist.json"
+
+    def rcon(self, instance: str, text: str) -> None:
+        self.adapter.console(self.server, text)
+
+    def read_allowlist(self, instance: str) -> list:
+        # The server rewrites the file in place, so a read can catch it half written: read once more.
+        for attempt in range(2):
+            descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(descriptor, "rb") as stream:
+                data = stream.read(ALLOWLIST_LIMIT + 1)
+            if len(data) > ALLOWLIST_LIMIT:
+                raise CraftyError("the server allowlist exceeded its size limit")
+            try:
+                return json.loads(data)
+            except ValueError:
+                if attempt:
+                    raise
+                self.sleep(1)
+        raise AssertionError("unreachable")
+
+    def write_allowlist(self, entries: list) -> None:
+        """Replace whitelist.json atomically, keeping the owner and mode the server's own account needs."""
+        current = os.lstat(self.path)
+        if not stat.S_ISREG(current.st_mode):
+            raise CraftyError("the server allowlist is not a regular file")
+        descriptor, partial = tempfile.mkstemp(prefix=".whitelist.", dir=self.path.parent)
+        try:
+            with os.fdopen(descriptor, "w") as handle:
+                # Through the descriptor, never the name: the server's account can swap the name for a link.
+                os.fchown(handle.fileno(), current.st_uid, current.st_gid)
+                os.fchmod(handle.fileno(), stat.S_IMODE(current.st_mode) & 0o777)
+                json.dump(entries, handle, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(partial, self.path)
+        except BaseException:
+            Path(partial).unlink(missing_ok=True)
+            raise
+
+
+def read_player_file(path: Path) -> dict:
+    """Read the private identity file the launcher writes for one allowlist change: a regular file owned by
+    this user with mode 0600, never a link. Its contents are never echoed."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise CraftyError("cannot open the private player file") from exc
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600):
+            raise CraftyError("the player file must be a private regular file (mode 0600) owned by this user")
+        data = stream.read(PLAYER_FILE_LIMIT + 1)
+    if len(data) > PLAYER_FILE_LIMIT:
+        raise CraftyError("the player file exceeded its size limit")
+    try:
+        value = json.loads(data)
+    except ValueError:
+        raise CraftyError("the player file is not JSON") from None
+    if not isinstance(value, dict):
+        raise CraftyError("the player file must hold a JSON object")
+    return value
+
 
 def write_durably(path: Path, value: dict) -> None:
     """Replace a small JSON state file so that, once this returns, a power loss cannot undo it."""
@@ -719,6 +854,11 @@ def main(argv=None, *, api=None, host=None) -> int:
     restore = commands.add_parser("restore", help="replace the stopped server folder with a verified archive from S3")
     restore.add_argument("instance")
     restore.add_argument("--key", required=True)
+    allow = commands.add_parser("allowlist", help="add or remove one verified player on the running server")
+    allow.add_argument("instance")
+    allow.add_argument("operation", choices=("add", "remove"))
+    allow.add_argument("--edition", choices=("java", "bedrock"), required=True)
+    allow.add_argument("--player-file", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.action == "stage-import":
@@ -737,6 +877,8 @@ def main(argv=None, *, api=None, host=None) -> int:
             output = handlers[args.action](args.instance)
         elif args.action == "restore":
             output = adapter.restore(args.instance, args.key)
+        elif args.action == "allowlist":
+            output = adapter.allowlist(args.instance, args.operation, args.edition, read_player_file(args.player_file))
         elif args.action == "import-server":
             output = adapter.import_server(args.instance, args.archive_name, args.max_memory_gb)
         elif args.action == "host-drain":

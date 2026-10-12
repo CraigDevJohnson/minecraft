@@ -580,7 +580,7 @@ func TestFinishStartRunsTheWorkstationSteps(t *testing.T) {
 	if strings.Join(r.pointedAt, ",") != address {
 		t.Fatalf("DNS pointed at %v", r.pointedAt)
 	}
-	if strings.Join(r.ssm.commands, "|") != "/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json start family" {
+	if strings.Join(r.ssm.commands, "|") != "set -eu\n/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json start family" {
 		t.Fatalf("commands %v", r.ssm.commands)
 	}
 	session := r.session(t)

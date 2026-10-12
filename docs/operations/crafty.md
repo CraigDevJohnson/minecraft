@@ -26,7 +26,7 @@ sudo bash scripts/install_aws_cli.sh
 sudo bash scripts/install_crafty.sh
 ```
 
-The installer writes `/opt/minecraft-crafty/compose.yaml`, stores Crafty's configuration, servers and backups under `/srv/minecraft/crafty/`, installs the lifecycle adapter as `/usr/local/sbin/minecraft-instance`, and enables `minecraft-crafty.service`. Crafty's web UI listens on `127.0.0.1:8443` only.
+The installer writes `/opt/minecraft-crafty/compose.yaml`, stores Crafty's configuration, servers and backups under `/srv/minecraft/crafty/`, installs the lifecycle adapter as `/usr/local/sbin/minecraft-instance` (its files in `/opt/minecraft-crafty/scripts`, which the launcher keeps up to date from then on, [ADR 0007](../adr/0007-the-launcher-carries-the-host-adapter.md)), and enables `minecraft-crafty.service`. Crafty's web UI listens on `127.0.0.1:8443` only.
 
 ## Open the Crafty admin page
 
@@ -93,7 +93,7 @@ Portals are made in game by an operator (`op <JavaName>` from the console first)
 
 Multiverse-Portals lets only players with `multiverse.portal.access.<portal>` use a portal, and this server installs no permissions plugin, so by default only operators get through. With the server stopped, set `enforce-portal-access: false` under `portal-usage` in `plugins/Multiverse-Portals/config.yml` in the server folder (`/srv/minecraft/crafty/servers/<server id>/`). Multiverse-Core's `enforce-access` is already `false`, so entering `creative` needs no further permission.
 
-Add each family player to the allowlist from the console: `whitelist add <JavaName>` for Java accounts and `fwhitelist add <Gamertag>` for Bedrock accounts, as in [allowlist](allowlist.md).
+Add each family player to the allowlist with the [Server control workflow](cloud-controls.md#the-server-control-workflow)'s `allowlist-add`, which looks the account up and confirms the change in `whitelist.json` ([allowlist](allowlist.md)). In a hands-on emergency the console takes `whitelist add <JavaName>` for Java accounts and `fwhitelist add <Gamertag>` for Bedrock accounts.
 
 ## Everyday start and stop
 

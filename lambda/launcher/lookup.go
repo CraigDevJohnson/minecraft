@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -141,6 +142,12 @@ func (p *PlayerLookup) get(ctx context.Context, target, service string, into any
 		return nil
 	case http.StatusNotFound, http.StatusNoContent, http.StatusBadRequest:
 		return ErrPlayerNotFound
+	case http.StatusServiceUnavailable:
+		// GeyserMC answers a gamertag it has never seen with 503 and this message, not with 404.
+		if bytes.Contains(body, []byte("Unable to find user in our cache")) {
+			return ErrPlayerNotFound
+		}
+		return fmt.Errorf("%s answered %d", service, response.StatusCode)
 	default:
 		return fmt.Errorf("%s answered %d", service, response.StatusCode)
 	}

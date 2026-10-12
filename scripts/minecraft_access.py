@@ -64,7 +64,7 @@ def change_allowlist(machine, instance, operation, edition, player: dict) -> dic
     try:
         machine.rcon(instance, command)
     except Exception:
-        raise AccessError("allowlist RCON command failed; inspect private server state before retrying") from None
+        raise AccessError("allowlist console command failed; inspect private server state before retrying") from None
     deadline = machine.monotonic() + 60
     while (expected_uuid in read_uuids(machine, instance)) != expected_present:
         remaining = deadline - machine.monotonic()

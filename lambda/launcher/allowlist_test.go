@@ -39,6 +39,9 @@ func allowlistRig(t *testing.T) (*rig, *[]string) {
 		if name == "Outage" {
 			return Player{}, errors.New("Mojang answered 503")
 		}
+		if name == "Old_Name" {
+			return Player{}, ErrPlayerNotFound
+		}
 		return steve, nil
 	}
 	return r, &looked
@@ -122,6 +125,52 @@ func TestAllowlistNeverSendsAnUnknownPlayer(t *testing.T) {
 	}
 }
 
+func TestAllowlistRemovesARenamedJavaPlayerByTheNameTheServerHolds(t *testing.T) {
+	removal := AllowlistRequest{Operation: "remove", Edition: "java", Name: "Old_Name"}
+	r, _ := allowlistRig(t)
+	r.ssm.invocation = []ssm.GetCommandInvocationOutput{success(`{"instance": "family", "edition": "java", "operation": "remove", "allowlist": "updated"}`)}
+	result, err := r.launcher.Allowlist(context.Background(), removal)
+	if err != nil || result.Allowlist != "updated" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte(`{"name":"Old_Name"}`))
+	if len(r.ssm.commands) != 1 || !strings.Contains(r.ssm.commands[0], "printf '%s' '"+encoded+"'") {
+		t.Fatalf("the adapter must get the name alone, with no UUID: %v", r.ssm.commands)
+	}
+
+	// The server holding no entry under that name is the same answer as Mojang not knowing it.
+	r, _ = allowlistRig(t)
+	r.ssm.invocation = []ssm.GetCommandInvocationOutput{success(`{"instance": "family", "edition": "java", "operation": "remove", "allowlist": "not-listed"}`)}
+	if _, err := r.launcher.Allowlist(context.Background(), removal); !errors.Is(err, ErrPlayerNotFound) {
+		t.Fatalf("err=%v", err)
+	}
+
+	// An add needs the account's UUID, and the adapter's not-listed answers only a removal by name.
+	r, _ = allowlistRig(t)
+	if _, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Old_Name"}); !errors.Is(err, ErrPlayerNotFound) || len(r.ssm.commands) != 0 {
+		t.Fatalf("err=%v commands=%v", err, r.ssm.commands)
+	}
+	r, _ = allowlistRig(t)
+	r.ssm.invocation = []ssm.GetCommandInvocationOutput{success(`{"instance": "family", "edition": "java", "operation": "add", "allowlist": "not-listed"}`)}
+	if _, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"}); err == nil || errors.Is(err, ErrPlayerNotFound) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestAllowlistPassesOnTheAdaptersReason(t *testing.T) {
+	r, _ := allowlistRig(t)
+	r.ssm.invocation = []ssm.GetCommandInvocationOutput{{Status: ssmtypes.CommandInvocationStatusFailed, ResponseCode: 1, StandardOutputContent: aws.String(`{"error": "the server is draining"}` + "\n")}}
+	_, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"})
+	if err == nil || !strings.HasSuffix(err.Error(), "ended with status Failed: the server is draining") {
+		t.Fatalf("err=%v", err)
+	}
+	for _, output := range []string{"", "Traceback (most recent call last):", `{"error": "` + strings.Repeat("x", 201) + `"}`} {
+		if adapterError(output) != "" {
+			t.Fatalf("%q must add nothing to the error", output)
+		}
+	}
+}
+
 func TestAllowlistRejectsBadRequestsBeforeLookingAnythingUp(t *testing.T) {
 	r, looked := allowlistRig(t)
 	for _, request := range []AllowlistRequest{
@@ -200,6 +249,9 @@ func lookupServer(t *testing.T) *httptest.Server {
 		case "/v2/xbox/xuid/Nobody":
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"message": "Unable to find user in our cache. Please try specifying a different gamertag."}`))
+		case "/v2/xbox/xuid/Uncached":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"message": "Unable to find user in our cache. Please try specifying a different gamertag."}`))
 		case "/v2/xbox/xuid/Zero":
 			_, _ = w.Write([]byte(`{"xuid": 0}`))
 		case "/v2/link/bedrock/2535400000000009":
@@ -257,7 +309,7 @@ func TestLookupTellsAnUnknownPlayerFromAnOutage(t *testing.T) {
 	server := lookupServer(t)
 	defer server.Close()
 	lookup := &PlayerLookup{Client: lookupClient(), Mojang: server.URL, Geyser: server.URL}
-	for _, tc := range []struct{ edition, name string }{{"java", "Nobody"}, {"bedrock", "Nobody"}, {"bedrock", "Zero"}} {
+	for _, tc := range []struct{ edition, name string }{{"java", "Nobody"}, {"bedrock", "Nobody"}, {"bedrock", "Uncached"}, {"bedrock", "Zero"}} {
 		if _, err := lookup.Lookup(context.Background(), tc.edition, tc.name); !errors.Is(err, ErrPlayerNotFound) {
 			t.Fatalf("%s %s: err=%v", tc.edition, tc.name, err)
 		}

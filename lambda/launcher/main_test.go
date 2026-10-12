@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -117,5 +118,15 @@ func TestTheOperatorCheckReadsTheCallerTheFunctionURLVerified(t *testing.T) {
 	local, _ := http.NewRequest("POST", "/server/allowlist", nil)
 	if operator(local) {
 		t.Fatal("a request without the Function URL's event must not be an operator")
+	}
+}
+
+func TestTheHostAdapterComesFromThePackageOnLambda(t *testing.T) {
+	lambda := func(name string) string { return map[string]string{"LAMBDA_TASK_ROOT": "/var/task"}[name] }
+	if got := adapterSource(lambda); got != "/var/task/adapter" {
+		t.Fatalf("on Lambda the adapter is read from %q", got)
+	}
+	if got := adapterSource(func(string) string { return "" }); got != filepath.Join("..", "..", "scripts") {
+		t.Fatalf("from a checkout the adapter is read from %q", got)
 	}
 }

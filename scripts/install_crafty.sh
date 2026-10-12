@@ -46,7 +46,7 @@ image="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["crafty
 }
 
 install -d -m 0755 "$install_dir" "$install_dir/scripts" "$install_dir/runtime"
-install -m 0644 "$source_dir/scripts/minecraft_crafty.py" "$source_dir/scripts/minecraft_content.py" "$install_dir/scripts/"
+install -m 0644 "$source_dir/scripts/minecraft_crafty.py" "$source_dir/scripts/minecraft_content.py" "$source_dir/scripts/minecraft_access.py" "$install_dir/scripts/"
 install -m 0644 "$source_dir/runtime/crafty/server.json" "$install_dir/runtime/"
 for directory in backups logs servers config import state staging; do
 	install -d -m 0770 "$crafty_root/$directory"

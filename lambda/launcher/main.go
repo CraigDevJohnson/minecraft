@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -67,6 +68,15 @@ func loadConfig(getenv func(string) string) (Config, *DNSPointer, error) {
 	return cfg, dns, nil
 }
 
+// adapterSource names the folder holding the host adapter files: the package's adapter folder on Lambda
+// (scripts/package_idle_stop.py), the repository's scripts folder anywhere else.
+func adapterSource(getenv func(string) string) string {
+	if root := getenv("LAMBDA_TASK_ROOT"); root != "" {
+		return filepath.Join(root, "adapter")
+	}
+	return filepath.Join("..", "..", "scripts")
+}
+
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	cfg, dns, err := loadConfig(os.Getenv)
@@ -79,6 +89,11 @@ func main() {
 		log.Error("load AWS configuration", "err", err)
 		os.Exit(1)
 	}
+	adapter, err := LoadHostAdapter(os.DirFS(adapterSource(os.Getenv)))
+	if err != nil {
+		log.Error("host adapter", "err", err)
+		os.Exit(1)
+	}
 	ssmClient := ssm.NewFromConfig(awsConfig)
 	dns.Parameters = ssmClient
 	dns.Client = cloudflareClient()
@@ -88,6 +103,7 @@ func main() {
 		SSM:      ssmClient,
 		Ping:     PingPlayers,
 		PointDNS: dns.Point,
+		Adapter:  adapter,
 		Now:      time.Now,
 	}
 	launcher.LookupPlayer = (&PlayerLookup{Client: lookupClient()}).Lookup
