@@ -462,7 +462,16 @@ class AllowlistTests(unittest.TestCase):
         self.server_dir.mkdir(parents=True)
         self.allowlist = self.server_dir / "whitelist.json"
         self.write([])
+        self.log = self.server_dir / "logs" / "latest.log"
+        self.log.parent.mkdir()
+        # An earlier session's answers, which must never count for a later reload.
+        self.log.write_text("[09:59:58] [Server thread/INFO]: Reloaded the whitelist\n"
+                            "[09:59:59] [Server thread/INFO]: There are no whitelisted players\n")
+        self.commands = {}
+        self.answers = True  # whether the server answers reload and list in its log
+        self.memory = None  # the list the server holds after its last reload; None for the file's
         self.api = FakeAPI(running=True)
+        self.api.on_console = self.play
         self.host = FakeHost(self.api)
         self.adapter = crafty.Adapter(config(self.root), self.api, self.host)
 
@@ -476,11 +485,35 @@ class AllowlistTests(unittest.TestCase):
         return json.loads(self.allowlist.read_text())
 
     def server_applies(self, commands):
-        """Play the server: each console line it knows changes whitelist.json the way the game would."""
-        def apply(line):
-            if line in commands:
-                self.write(commands[line](self.entries()))
-        self.api.on_console = apply
+        """Each console line in commands changes whitelist.json the way the game would."""
+        self.commands = commands
+
+    def say(self, text):
+        with self.log.open("a") as log:
+            log.write(f"[10:00:00] [Server thread/INFO]: {text}\n")
+
+    def play(self, line):
+        """Play the server: apply the line's change, then answer a reload or a list in the log as the game does."""
+        if line in self.commands:
+            self.write(self.commands[line](self.entries()))
+        if not self.answers:
+            return
+        if line == "whitelist reload":
+            self.memory = self.loaded()
+            self.say("Reloaded the whitelist")
+        elif line == "whitelist list":
+            names = [entry["name"] for entry in (self.loaded() if self.memory is None else self.memory)]
+            self.say(f"There are {len(names)} whitelisted player(s): {', '.join(names)}" if names else "There are no whitelisted players")
+
+    def loaded(self):
+        """The list the game would load from whitelist.json: nothing from a file it cannot read."""
+        try:
+            return self.entries()
+        except ValueError:
+            return []
+
+    def server_files(self):
+        return sorted(path.name for path in self.server_dir.iterdir())
 
     def test_java_add_sends_one_console_line_and_confirms_the_uuid(self):
         self.server_applies({"whitelist add Sample_Java": lambda entries: entries + [JAVA]})
@@ -529,9 +562,10 @@ class AllowlistTests(unittest.TestCase):
             result = self.adapter.allowlist("family", "remove", "java", {"name": "old_name"})
         self.assertEqual(result, {"instance": "family", "edition": "java", "operation": "remove", "allowlist": "updated"})
         self.assertEqual(self.entries(), [JAVA])
-        self.assertEqual(self.api.console, [(SERVER_ID, "whitelist reload")])
+        self.assertEqual(self.api.console, [(SERVER_ID, "whitelist reload"), (SERVER_ID, "whitelist list")])
+        self.assertEqual(self.memory, [JAVA])
         self.assertEqual(self.allowlist.stat().st_mode & 0o777, 0o640)
-        self.assertEqual([path.name for path in self.server_dir.iterdir()], ["whitelist.json"])
+        self.assertEqual(self.server_files(), ["logs", "whitelist.json"])
         self.assertEqual(synced, [False, True], "the file, then the folder holding the rename")
 
     def test_the_removal_never_writes_over_a_change_made_while_it_ran(self):
@@ -547,13 +581,14 @@ class AllowlistTests(unittest.TestCase):
             self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
         self.assertEqual(self.entries(), [JAVA, RENAMED, BEDROCK])
         self.assertEqual(self.api.console, [])
-        self.assertEqual([path.name for path in self.server_dir.iterdir()], ["whitelist.json"])
+        self.assertEqual(self.server_files(), ["logs", "whitelist.json"])
 
     def test_the_removal_fails_when_the_server_writes_the_entry_back_before_its_reload(self):
         self.write([JAVA, RENAMED])
         self.server_applies({"whitelist reload": lambda entries: entries + [RENAMED]})
         with self.assertRaises(crafty.CraftyError) as caught:
             self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertIn("still holds", str(caught.exception))
         self.assertNotIn("Old_Name", str(caught.exception))
 
     def test_the_rewrite_never_follows_a_link_swapped_in_for_its_temporary_file(self):
@@ -583,7 +618,135 @@ class AllowlistTests(unittest.TestCase):
         self.assertEqual(result["allowlist"], "not-listed")
         self.assertEqual(self.entries(), [JAVA])
         # An earlier removal may have changed the file without its reload reaching the server.
-        self.assertEqual(self.api.console, [(SERVER_ID, "whitelist reload")])
+        self.assertEqual(self.api.console, [(SERVER_ID, "whitelist reload"), (SERVER_ID, "whitelist list")])
+
+    def test_a_retry_finishes_a_removal_whose_reload_never_reached_the_server(self):
+        self.write([JAVA])
+        self.memory = [JAVA, RENAMED]
+        self.assertEqual(self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})["allowlist"], "not-listed")
+        self.assertEqual(self.memory, [JAVA])
+
+    def test_a_reload_the_server_never_answers_fails_without_naming_the_player(self):
+        self.write([JAVA, RENAMED])
+        self.answers = False
+        with self.assertRaises(crafty.CraftyError) as caught:
+            self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertIn("did not confirm", str(caught.exception))
+        self.assertNotIn("old_name", str(caught.exception).lower())
+        self.assertEqual(self.host.clock, 60)
+        self.assertEqual(self.api.console, [(SERVER_ID, "whitelist reload"), (SERVER_ID, "whitelist list")])
+
+    def test_a_server_still_holding_the_name_after_its_reload_fails_the_removal(self):
+        # As if the server loaded some other file: it answers, but its list keeps the entry.
+        for start, player in (([JAVA, RENAMED], "updated"), ([JAVA], "not-listed")):
+            with self.subTest(player=player):
+                self.write(start)
+                self.api.on_console = lambda line: self.say("Reloaded the whitelist" if line == "whitelist reload"
+                                                            else "There are 2 whitelisted player(s): Sample_Java, Old_Name")
+                with self.assertRaises(crafty.CraftyError) as caught:
+                    self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+                self.assertIn("still holds", str(caught.exception))
+                self.assertNotIn("old_name", str(caught.exception).lower())
+
+    def test_only_whole_server_lines_after_the_reload_count(self):
+        # Each case would confirm the removal if any of its imitated, early or partly written lines counted.
+        reload = "[10:00:00] [Server thread/INFO]: Reloaded the whitelist\n"
+        empty = "[10:00:00] [Server thread/INFO]: There are no whitelisted players\n"
+        cases = {
+            "a list from before the reload": empty + reload,
+            "a reload imitated in chat or with /say": (
+                "[10:00:00] [Async Chat Thread - #0/INFO]: <Sample_Java> ]: Reloaded the whitelist\n"
+                "[10:00:00] [Async Chat Thread - #0/INFO]: [Not Secure] <Sample_Java> Reloaded the whitelist\n"
+                "[10:00:00] [Server thread/INFO]: [Sample_Java] Reloaded the whitelist\n"
+                "[10:00:00] [Server thread/INFO]: [.Sample_Player] Reloaded the whitelist\n"
+                "[10:00:00] [Server thread/INFO]: Reloaded the whitelist and more\n" + empty),
+            "a list imitated in chat or with /say": reload + (
+                "[10:00:00] [Async Chat Thread - #0/INFO]: <Sample_Java> There are no whitelisted players\n"
+                "[10:00:00] [Server thread/INFO]: [Sample_Java] There are no whitelisted players\n"),
+            "a list not yet whole": reload + "[10:00:00] [Server thread/INFO]: There are 2 whitelisted player(s): Sample_Java",
+        }
+        self.answers = False
+        for case, text in cases.items():
+            with self.subTest(case=case):
+                self.write([JAVA, RENAMED])
+                self.log.write_text("")
+
+                def answer(line, text=text):
+                    if line == "whitelist list":
+                        with self.log.open("a") as log:
+                            log.write(text)
+                self.api.on_console = answer
+                with self.assertRaises(crafty.CraftyError) as caught:
+                    self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+                self.assertIn("did not confirm", str(caught.exception))
+
+    def test_an_answer_under_a_logger_name_still_counts(self):
+        self.write([JAVA, RENAMED])
+        self.answers = False
+
+        def answer(line):
+            if line == "whitelist list":
+                self.say("[net.minecraft.server.MinecraftServer] Reloaded the whitelist")
+                self.say("[net.minecraft.server.MinecraftServer] There are 1 whitelisted player(s): Sample_Java")
+        self.api.on_console = answer
+        self.assertEqual(self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})["allowlist"], "updated")
+
+    def test_the_removal_fails_when_the_file_holds_the_entry_again_after_the_reload(self):
+        self.write([JAVA, RENAMED])
+
+        def rewrite(line):
+            self.play(line)
+            if line == "whitelist list":  # the server's list lacks the name, but the file holds it again
+                self.write([JAVA, RENAMED])
+        self.api.on_console = rewrite
+        with self.assertRaises(crafty.CraftyError) as caught:
+            self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertIn("changed during the removal", str(caught.exception))
+        self.assertNotIn("old_name", str(caught.exception).lower())
+
+    def test_a_log_lost_after_the_rewrite_says_to_inspect_before_retrying(self):
+        self.write([JAVA, RENAMED])
+        real_write = crafty._Console.write_allowlist
+
+        def write_then_roll(console, entries, expected):
+            real_write(console, entries, expected)
+            self.log.rename(self.log.parent / "2026-10-12-1.log")  # as log4j renames before it creates the new log
+
+        with unittest.mock.patch.object(crafty._Console, "write_allowlist", write_then_roll), \
+                self.assertRaises(crafty.CraftyError) as caught:
+            self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+        self.assertIn("inspect private server state", str(caught.exception))
+        self.log.write_text("")
+        self.assertEqual(self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})["allowlist"], "not-listed")
+
+    def test_the_reload_is_confirmed_across_a_log_rollover(self):
+        self.write([JAVA, RENAMED])
+
+        def roll(line):
+            if line == "whitelist reload":
+                self.log.rename(self.log.parent / "2026-10-12-1.log")
+                self.log.write_text("")
+            self.play(line)
+        self.api.on_console = roll
+        self.assertEqual(self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})["allowlist"], "updated")
+
+    def test_a_linked_or_missing_log_is_never_read(self):
+        elsewhere = self.root / "elsewhere.log"
+        elsewhere.write_text("[10:00:00] [Server thread/INFO]: Reloaded the whitelist\n"
+                             "[10:00:00] [Server thread/INFO]: There are no whitelisted players\n")
+        self.log.unlink()
+        for linked in (True, False):
+            with self.subTest(linked=linked):
+                if linked:
+                    self.log.symlink_to(elsewhere)
+                else:
+                    self.log.unlink()
+                self.write([JAVA, RENAMED])
+                self.api.console.clear()
+                with self.assertRaises(crafty.CraftyError):
+                    self.adapter.allowlist("family", "remove", "java", {"name": "Old_Name"})
+                self.assertEqual(self.api.console, [], "nothing is sent without a log to confirm it")
+                self.assertEqual(self.entries(), [JAVA, RENAMED])
 
     def test_only_a_java_removal_may_name_a_player_without_a_uuid(self):
         self.write([RENAMED])

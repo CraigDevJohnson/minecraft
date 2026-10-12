@@ -37,10 +37,19 @@ func loadAdapter(t *testing.T, fsys fstest.MapFS) *HostAdapter {
 // standard output.
 func runOnHost(t *testing.T, adapter *HostAdapter, directory string) (string, error) {
 	t.Helper()
-	for _, tool := range []string{"sh", "base64", "gzip", "sha256sum", "mktemp", "stat"} {
+	for _, tool := range []string{"sh", "base64", "gzip", "sha256sum", "mktemp", "stat", "dirname"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s is not installed", tool)
 		}
+	}
+	// The host runs GNU coreutils (Ubuntu); stat -c and mv -T have no BSD equivalent.
+	if exec.Command("stat", "-c", "%u", "/").Run() != nil || exec.Command("mv", "--version").Run() != nil {
+		t.Skip("GNU coreutils are not installed")
+	}
+	// The temporary folder may be reached through a link, as /var is on macOS, and the check of the folders above
+	// the adapter refuses links, so name the folder by its real path.
+	if parent, err := filepath.EvalSymlinks(filepath.Dir(directory)); err == nil {
+		directory = filepath.Join(parent, filepath.Base(directory))
 	}
 	command := exec.Command("sh", "-c", "set -eu\n"+adapter.script(directory, strconv.Itoa(os.Getuid())))
 	var stdout, stderr bytes.Buffer
@@ -204,6 +213,44 @@ func TestAdapterInstallRefusesAFolderSomeoneElseCouldChange(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(directory); len(entries) != 0 {
 		t.Fatalf("nothing may be installed into it: %v", entries)
+	}
+}
+
+func TestAdapterInstallRefusesAFolderAboveItThatOthersCouldRenameItIn(t *testing.T) {
+	modes := map[os.FileMode]bool{0o777: true, 0o775: true, 0o757: true, os.ModeSticky | 0o777: false, 0o755: false}
+	// The folder above may be the adapter's parent or further up, as /opt is above /opt/minecraft-crafty/scripts.
+	for _, below := range []string{"scripts", filepath.Join("opt", "scripts")} {
+		for mode, refused := range modes {
+			parent := t.TempDir()
+			directory := filepath.Join(parent, below)
+			if err := os.MkdirAll(directory, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(parent, mode); err != nil {
+				t.Fatal(err)
+			}
+			_, err := runOnHost(t, loadAdapter(t, fakeAdapterFiles("v1")), directory)
+			if refused != (err != nil) {
+				t.Fatalf("a folder with mode %v above %s: err=%v", mode, below, err)
+			}
+			if entries, _ := os.ReadDir(directory); refused && len(entries) != 0 {
+				t.Fatalf("nothing may be installed beneath it: %v", entries)
+			}
+		}
+	}
+	if os.Getuid() != 0 {
+		return // only root can give the folder above to someone else
+	}
+	parent := t.TempDir()
+	directory := filepath.Join(parent, "scripts")
+	if err := os.Mkdir(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(parent, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runOnHost(t, loadAdapter(t, fakeAdapterFiles("v1")), directory); err == nil {
+		t.Fatal("a folder above the adapter that someone else owns must fail the command")
 	}
 }
 

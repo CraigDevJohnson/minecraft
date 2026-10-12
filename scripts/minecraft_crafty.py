@@ -45,9 +45,18 @@ ARTIFACT_HOSTS = {"fill-data.papermc.io", "download.geysermc.org", "github.com"}
 STATE_DIR = "state"
 KEEP_ARCHIVES = 14
 STORAGE_FIELDS = ("size_bytes", "available_bytes", "used_percent")
-# Upper bounds on the two small files the allowlist action reads.
+# Upper bounds on what the allowlist action reads.
 PLAYER_FILE_LIMIT = 4096
 ALLOWLIST_LIMIT = 1024 * 1024
+LOG_LIMIT = 1024 * 1024
+# The game's console answers to `whitelist reload` and `whitelist list`, whole lines as Paper's logs/latest.log
+# records them ("[12:00:00] [Server thread/INFO]: Reloaded the whitelist"). Paper puts a logger's name before the
+# text only for loggers outside the game's own, which these answers do not come from; one is accepted anyway, but
+# only a dotted Java name. Chat ("<Name> text") and /say ("[Name] text") put their sender before the text, and no
+# player name holds a dot after a letter, so a player cannot write either line.
+LOG_LINE = r"\[[^\]]*\] \[[^\]]*\]: (?:\[(?:[a-z][a-z0-9_]*\.)+[A-Za-z0-9_$]+\] )?"
+RELOADED = re.compile(LOG_LINE + r"Reloaded the whitelist")
+LISTED = re.compile(LOG_LINE + r"There are (?:no whitelisted players|\d+ whitelisted player\(s\): (.*))")
 
 
 class CraftyError(Exception):
@@ -622,17 +631,18 @@ class Adapter:
             raise CraftyError("only a Java removal may name a player without a UUID")
         result = {"instance": instance, "edition": edition, "operation": operation}
         read_uuids(console, instance)  # the same evidence checks as a change by UUID
+        console.log_end()  # the reload is confirmed in the server's log, so a log it cannot read changes nothing
         entries = console.read_allowlist(instance)
         listed = [entry for entry in entries if isinstance(entry.get("name"), str) and entry["name"].lower() == name.lower()]
         if not listed:
             # A removal whose reload never reached the server leaves the entry in its memory only: reload anyway,
             # so a retry finishes it.
-            console.rcon(instance, "whitelist reload")
+            console.reload_without(name)
             return {**result, "allowlist": "not-listed"}
         if len(listed) != 1:
             raise CraftyError("the allowlist holds that name more than once")
         console.write_allowlist([entry for entry in entries if entry is not listed[0]], entries)
-        console.rcon(instance, "whitelist reload")
+        console.reload_without(name)
         # The server writes its whole list on every change, so one made before the reload would bring the entry back.
         if any(isinstance(entry.get("name"), str) and entry["name"].lower() == name.lower()
                for entry in console.read_allowlist(instance)):
@@ -650,9 +660,82 @@ class _Console:
         self.monotonic = adapter.host.monotonic
         self.sleep = adapter.host.sleep
         self.path = adapter.server_dir(server) / "whitelist.json"
+        self.log = adapter.server_dir(server) / "logs" / "latest.log"
 
     def rcon(self, instance: str, text: str) -> None:
         self.adapter.console(self.server, text)
+
+    def reload_without(self, name: str) -> None:
+        """Have the server load whitelist.json again, and confirm from its console log that it did and that the
+        list it now holds lacks name. Crafty's answer says only that the lines reached the server, and the file
+        cannot show the reload, because the adapter wrote it."""
+        lost = "the server log could not be read to confirm the allowlist reload; inspect private server state before retrying"
+        try:
+            mark = self.log_end()
+        except CraftyError:
+            raise CraftyError(lost) from None  # the file may already have changed
+        self.rcon("", "whitelist reload")
+        self.rcon("", "whitelist list")
+        deadline = self.monotonic() + 60
+        while True:
+            try:
+                names = self._listed_after(mark)
+            except CraftyError:
+                raise CraftyError(lost) from None
+            if names is not None:
+                if name.lower() in names:
+                    raise CraftyError("the server still holds the entry after reloading its allowlist; inspect private server state before retrying")
+                return
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                raise CraftyError("the server did not confirm the allowlist reload; inspect private server state before retrying")
+            self.sleep(min(1, remaining))
+
+    def _open_log(self):
+        """The server's console log, opened for reading with its metadata, or None while it does not exist."""
+        try:
+            descriptor = os.open(self.log, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise CraftyError("cannot read the server log") from None
+        stream = os.fdopen(descriptor, "rb")
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode):
+            stream.close()
+            raise CraftyError("the server log is not a regular file")
+        return stream, metadata
+
+    def log_end(self) -> tuple:
+        """Where the server's console log ends now: its device, inode and size."""
+        opened = self._open_log()
+        if opened is None:
+            raise CraftyError("cannot read the server log")
+        stream, metadata = opened
+        stream.close()
+        return metadata.st_dev, metadata.st_ino, metadata.st_size
+
+    def _listed_after(self, mark: tuple) -> set | None:
+        """The names, lowercased, of the first list the log shows after the first reload logged since mark, or None
+        until both are there. A log that rolled over since mark is read from its start."""
+        opened = self._open_log()
+        if opened is None:
+            return None
+        stream, metadata = opened
+        with stream:
+            same = (metadata.st_dev, metadata.st_ino) == mark[:2] and metadata.st_size >= mark[2]
+            stream.seek(mark[2] if same else 0)
+            data = stream.read(LOG_LIMIT + 1)
+        if len(data) > LOG_LIMIT:
+            raise CraftyError("the server log grew too fast to confirm the allowlist reload")
+        reloaded = False
+        for line in data.decode("utf-8", "replace").split("\n")[:-1]:  # whole lines only
+            line = line.rstrip("\r")
+            if not reloaded:
+                reloaded = RELOADED.fullmatch(line) is not None
+            elif (listed := LISTED.fullmatch(line)) is not None:
+                return set() if listed.group(1) is None else {listed_name.lower() for listed_name in listed.group(1).split(", ")}
+        return None
 
     def read_allowlist(self, instance: str) -> list:
         # The server rewrites the file in place, so a read can catch it half written: read once more.

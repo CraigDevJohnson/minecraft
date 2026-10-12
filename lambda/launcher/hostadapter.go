@@ -58,7 +58,8 @@ func LoadHostAdapter(fsys fs.FS) (*HostAdapter, error) {
 
 // Script answers shell lines, for a script already running under `set -eu`, that leave the host's adapter
 // exactly as this launcher carries it. Root runs the adapter, so its folder must be root's and writable by
-// nobody else, or the command fails. A host whose files already match, as root's own regular files that
+// nobody else, and no folder above it may let anyone else rename it, or the command fails. A host whose files
+// already match, as root's own regular files that
 // nobody else may write, changes nothing. Otherwise the files are unpacked beside the installed ones, checked
 // against their SHA-256, renamed into place one at a time and checked once more where they landed.
 // Each rename is atomic, so an adapter command never reads a partly written file. The lines print nothing to
@@ -67,7 +68,8 @@ func (a *HostAdapter) Script() string {
 	return a.script(adapterDirectory, "0")
 }
 
-// script installs into directory, whose files and the folder itself must belong to the user ID owner.
+// script installs into directory, whose files and the folder itself must belong to the user ID owner, and
+// every folder above it to owner or root.
 func (a *HostAdapter) script(directory, owner string) string {
 	if a == nil {
 		return ""
@@ -83,7 +85,10 @@ func (a *HostAdapter) script(directory, owner string) string {
 		// guarded KIND PATH...: each path is a KIND (stat's %F, never a link) owned by owner, that neither its
 		// group nor others may write.
 		`guarded() { kind="$1"; shift; for path; do [ "$(stat -c '%F:%u' -- "$path")" = "$kind:` + owner + `" ] || return 1; case "$(stat -c %A -- "$path")" in ?????w????|????????w?) return 1 ;; esac; done; }`,
-		`guarded directory "$adapter" || { echo 'the Crafty adapter folder may be changed by someone other than root' >&2; exit 1; }`,
+		// above DIR: DIR and each folder above it belong to owner or root, and neither its group nor others may
+		// write it, unless its sticky bit keeps them from renaming what they do not own.
+		`above() { dir="$1"; while :; do case "$(stat -c '%u' -- "$dir")" in 0|` + owner + `) ;; *) return 1 ;; esac; case "$(stat -c %A -- "$dir")" in d????????[tT]) ;; d????w????|d???????w?) return 1 ;; d*) ;; *) return 1 ;; esac; [ "$dir" = / ] && return 0; dir="$(dirname -- "$dir")"; done; }`,
+		`guarded directory "$adapter" && above "$(dirname -- "$adapter")" || { echo 'the Crafty adapter folder may be changed by someone other than root' >&2; exit 1; }`,
 		`if ! (cd "$adapter" && guarded 'regular file' ` + names + ` && ` + sums + ` | sha256sum --check --status --strict) 2>/dev/null; then`,
 		"(",
 		`staging="$(mktemp -d "$adapter/../.adapter.XXXXXX")"`,

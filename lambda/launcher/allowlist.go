@@ -25,9 +25,9 @@ const (
 	// caller waits for the answer.
 	allowlistTimeout = 6 * time.Minute
 	// allowlistExecutionSeconds is the adapter's execution limit on the host. It covers every bounded step, so
-	// a slow but working Crafty never cuts off a change already sent: the adapter install, four Crafty API
-	// calls of up to 30 seconds each (the server list, its stats, the console line and a name-only removal's
-	// reload), the 60-second verification, and margin.
+	// a slow but working Crafty never cuts off a change already sent: the adapter install, up to four Crafty
+	// API calls of up to 30 seconds each (the server list, its stats, then the console line, or a name-only
+	// removal's reload and list), the 60-second verification, and margin.
 	allowlistExecutionSeconds = 240
 )
 
