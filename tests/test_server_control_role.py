@@ -92,6 +92,18 @@ class ServerControlRoleTests(unittest.TestCase):
         # OpenTofu's errors reach the log unfiltered, so the private inputs' values are masked before it runs.
         self.assertLess(deploy.index("scripts/mask_private_inputs.py"), deploy.index("bash scripts/deploy_tofu.sh"))
 
+    def test_no_other_workflow_reaches_the_deploy_or_server_environment(self):
+        # The roles trust a job by its environment, and the Craig-only checks live in these two workflows, so a
+        # job anywhere else that named either environment would get a role without those checks. No other
+        # workflow names an environment at all; giving one an environment is a deliberate change to this test.
+        workflows = sorted([*(ROOT / ".github/workflows").glob("*.yml"), *(ROOT / ".github/workflows").glob("*.yaml")])
+        self.assertIn(ROOT / ".github/workflows/deploy.yml", workflows)
+        for workflow in workflows:
+            with self.subTest(workflow=workflow.name):
+                environments = re.findall(r"(?m)^\s*environment\s*:.*$", workflow.read_text())
+                expected = {"deploy.yml": ["    environment: deploy"], "server-control.yml": ["    environment: server"]}
+                self.assertEqual(environments, expected.get(workflow.name, []))
+
 
 if __name__ == "__main__":
     unittest.main()

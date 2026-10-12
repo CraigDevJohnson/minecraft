@@ -300,6 +300,7 @@ func TestStartIsUnchangedWhileOurStopRuns(t *testing.T) {
 // check, and after it.
 func stopRig(t *testing.T) *rig {
 	r := newRig(ec2types.InstanceStateNameRunning, time.Hour)
+	r.gameUp = true // nobody playing
 	r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameRunning, ec2types.InstanceStateNameRunning, ec2types.InstanceStateNameStopping, ec2types.InstanceStateNameStopped}
 	r.ssm.online = []bool{false, true}
 	r.ssm.invocation = []ssm.GetCommandInvocationOutput{{Status: ssmtypes.CommandInvocationStatusInProgress}, success(drainOutput), success(statusOutput)}
@@ -322,6 +323,20 @@ func TestFinishStopStandsDownWhenSomebodyJoinedAfterTheRequest(t *testing.T) {
 	r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameRunning}
 	if status, err := r.launcher.Status(context.Background()); err != nil || status.State != Ready {
 		t.Fatalf("the game they joined is ready: state=%s err=%v", status.State, err)
+	}
+}
+
+func TestFinishStopStandsDownWhenTheGameStoppedAnswering(t *testing.T) {
+	r := stopRig(t)
+	r.gameUp = false
+	if err := r.launcher.FinishStop(context.Background()); err != nil {
+		t.Fatalf("an unknown player count is a refusal, not a failure to alarm on: %v", err)
+	}
+	if len(r.ssm.commands) != 0 || r.ec2.stops != 0 || len(r.pointedAt) != 0 || len(r.pinged) == 0 {
+		t.Fatalf("nothing may drain without a player count: commands=%v stops=%d pointed=%v pinged=%v", r.ssm.commands, r.ec2.stops, r.pointedAt, r.pinged)
+	}
+	if session := r.session(t); session.Phase != StopFailed || session.Detail != ErrPlayersUnknown.Error() {
+		t.Fatalf("session %+v", session)
 	}
 }
 

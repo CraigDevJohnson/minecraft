@@ -191,9 +191,10 @@ func (l *Launcher) FinishStop(ctx context.Context) error {
 	switch {
 	case err == nil, errors.Is(err, errFinished):
 		return nil
-	case errors.As(err, &online):
-		// Somebody joined after the request found nobody playing: the stop stands down and the game keeps
-		// running. That is a refusal like the request's own, not a failure to alarm on.
+	case errors.As(err, &online), errors.Is(err, ErrPlayersUnknown):
+		// Somebody joined after the request found nobody playing, or the game stopped answering: the stop
+		// stands down and the host keeps running. That is a refusal like the request's own, not a failure to
+		// alarm on.
 		return l.record(ctx, session, err, StopFailed)
 	case ctx.Err() != nil && l.Now().Before(deadline):
 		// This run's own time ended first: another run takes it from here.
@@ -284,7 +285,8 @@ func (l *Launcher) stopSteps(ctx context.Context, session *Session) error {
 }
 
 // nobodyJoined asks the game once more, just before the drain, whether anybody is playing: this run may begin a
-// moment after the request found nobody online. A game that does not answer has nobody to protect.
+// moment after the request found nobody online. Like the request, it drains only a game that answers with nobody
+// on it; one that stopped answering in between is left for an operator's forced stop.
 func (l *Launcher) nobodyJoined(ctx context.Context) error {
 	h, err := l.describeHost(ctx)
 	if err != nil {
@@ -293,7 +295,11 @@ func (l *Launcher) nobodyJoined(ctx context.Context) error {
 	if h.state != ec2types.InstanceStateNameRunning {
 		return nil
 	}
-	if players, up := l.gameAnswers(ctx, h.publicIP); up && players > 0 {
+	players, up := l.gameAnswers(ctx, h.publicIP)
+	switch {
+	case !up:
+		return ErrPlayersUnknown
+	case players > 0:
 		return ErrPlayersOnline{Players: players}
 	}
 	return nil

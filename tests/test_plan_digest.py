@@ -16,8 +16,11 @@ def plan(*changes, outputs=None):
             "output_changes": outputs or {}}
 
 
-UPDATE = ("aws_iam_role.launcher", {"actions": ["update"], "before": {"name": "launcher", "tags": {}},
+ROLE = {"id": "launcher", "arn": "arn:aws:iam::123456789012:role/launcher", "name": "launcher", "tags": {}}
+UPDATE = ("aws_iam_role.launcher", {"actions": ["update"], "before": ROLE,
                                     "after": {"name": "launcher", "tags": {"owner": "minecraft"}}, "after_unknown": {}})
+DELETE = ("aws_lambda_permission.site", {"actions": ["delete"], "before": {"id": "AllowSite", "action": "lambda:InvokeFunctionUrl"},
+                                        "after": None, "after_unknown": {}})
 HOST = ("aws_instance.host", {"actions": ["no-op"], "before": {"instance_state": "running"}, "after": {"instance_state": "running"}})
 
 
@@ -35,12 +38,22 @@ class PlanDigestTests(unittest.TestCase):
         for changed in [plan(other), plan(replaced), plan(UPDATE, added), plan(UPDATE, outputs=output), plan()]:
             self.assertNotEqual(base, digest(changed))
 
+    def test_the_digest_covers_the_object_each_change_acts_on(self):
+        # A delete has no planned values, so only the object it acts on tells two deletes apart; an update
+        # whose object was replaced since the plan run would land on a different one.
+        base = digest(plan(UPDATE, DELETE))
+        other_permission = ("aws_lambda_permission.site", {**DELETE[1], "before": {**DELETE[1]["before"], "id": "AllowOther"}})
+        other_role = ("aws_iam_role.launcher", {**UPDATE[1], "before": {**ROLE, "arn": "arn:aws:iam::123456789012:role/other"}})
+        self.assertNotEqual(base, digest(plan(UPDATE, other_permission)))
+        self.assertNotEqual(base, digest(plan(other_role, DELETE)))
+
     def test_the_present_does_not_change_it(self):
         # Starting or stopping the server between the plan run and the apply run changes only what the plan
         # starts from: unchanged resources and the values before each change.
         base = digest(plan(UPDATE, HOST))
         stopped = ("aws_instance.host", {"actions": ["no-op"], "before": {"instance_state": "stopped"}, "after": {"instance_state": "stopped"}})
-        drifted = ("aws_iam_role.launcher", {**UPDATE[1], "before": {"name": "launcher", "tags": {"edited": "by hand"}}})
+        drifted = ("aws_iam_role.launcher", {**UPDATE[1], "before": {**ROLE, "tags": {"edited": "by hand"},
+                                                                      "role_last_used": [{"last_used_date": "2026-10-12T10:00:00Z"}]}})
         self.assertEqual(base, digest(plan(UPDATE, stopped)))
         self.assertEqual(base, digest(plan(drifted)))
         self.assertEqual(base, digest(plan(HOST, UPDATE)))
