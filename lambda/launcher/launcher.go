@@ -51,7 +51,7 @@ const (
 	stoppedGrace = 2 * time.Minute
 )
 
-// pollEvery is how often the follow-up run checks EC2, SSM and the remote start. Tests shorten it.
+// pollEvery is how often a follow-up run checks EC2, SSM and the remote command. Tests shorten it.
 var pollEvery = 3 * time.Second
 
 var commandIdentity = regexp.MustCompile(`^[0-9a-f-]{36}$`)
@@ -60,6 +60,7 @@ var commandIdentity = regexp.MustCompile(`^[0-9a-f-]{36}$`)
 type EC2API interface {
 	DescribeInstances(context.Context, *ec2.DescribeInstancesInput, ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
 	StartInstances(context.Context, *ec2.StartInstancesInput, ...func(*ec2.Options)) (*ec2.StartInstancesOutput, error)
+	StopInstances(context.Context, *ec2.StopInstancesInput, ...func(*ec2.Options)) (*ec2.StopInstancesOutput, error)
 }
 
 // SSMAPI is the subset of Systems Manager the function calls.
@@ -82,17 +83,26 @@ type Config struct {
 	IdleStopStateParameter string
 }
 
-// Session is this function's record of the last start it began, kept in an SSM parameter. LaunchTime ties it
-// to one EC2 run once the host is running, so a later run never inherits an old start's outcome.
+// Session is this function's record of the last start or stop it began, kept in an SSM parameter. LaunchTime
+// ties it to one EC2 run once the host is running, so a later run never inherits an old request's outcome.
 type Session struct {
 	RequestedAt time.Time `json:"requested_at,omitzero"`
 	LaunchTime  time.Time `json:"launch_time,omitzero"`
-	Phase       string    `json:"phase,omitempty"` // starting, ready or failed
-	DNS         string    `json:"dns,omitempty"`   // current or failed
-	Detail      string    `json:"detail,omitempty"`
+	// Phase is starting, ready or failed for a start; stopping, stopped or stop-failed for a stop.
+	Phase string `json:"phase,omitempty"`
+	// DNS is current or failed once a start or stop has pointed or parked the hostname, and pending while a
+	// stop owes its parking.
+	DNS    string `json:"dns,omitempty"`
+	Detail string `json:"detail,omitempty"`
+	// Force marks a stop asked with the force flag. One without it asks the game again, just before the
+	// drain, whether anybody is playing.
+	Force bool `json:"force,omitempty"`
+	// A stop's drain command on the host, once sent, so a fresh run can follow it where the last one ended.
+	DrainCommandID string    `json:"drain_command_id,omitempty"`
+	DrainSentAt    time.Time `json:"drain_sent_at,omitzero"`
 }
 
-// Status is the answer to GET /server and POST /server/start.
+// Status is the answer to GET /server, POST /server/start and POST /server/stop.
 type Status struct {
 	Name       string     `json:"name"`
 	State      string     `json:"state"`
@@ -110,7 +120,8 @@ type Endpoint struct {
 	Port    int    `json:"port,omitempty"`
 }
 
-// Launcher answers the site and starts the host the way the workstation start does.
+// Launcher answers the site and the operator's workflow, and starts, stops and allowlists the server the way
+// the workstation commands do.
 type Launcher struct {
 	Config Config
 	EC2    EC2API
@@ -121,7 +132,11 @@ type Launcher struct {
 	PointDNS func(ctx context.Context, address string) error
 	// FollowUp runs FinishStart outside the request, so the page gets its answer at once.
 	FollowUp func(ctx context.Context) error
-	Now      func() time.Time
+	// FollowUpStop runs FinishStop outside the request, and again when a run ends before the stop does.
+	FollowUpStop func(ctx context.Context) error
+	// LookupPlayer resolves a Java name or Bedrock gamertag to the account the server knows.
+	LookupPlayer func(ctx context.Context, edition, name string) (Player, error)
+	Now          func() time.Time
 }
 
 type host struct {
@@ -235,73 +250,84 @@ func (l *Launcher) followUp(ctx context.Context) error {
 
 // decide applies the state rules. Only a game answering a status ping is ready.
 func (l *Launcher) decide(ctx context.Context, h host, session Session) (string, error) {
+	state, _, err := l.classify(ctx, h, session)
+	return state, err
+}
+
+// classify applies the state rules and, when the game answers, reports how many players it has online.
+func (l *Launcher) classify(ctx context.Context, h host, session Session) (string, int, error) {
 	switch h.state {
 	case ec2types.InstanceStateNamePending:
 		// A start of ours that failed or ran out of time stays failed even while EC2 is stuck pending.
 		if session, ok := l.sessionFor(h, session); ok && (session.Phase == Failed ||
 			session.Phase == Starting && l.Now().UTC().Sub(session.RequestedAt) >= startDeadline) {
-			return Failed, nil
+			return Failed, 0, nil
 		}
-		return Starting, nil
+		return Starting, 0, nil
 	case ec2types.InstanceStateNameStopping, ec2types.InstanceStateNameShuttingDown:
-		return Stopping, nil
+		return Stopping, 0, nil
 	case ec2types.InstanceStateNameStopped:
-		return Stopped, nil
+		return Stopped, 0, nil
 	case ec2types.InstanceStateNameRunning:
 	default:
-		return Unknown, nil
+		return Unknown, 0, nil
 	}
-	// The idle stop's drain comes first: the game still answers while it saves and backs up the server.
+	// A drain comes first: the game still answers while it saves and backs up the server.
 	draining, err := l.idleStopDraining(ctx, h)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if draining {
-		return Stopping, nil
-	}
-	if l.gameAnswers(ctx, h.publicIP) {
-		return Ready, nil
+		return Stopping, 0, nil
 	}
 	now := l.Now().UTC()
+	if session, ok := l.sessionFor(h, session); ok && session.Phase == Stopping && now.Sub(session.RequestedAt) < stopDeadline {
+		return Stopping, 0, nil
+	}
+	if players, up := l.gameAnswers(ctx, h.publicIP); up {
+		return Ready, players, nil
+	}
 	if session, ok := l.sessionFor(h, session); ok {
 		switch session.Phase {
 		case Failed:
-			return Failed, nil
+			return Failed, 0, nil
 		case Starting:
 			if now.Sub(session.RequestedAt) < startDeadline {
-				return Starting, nil
+				return Starting, 0, nil
 			}
-			return Failed, nil
+			return Failed, 0, nil
 		}
 		// A start that reached ready and whose game no longer answers was stopped on purpose or by a stop
-		// in progress; either way it is not a Member's to start again.
-		return Maintenance, nil
+		// in progress, and a stop of ours that failed or ran out of time left the host running without its
+		// game; either way it is not a Member's to start again.
+		return Maintenance, 0, nil
 	}
 	if now.Sub(h.launchTime) < bootGrace {
-		return Starting, nil
+		return Starting, 0, nil
 	}
-	return Maintenance, nil
+	return Maintenance, 0, nil
 }
 
-func (l *Launcher) gameAnswers(ctx context.Context, address string) bool {
+// gameAnswers reports whether the game answers a status ping, and how many players it has online when it does.
+func (l *Launcher) gameAnswers(ctx context.Context, address string) (int, bool) {
 	if net.ParseIP(address) == nil {
-		return false
+		return 0, false
 	}
 	target := net.JoinHostPort(address, strconv.Itoa(javaPort))
 	// One retry, so a single dropped packet does not turn a running game into maintenance.
 	// Each attempt is short: the site gives the whole status request only a few seconds.
 	for attempt := 0; attempt < 2; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(ctx, pingAttempt)
-		_, err := l.Ping(attemptCtx, target)
+		players, err := l.Ping(attemptCtx, target)
 		cancel()
 		if err == nil {
-			return true
+			return players, true
 		}
 	}
-	return false
+	return 0, false
 }
 
-// sessionFor returns this function's start record when it belongs to the host's current run.
+// sessionFor returns this function's start or stop record when it belongs to the host's current run.
 func (l *Launcher) sessionFor(h host, session Session) (Session, bool) {
 	if session.Phase == "" || session.RequestedAt.IsZero() {
 		return Session{}, false
@@ -317,6 +343,11 @@ func (l *Launcher) sessionFor(h host, session Session) (Session, bool) {
 func (l *Launcher) current(h host, session Session) Session {
 	if current, ok := l.sessionFor(h, session); ok && h.state == ec2types.InstanceStateNameRunning {
 		return current
+	}
+	if h.state == ec2types.InstanceStateNameStopped && unparked(session) {
+		// The host is off but the hostname may still point at its old address: the status shows none until a
+		// repeated stop parks it.
+		return Session{DNS: "failed"}
 	}
 	return Session{}
 }
@@ -421,42 +452,55 @@ func (l *Launcher) FinishStart(ctx context.Context) error {
 	return nil
 }
 
-// saveOwned saves a follow-up's progress only while its start still owns the record, so a sibling follow-up
-// of an older start never overwrites a retry a Member began since.
+// saveOwned saves a follow-up's progress only while its request still owns the record, so a sibling
+// follow-up of an older request never overwrites a retry a Member began since.
 func (l *Launcher) saveOwned(ctx context.Context, session Session) error {
 	saved, err := l.loadSession(ctx)
 	if err != nil {
 		return err
 	}
 	if !saved.RequestedAt.Equal(session.RequestedAt) {
-		return errors.New("a later start owns the record")
+		return errors.New("a later request owns the record")
 	}
-	if saved.Phase == Ready {
+	if finished(saved) {
 		return errFinished
 	}
 	return l.saveSession(ctx, session)
 }
 
-// errFinished means a repeated follow-up found its start already finished by another.
-var errFinished = errors.New("the start already finished")
+// errFinished means a repeated follow-up found its request already finished by another.
+var errFinished = errors.New("the request already finished")
 
+func finished(session Session) bool {
+	return session.Phase == Ready || session.Phase == Stopped
+}
+
+// fail records a start as failed. A deadline that ended the start must not also lose its record.
 func (l *Launcher) fail(ctx context.Context, session Session, cause error) error {
-	// The deadline that ended the start must not also lose its record.
+	return l.failWith(ctx, session, cause, Failed)
+}
+
+func (l *Launcher) failWith(ctx context.Context, session Session, cause error, phase string) error {
+	return errors.Join(cause, l.record(ctx, session, cause, phase))
+}
+
+// record ends a request's record in phase with cause as its reason, and answers only whether that was saved.
+func (l *Launcher) record(ctx context.Context, session Session, cause error, phase string) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	saved, err := l.loadSession(ctx)
 	if err != nil {
-		return errors.Join(cause, err)
+		return err
 	}
-	if saved.Phase == Ready || !session.RequestedAt.IsZero() && !saved.RequestedAt.Equal(session.RequestedAt) {
-		return cause // a repeated follow-up already finished this start, or a later start owns the record now
+	if finished(saved) || !session.RequestedAt.IsZero() && !saved.RequestedAt.Equal(session.RequestedAt) {
+		return nil // a repeated follow-up already finished this request, or a later request owns the record now
 	}
 	if session.RequestedAt.IsZero() {
 		session = saved
 	}
-	session.Phase = Failed
+	session.Phase = phase
 	session.Detail = cause.Error()
-	return errors.Join(cause, l.saveSession(ctx, session))
+	return l.saveSession(ctx, session)
 }
 
 // waitRunning waits for the host to run with a public address. A host still stopped stoppedGrace after the
@@ -516,23 +560,10 @@ func (l *Launcher) startGame(ctx context.Context) error {
 			return errors.New("too little time is left to start the game")
 		}
 	}
-	output, err := l.SSM.SendCommand(ctx, &ssm.SendCommandInput{
-		InstanceIds:    []string{l.Config.HostID},
-		DocumentName:   aws.String("AWS-RunShellScript"),
-		Comment:        aws.String("minecraft launcher start"),
-		TimeoutSeconds: aws.Int32(commandDelivery),
-		Parameters: map[string][]string{
-			"commands":         {remoteCommand + " start " + l.Config.Instance},
-			"executionTimeout": {strconv.Itoa(timeout)},
-		},
-	})
+	id, err := l.sendCommand(ctx, remoteCommand+" start "+l.Config.Instance, "minecraft launcher start", timeout)
 	if err != nil {
 		return fmt.Errorf("send game start: %w", err)
 	}
-	if output.Command == nil || !commandIdentity.MatchString(aws.ToString(output.Command.CommandId)) {
-		return errors.New("send game start: SSM did not return a command identity")
-	}
-	id := aws.ToString(output.Command.CommandId)
 	for {
 		invocation, err := l.SSM.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{CommandId: aws.String(id), InstanceId: aws.String(l.Config.HostID)})
 		var missing *ssmtypes.InvocationDoesNotExist
@@ -550,6 +581,28 @@ func (l *Launcher) startGame(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// sendCommand runs one shell command on the host through SSM and returns its command identity. The command
+// may wait commandDelivery seconds for delivery and timeout seconds to run.
+func (l *Launcher) sendCommand(ctx context.Context, command, comment string, timeout int) (string, error) {
+	output, err := l.SSM.SendCommand(ctx, &ssm.SendCommandInput{
+		InstanceIds:    []string{l.Config.HostID},
+		DocumentName:   aws.String("AWS-RunShellScript"),
+		Comment:        aws.String(comment),
+		TimeoutSeconds: aws.Int32(commandDelivery),
+		Parameters: map[string][]string{
+			"commands":         {command},
+			"executionTimeout": {strconv.Itoa(timeout)},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if output.Command == nil || !commandIdentity.MatchString(aws.ToString(output.Command.CommandId)) {
+		return "", errors.New("SSM did not return a command identity")
+	}
+	return aws.ToString(output.Command.CommandId), nil
 }
 
 // checkStarted applies the workstation start's rule: the adapter reports the instance running and ready.

@@ -41,9 +41,13 @@ func loadConfig(getenv func(string) string) (Config, error) {
 		PublicHostname:           getenv("PUBLIC_HOSTNAME"),
 		CloudflareZoneID:         getenv("CLOUDFLARE_ZONE_ID"),
 		CloudflareTokenSecretARN: getenv("CLOUDFLARE_TOKEN_SECRET_ARN"),
+		LauncherStateParameter:   getenv("LAUNCHER_STATE_PARAMETER"),
 	}
 	if cfg.HostID == "" || cfg.StateParameter == "" {
 		return Config{}, errors.New("HOST_ID and STATE_PARAMETER are required")
+	}
+	if cfg.LauncherStateParameter != "" && !parameterName.MatchString(cfg.LauncherStateParameter) {
+		return Config{}, errors.New("LAUNCHER_STATE_PARAMETER must be a parameter name")
 	}
 	if len(cfg.PublicHostname) > 253 || !hostname.MatchString(cfg.PublicHostname) || !cloudflareID.MatchString(cfg.CloudflareZoneID) || !secretARN.MatchString(cfg.CloudflareTokenSecretARN) {
 		return Config{}, errors.New("valid hostname, zone and token secret ARN are required")

@@ -1,0 +1,111 @@
+# Deploys the infra root from GitHub Actions as the operator role. It runs
+# only when Craig starts it by hand (Run workflow): mode plan posts the plan and
+# its digest to the run summary, and mode apply, which he starts after reading
+# that plan and gives its digest, is his approval of that change. An apply run
+# plans again and applies only a plan with that digest, so it applies exactly
+# the plan he read or nothing. No push starts it, because every run holds the
+# operator's write credentials, and the job runs only when Craig's own account
+# started the run (and any re-run of it), so another collaborator or an app
+# with write access cannot start it either. The one job runs in the deploy GitHub
+# Environment, which holds the private inputs and which only main may use.
+# GitHub offers no required reviewer on a private repository below the
+# Enterprise plan, so the gate is starting the run, not an environment
+# approval. See docs/operations/cloud-controls.md and ADR 0006.
+#
+# The operator role trusts this job through GitHub OIDC with the subject
+# repo:CraigDevJohnson@42454849/minecraft@1359070973:environment:deploy.
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: plan only shows what would change; apply changes AWS
+        type: choice
+        options: [plan, apply]
+        default: plan
+      plan:
+        description: For apply, the plan digest from the summary of the plan run you read
+        type: string
+        default: ''
+
+permissions: {}
+
+# One deploy at a time; a second run waits instead of cancelling one mid-apply.
+concurrency:
+  group: minecraft-deploy
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deploy:
+    name: ${{ inputs.mode || 'plan' }} as the operator
+    if: >-
+      github.repository == 'CraigDevJohnson/minecraft' &&
+      github.repository_id == '1359070973' &&
+      github.repository_owner_id == '42454849' &&
+      github.actor_id == '42454849' &&
+      github.triggering_actor == 'CraigDevJohnson' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: deploy
+    permissions:
+      contents: read
+      id-token: write # assume the operator role through GitHub OIDC
+    steps:
+      - name: Check out the approved main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Go for the functions
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: lambda/idlestop/go.mod
+          cache: false
+      - name: Install pinned project tools
+        run: python3 scripts/bootstrap_tools.py
+      - name: Build the function packages
+        run: |
+          mkdir -p "$RUNNER_TEMP/deploy/packages"
+          python3 scripts/package_idle_stop.py --output "$RUNNER_TEMP/deploy/packages/idle-stop.zip"
+          python3 scripts/package_idle_stop.py --function launcher --output "$RUNNER_TEMP/deploy/packages/launcher.zip"
+      - name: Write the private inputs
+        env:
+          DEPLOYMENT_TFVARS: ${{ secrets.DEPLOYMENT_TFVARS }}
+          BACKEND_CONFIG: ${{ secrets.BACKEND_CONFIG }}
+        run: |
+          umask 077
+          if [[ -z "$DEPLOYMENT_TFVARS" || -z "$BACKEND_CONFIG" ]]; then
+            printf '::error::The deploy environment needs the DEPLOYMENT_TFVARS and BACKEND_CONFIG secrets.\n' >&2
+            exit 1
+          fi
+          printf '%s\n' "$DEPLOYMENT_TFVARS" > "$RUNNER_TEMP/deploy/deployment.tfvars"
+          printf '%s\n' "$BACKEND_CONFIG" > "$RUNNER_TEMP/deploy/backend.hcl"
+          printf '::add-mask::%s\n' '793680745829'
+          # OpenTofu's errors reach the log unfiltered and may quote an input.
+          python3 scripts/mask_private_inputs.py "$RUNNER_TEMP/deploy/deployment.tfvars" "$RUNNER_TEMP/deploy/backend.hcl"
+      - name: Obtain the operator role's credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_OPERATOR_ROLE_ARN }}
+          aws-region: us-west-2
+          audience: sts.amazonaws.com
+          allowed-account-ids: '793680745829'
+          role-duration-seconds: 1800
+          role-session-name: minecraft-deploy-${{ github.run_id }}
+          unset-current-credentials: true
+          output-credentials: false
+          mask-aws-account-id: true
+          retry-max-attempts: 2
+          action-timeout-s: 60
+      - name: Plan, and in apply mode apply the approved plan
+        env:
+          DEPLOY_DIR: ${{ runner.temp }}/deploy
+          MODE: ${{ inputs.mode || 'plan' }}
+          APPROVED_PLAN: ${{ inputs.plan }}
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: bash scripts/deploy_tofu.sh "$MODE"

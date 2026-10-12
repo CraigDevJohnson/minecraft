@@ -1,9 +1,10 @@
 // Command launcher is the Minecraft Launcher's backend: it answers The Lobby's site with the family server's
-// status and starts the server when a Member asks.
+// status, and starts or stops the server when a Member or the operator's workflow asks.
 //
-// On Lambda it serves the site through its Function URL, which only the site's role may call (the-lobby
-// ADR 0006), and finishes each start in a second, asynchronous run of itself. Anywhere else it listens on a
-// local port with the caller's own AWS credentials and finishes starts in the background.
+// On Lambda it serves the site through its Function URL, which only the site's role and the operator's
+// control role may call (the-lobby ADR 0006, ADR 0006 here), and finishes each start or stop in a second,
+// asynchronous run of itself. Anywhere else it listens on a local port with the caller's own AWS credentials
+// and finishes them in the background.
 package main
 
 import (
@@ -26,11 +27,15 @@ import (
 	awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/awslabs/aws-lambda-go-api-proxy/core"
 	"github.com/awslabs/aws-lambda-go-api-proxy/httpadapter"
 )
 
-// finishStartTask is the payload of the asynchronous run that finishes a start.
-const finishStartTask = "finish-start"
+// The payloads of the asynchronous runs that finish a start and a stop.
+const (
+	finishStartTask = "finish-start"
+	finishStopTask  = "finish-stop"
+)
 
 // followUpMargin leaves the follow-up run time to record a failure before Lambda ends it.
 const followUpMargin = 20 * time.Second
@@ -85,30 +90,40 @@ func main() {
 		PointDNS: dns.Point,
 		Now:      time.Now,
 	}
+	launcher.LookupPlayer = (&PlayerLookup{Client: lookupClient()}).Lookup
 	server := &Server{Launcher: launcher, Log: log}
 
 	if name := os.Getenv("AWS_LAMBDA_FUNCTION_NAME"); os.Getenv("AWS_LAMBDA_RUNTIME_API") != "" && name != "" {
 		invoker := awslambda.NewFromConfig(awsConfig)
-		payload, _ := json.Marshal(map[string]string{"launcher_task": finishStartTask})
-		launcher.FollowUp = func(ctx context.Context) error {
-			_, err := invoker.Invoke(ctx, &awslambda.InvokeInput{
-				FunctionName:   aws.String(name),
-				InvocationType: lambdatypes.InvocationTypeEvent,
-				Payload:        payload,
-			})
-			return err
+		invokeSelf := func(task string) func(ctx context.Context) error {
+			payload, _ := json.Marshal(map[string]string{"launcher_task": task})
+			return func(ctx context.Context) error {
+				_, err := invoker.Invoke(ctx, &awslambda.InvokeInput{
+					FunctionName:   aws.String(name),
+					InvocationType: lambdatypes.InvocationTypeEvent,
+					Payload:        payload,
+				})
+				return err
+			}
 		}
+		launcher.FollowUp = invokeSelf(finishStartTask)
+		launcher.FollowUpStop = invokeSelf(finishStopTask)
 		server.StartFailed = func() { writeMetric(os.Stdout, name, startFailureMetric, time.Now()) }
+		server.StopFailed = func() { writeMetric(os.Stdout, name, stopFailureMetric, time.Now()) }
+		server.Operator = signedOperator(RoleNames(os.Getenv("SITE_ROLE_ARNS")))
 		proxy := httpadapter.NewV2(server.Handler())
 		lambda.Start(func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var task struct {
 				Task string `json:"launcher_task"`
 			}
 			if json.Unmarshal(raw, &task) == nil && task.Task != "" {
-				if task.Task != finishStartTask {
-					return nil, errors.New("unknown launcher task")
+				switch task.Task {
+				case finishStartTask:
+					return nil, finish(ctx, "finish start", launcher.FinishStart, log)
+				case finishStopTask:
+					return nil, finish(ctx, "finish stop", launcher.FinishStop, log)
 				}
-				return nil, finishStart(ctx, launcher, log)
+				return nil, errors.New("unknown launcher task")
 			}
 			var request events.APIGatewayV2HTTPRequest
 			if err := json.Unmarshal(raw, &request); err != nil {
@@ -119,14 +134,18 @@ func main() {
 		return
 	}
 
-	launcher.FollowUp = func(context.Context) error {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-			defer cancel()
-			_ = finishStart(ctx, launcher, log)
-		}()
-		return nil
+	inBackground := func(name string, run func(context.Context) error) func(context.Context) error {
+		return func(context.Context) error {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+				defer cancel()
+				_ = finish(ctx, name, run, log)
+			}()
+			return nil
+		}
 	}
+	launcher.FollowUp = inBackground("finish start", launcher.FinishStart)
+	launcher.FollowUpStop = inBackground("finish stop", launcher.FinishStop)
 	addr := os.Getenv("LAUNCHER_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:8082"
@@ -139,25 +158,39 @@ func main() {
 	}
 }
 
-func finishStart(ctx context.Context, launcher *Launcher, log *slog.Logger) error {
+// finish runs a follow-up with time left to record a failure before Lambda ends the run.
+// signedOperator reads the IAM caller the Function URL verified from the request's event and admits it as an
+// operator unless it is one of the sites' roles. A request without that caller (the local server) admits nobody.
+func signedOperator(siteRoles map[string]bool) func(*http.Request) bool {
+	return func(r *http.Request) bool {
+		request, ok := core.GetAPIGatewayV2ContextFromContext(r.Context())
+		if !ok || request.Authorizer == nil || request.Authorizer.IAM == nil {
+			return false
+		}
+		return OperatorCaller(request.Authorizer.IAM.UserARN, siteRoles)
+	}
+}
+
+func finish(ctx context.Context, name string, run func(context.Context) error, log *slog.Logger) error {
 	if deadline, ok := ctx.Deadline(); ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, deadline.Add(-followUpMargin))
 		defer cancel()
 	}
-	err := launcher.FinishStart(ctx)
+	err := run(ctx)
 	if err != nil {
-		log.Error("finish start", "err", err)
+		log.Error(name, "err", err)
 	} else {
-		log.Info("finish start", "state", Ready)
+		log.Info(name, "outcome", "done")
 	}
 	return err
 }
 
-// The custom metric the launcher's alarm watches with Lambda's own errors (infra/launcher.tf).
+// The custom metrics the launcher's alarm watches with Lambda's own errors (infra/launcher.tf).
 const (
 	metricNamespace    = "Minecraft/Launcher"
 	startFailureMetric = "StartFailures"
+	stopFailureMetric  = "StopFailures"
 )
 
 // writeMetric records one count of a metric in CloudWatch's embedded metric format. Lambda ships the line

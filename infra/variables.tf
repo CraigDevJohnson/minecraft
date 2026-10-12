@@ -8,11 +8,22 @@ variable "account_id" {
 }
 
 variable "operator_role_arn" {
-  description = "Existing operator role to assume; provisioning credentials never belong to the host."
+  description = "Existing operator role to assume from the workstation; provisioning credentials never belong to the host. Leave it unset where the caller already is the operator role, as the Deploy workflow is through GitHub OIDC."
   type        = string
+  default     = null
   validation {
-    condition     = can(regex("^arn:aws:iam::[0-9]{12}:role/.+$", var.operator_role_arn)) && try(split(":", var.operator_role_arn)[4], "") == var.account_id
+    condition     = var.operator_role_arn == null || (can(regex("^arn:aws:iam::[0-9]{12}:role/.+$", var.operator_role_arn)) && try(split(":", var.operator_role_arn)[4], "") == var.account_id)
     error_message = "operator_role_arn must name a role in the target account."
+  }
+}
+
+variable "package_dir" {
+  description = "Directory holding the function packages as the Deploy workflow builds them, launcher.zip and idle-stop.zip; set, it overrides every package_path. Unset on the workstation, where each package_path names its zip."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.package_dir == null || can(regex("^[^\\s]+$", var.package_dir)) && !endswith(var.package_dir, "/")
+    error_message = "package_dir must be a directory path without a trailing slash."
   }
 }
 
@@ -194,9 +205,9 @@ variable "budget_notification_email" {
 }
 
 variable "idle_stop" {
-  description = "Optional scheduled function that drains and stops an idle host. package_path is the zip built by `task lambda:package`; null deploys none of its resources."
+  description = "Optional scheduled function that drains and stops an idle host. package_path is the zip built by `task lambda:package`, unless package_dir names the directory holding it; null deploys none of its resources."
   type = object({
-    package_path                = string
+    package_path                = optional(string)
     cloudflare_token_secret_arn = string
     idle_minutes                = optional(number, 30)
     permissions_boundary_arn    = optional(string)
@@ -211,6 +222,10 @@ variable "idle_stop" {
     error_message = "idle_stop supports exactly one game instance on Java port 25565."
   }
   validation {
+    condition     = var.idle_stop == null || var.package_dir != null || try(var.idle_stop.package_path, null) != null
+    error_message = "idle_stop.package_path is required unless package_dir names the directory holding idle-stop.zip."
+  }
+  validation {
     condition     = var.idle_stop == null || try(var.idle_stop.idle_minutes >= 10 && var.idle_stop.idle_minutes <= 240 && floor(var.idle_stop.idle_minutes) == var.idle_stop.idle_minutes, false)
     error_message = "idle_stop.idle_minutes must be a whole number from 10 to 240."
   }
@@ -221,15 +236,24 @@ variable "idle_stop" {
 }
 
 variable "launcher" {
-  description = "Optional backend for The Lobby's Minecraft Launcher: status and start through a Function URL only the site may call. sites maps each Lobby environment the launcher serves (dev, prod) to that site's IAM role, and gets one function per environment, named <resource_prefix>-<environment>-launcher, all sharing one start record because they start the same host. package_path is the zip built by `task lambda:package:launcher`; permissions_boundary_arn is the administrator-created launcher boundary; null deploys none of its resources."
+  description = "Optional backend for The Lobby's Minecraft Launcher: status, start and stop through a Function URL only the site, and the operator's control role when control_role_arn is set, may call. sites maps each Lobby environment the launcher serves (dev, prod) to that site's IAM role, and gets one function per environment, named <resource_prefix>-<environment>-launcher, all sharing one start record because they start the same host. permissions_boundary_arn is the administrator-created launcher boundary; control_role_arn admits the operator's server control role beside the sites. package_path is the zip built by `task lambda:package:launcher`, unless package_dir names the directory holding it. null deploys none of its resources."
   type = object({
-    package_path               = string
+    package_path               = optional(string)
     sites                      = map(string)
     server_name                = optional(string, "Family server")
     cloudflare_token_parameter = optional(string)
     permissions_boundary_arn   = string
+    control_role_arn           = optional(string)
   })
   default = null
+  validation {
+    condition     = var.launcher == null || var.package_dir != null || try(var.launcher.package_path, null) != null
+    error_message = "launcher.package_path is required unless package_dir names the directory holding launcher.zip."
+  }
+  validation {
+    condition     = var.launcher == null || try(var.launcher.control_role_arn == null || (can(regex("^arn:aws:iam::[0-9]{12}:role/.+$", var.launcher.control_role_arn)) && split(":", var.launcher.control_role_arn)[4] == var.account_id), false)
+    error_message = "launcher.control_role_arn must name the operator's control role in the target account, the one the Server control workflow assumes."
+  }
   validation {
     condition     = var.launcher == null || try(length(var.launcher.sites) > 0, false)
     error_message = "launcher.sites must name at least one Lobby environment and its site role, such as { dev = \"arn:aws:iam::<account>:role/site-dev-server\" }."

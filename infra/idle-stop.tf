@@ -5,6 +5,7 @@ locals {
   idle_stop_state_name     = "/${var.resource_prefix}/idle-stop/state"
   idle_stop_state_arn      = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${local.idle_stop_state_name}"
   idle_stop_log_group_name = "/aws/lambda/${local.idle_stop_name}"
+  idle_stop_package_path   = var.package_dir == null ? try(var.idle_stop.package_path, null) : "${var.package_dir}/idle-stop.zip"
 }
 
 resource "aws_iam_role" "idle_stop" {
@@ -28,7 +29,7 @@ resource "aws_iam_role_policy" "idle_stop" {
   role  = aws_iam_role.idle_stop[0].id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Sid      = "ObserveHost"
         Effect   = "Allow"
@@ -71,7 +72,13 @@ resource "aws_iam_role_policy" "idle_stop" {
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = ["arn:aws:logs:${var.region}:${var.account_id}:log-group:${local.idle_stop_log_group_name}:*"]
       },
-    ]
+      ], var.launcher == null ? [] : [{
+        # A stop the launcher is running is left to it, so the two never drain the host at once.
+        Sid      = "ReadLauncherProgress"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = [local.launcher_state_arn]
+    }])
   })
 }
 
@@ -100,8 +107,8 @@ resource "aws_lambda_function" "idle_stop" {
   runtime                        = "provided.al2023"
   architectures                  = ["arm64"]
   handler                        = "bootstrap"
-  filename                       = var.idle_stop.package_path
-  source_code_hash               = filebase64sha256(var.idle_stop.package_path)
+  filename                       = local.idle_stop_package_path
+  source_code_hash               = filebase64sha256(local.idle_stop_package_path)
   memory_size                    = 128
   timeout                        = 60
   reserved_concurrent_executions = 1
@@ -114,6 +121,7 @@ resource "aws_lambda_function" "idle_stop" {
       CLOUDFLARE_TOKEN_SECRET_ARN = var.idle_stop.cloudflare_token_secret_arn
       IDLE_MINUTES                = tostring(var.idle_stop.idle_minutes)
       INSTANCES                   = join(",", sort(tolist(var.instance_ids)))
+      LAUNCHER_STATE_PARAMETER    = var.launcher == null ? "" : local.launcher_state_name
     }
   }
   logging_config {
