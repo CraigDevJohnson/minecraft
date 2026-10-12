@@ -167,7 +167,7 @@ variable "additional_game_ingress" {
 }
 
 variable "public_hostname" {
-  description = "Private DNS hostname that players use. The operator command points its existing Cloudflare A record at the running host and parks it while the host is stopped."
+  description = "DNS hostname that players use. The operator command points its existing Cloudflare A record at the running host and parks it while the host is stopped."
   type        = string
   validation {
     condition     = length(var.public_hostname) <= 253 && can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.public_hostname))

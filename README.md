@@ -2,7 +2,7 @@
 
 One fresh family survival server for up to six Java and Bedrock players. The repository defines the replaceable host, retained storage, state bootstrap, pinned crossplay runtime, guarded session commands, verified cold backup publication, and isolated restore, with reproducible tools and credential-free checks. Live AWS deployment and demonstrated S3 recovery remain separate deliveries.
 
-Use feature branches and pull requests for changes. Keep credentials, local configuration, and generated server data out of Git.
+Changes go through feature branches and pull requests in this repository; it is not taking outside contributions. Keep credentials, local configuration, and generated server data out of Git.
 
 Report suspected vulnerabilities using the [security policy](SECURITY.md).
 
@@ -37,4 +37,8 @@ These commands may download public tool and provider releases. They do not use A
 
 The security workflow checks for secrets with Gitleaks, validates GitHub Actions syntax with actionlint, and audits workflows and Dependabot configuration with zizmor. These checks cover the current repository files; add language and dependency scanners when application code and manifests arrive.
 
-Dependabot checks GitHub Actions dependencies weekly, grouping minor and patch version updates separately from security updates. Version updates wait seven days after release; security updates are not delayed by that cooldown. Scanner CLI releases and their download checksums are pinned in the workflow and require manual updates: verify each replacement against its upstream release before changing the version and SHA256 together.
+Dependabot checks GitHub Actions and the two Go modules under `lambda/` weekly, grouping minor and patch version updates separately from security updates. Version updates wait seven days after release; security updates are not delayed by that cooldown. Scanner CLI releases and their download checksums are pinned in the workflow and require manual updates: verify each replacement against its upstream release before changing the version and SHA256 together.
+
+## Licence
+
+The code is public under the [MIT licence](LICENSE); it is not taking contributions. The Crafty build writes `eula=true` on the strength of Craig's acceptance of the Minecraft EULA for his family server (#5); anyone else running it must read and accept the [Minecraft EULA](https://www.minecraft.net/eula) themselves.

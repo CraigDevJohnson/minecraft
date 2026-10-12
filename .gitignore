@@ -50,9 +50,12 @@ __pycache__/
 .aws/
 operator-config/
 secrets/
+backend.hcl
+*.backend.hcl
+!*.backend.hcl.example
 
-# Private family player list kept in the repository root
-/users.json
+# Private family player list, wherever a copy lands
+users.json
 
 # Minecraft server runtime data and secrets
 **/instances/*/data/
