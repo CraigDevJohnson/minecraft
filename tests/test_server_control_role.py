@@ -74,6 +74,9 @@ class ServerControlRoleTests(unittest.TestCase):
         self.assertEqual(sorted(re.findall(r"secrets\.([A-Z_]+)", deploy)), ["BACKEND_CONFIG", "DEPLOYMENT_TFVARS"])
         self.assertIn("secrets.DEPLOYMENT_TFVARS", deploy)
         self.assertIn("secrets.BACKEND_CONFIG", deploy)
+        # A push to main may only plan; an apply is a run Craig starts by hand (ADR 0006).
+        self.assertIn("MODE: ${{ inputs.mode || 'plan' }}", deploy)
+        self.assertNotIn("|| 'apply'", deploy)
 
 
 if __name__ == "__main__":

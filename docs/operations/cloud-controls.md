@@ -42,9 +42,9 @@ They run [`scripts/launcher_call.sh`](../../scripts/launcher_call.sh), which the
 
 ## Deploys
 
-The **Deploy** workflow runs on every push to `main` that touches `infra/`, `lambda/`, `scripts/`, the tool lock or itself, and by hand with a `mode` of `plan` (look only) or `apply`. Its one job runs in the `deploy` GitHub Environment, so it waits in the Actions tab for Craig's approval before it starts; only `main` may use that environment. Approved, the job builds both function packages with the pinned Go toolchain through `scripts/package_idle_stop.py`, assumes `minecraft-operator` through GitHub OIDC, writes the private inputs from the environment's secrets to files it never prints, runs `tofu init`, `plan` and, in `apply` mode, applies that saved plan. The job summary shows the plan's resource headers and the apply's progress lines and totals, nothing indented deeper, because attribute values carry the private inputs.
+The **Deploy** workflow runs on every push to `main` that touches `infra/`, `lambda/`, `scripts/`, the tool lock or itself, and by hand with a `mode` of `plan` (look only) or `apply`. A push only plans: the job builds both function packages with the pinned Go toolchain through `scripts/package_idle_stop.py`, assumes `minecraft-operator` through GitHub OIDC, writes the private inputs from the `deploy` environment's secrets to files it never prints, runs `tofu init` and `plan`, and posts the plan to the run summary. Nothing applies until Craig reads that plan and starts the workflow by hand with `mode` set to `apply`; that run plans again and applies its own saved plan, and starting it is his approval of the change (aws-setup `aws-design.md` G11). The `deploy` environment admits only `main` and carries no required reviewer, because GitHub offers that rule on a private repository only with GitHub Enterprise. The job summary shows the plan's resource headers and the apply's progress lines and totals, nothing indented deeper, because attribute values carry the private inputs.
 
-Pull request CI is unchanged: `task check` validates, formats and runs the mocked plan tests without AWS access. A merge to `main` is the deploy, approved once in GitHub, the way the-lobby deploys. The checkout on a workstation can stay behind `main` indefinitely; it is no longer part of a deploy.
+Pull request CI is unchanged: `task check` validates, formats and runs the mocked plan tests without AWS access. A merge to `main` produces the plan; the apply is one Run workflow in the Actions tab after reading it. The checkout on a workstation can stay behind `main` indefinitely; it is no longer part of a deploy.
 
 Two inputs make the root deployable there and change nothing on a workstation: `package_dir` names the directory holding `launcher.zip` and `idle-stop.zip` and overrides every `package_path`, and `operator_role_arn` may be left unset, which leaves the provider's `assume_role` out, because the runner already is the operator role.
 
@@ -100,12 +100,12 @@ These are the IAM pieces aws-setup's `aws-design.md` keeps with an administrator
 
    `create-role` prints the role with `"Arn": "arn:aws:iam::793680745829:role/minecraft-server-control"`; `put-role-policy` prints nothing.
 
-4. **Create the two GitHub environments.** `deploy` requires your review and allows only `main`; `server` allows only `main`:
+4. **Create the two GitHub environments.** Both allow only `main`. Neither has a required reviewer: GitHub offers that rule on a private repository only with GitHub Enterprise, so the apply gate is the manual `apply` run instead:
 
    ```sh
    repo=CraigDevJohnson/minecraft
    gh api -X PUT "repos/$repo/environments/deploy" --input - <<'JSON'
-   {"reviewers": [{"type": "User", "id": 42454849}], "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
+   {"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
    JSON
    gh api -X POST "repos/$repo/environments/deploy/deployment-branch-policies" -f name=main -f type=branch
    gh api -X PUT "repos/$repo/environments/server" --input - <<'JSON'
@@ -114,7 +114,7 @@ These are the IAM pieces aws-setup's `aws-design.md` keeps with an administrator
    gh api -X POST "repos/$repo/environments/server/deployment-branch-policies" -f name=main -f type=branch
    ```
 
-   Each `PUT` prints the environment as JSON (`"name": "deploy"` with your login under `reviewers`, then `"name": "server"`); each `POST` prints the branch policy with `"name": "main"`. The same settings are under the repository's Settings, Environments, in the web UI.
+   Each `PUT` prints the environment as JSON (`"name": "deploy"`, then `"name": "server"`); each `POST` prints the branch policy with `"name": "main"`. The same settings are under the repository's Settings, Environments, in the web UI.
 
 5. **Set the variables and the two secrets.** The variables are the role ARNs and the launcher's Function URL (either environment's function; both share one state and admit the control role). The secrets are the private inputs the workstation deploy used, with three edits to `deployment.tfvars`: remove `operator_role_arn`, remove each `package_path` line, and add `control_role_arn` to the `launcher` block. The backend file is `infrastructure.backend.hcl` without its `assume_role` block (and any `profile`), keeping `bucket`, `key`, `region`, `encrypt` and `use_lockfile`:
 
@@ -126,7 +126,7 @@ These are the IAM pieces aws-setup's `aws-design.md` keeps with an administrator
    gh secret set DEPLOYMENT_TFVARS --repo "$repo" --env deploy < /path/to/private/ci.deployment.tfvars
    ```
 
-   Each `variable set` prints `✓ Set Actions variable "…" for CraigDevJohnson/minecraft`; each `secret set` prints `✓ Set Actions secret "…" for CraigDevJohnson/minecraft environment deploy`. The `launcher` block then reads, with your real values:
+   Each `variable set` prints `✓ Set Actions variable NAME for CraigDevJohnson/minecraft`; each `secret set` prints `✓ Set Actions secret NAME for CraigDevJohnson/minecraft` (`gh` does not name the environment). The `launcher` block then reads, with your real values:
 
    ```hcl
    launcher = {
@@ -139,7 +139,7 @@ These are the IAM pieces aws-setup's `aws-design.md` keeps with an administrator
    }
    ```
 
-After these, merging the change is the deploy: approve the waiting Deploy run in the Actions tab and read its summary. The first run should show the launcher roles' new statements and environment, the two new Function URL permissions per site, the alarm's new metric, and the idle stop's new environment variable and statement; any change to the host, data disk, buckets or network is a stop condition, as in [infrastructure](infrastructure.md). Then prove the controls from the Server control workflow: `status`, `start`, and `stop` with nobody playing. The stop archive lands in S3 beside the earlier ones.
+After these, merge the change: the push to `main` runs the Deploy workflow in `plan` mode. Read its summary in the Actions tab. The first plan should show the launcher roles' new statements and environment, the two new Function URL permissions per site, the alarm's new metric, and the idle stop's new environment variable and statement; any change to the host, data disk, buckets or network is a stop condition, as in [infrastructure](infrastructure.md). Then start the workflow by hand (Actions, Deploy, Run workflow, `mode` set to `apply`): it plans again, applies, and its summary ends with the apply's resource lines. Then prove the controls from the Server control workflow: `status`, `start`, and `stop` with nobody playing. The stop archive lands in S3 beside the earlier ones.
 
 Later changes to these roles are the same commands again: a new boundary version, `update-assume-role-policy`, or `put-role-policy` with the updated committed JSON.
 

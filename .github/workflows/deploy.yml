@@ -1,9 +1,12 @@
-# Deploys the infra root from GitHub Actions as the operator role, the way The
-# Lobby deploys: every push to main that touches what the root deploys, and by
-# hand (Run workflow) to look at a plan or to apply again. The one job runs in
-# the deploy GitHub Environment, which Craig reviews before it may start and
-# which only main may use, so each apply waits for his approval. See
-# docs/operations/cloud-controls.md and ADR 0006.
+# Deploys the infra root from GitHub Actions as the operator role. Every push
+# to main that touches what the root deploys plans and posts the plan to the
+# run summary; nothing applies until Craig reads it and starts this workflow
+# by hand (Run workflow) with mode apply, which is his approval of that change.
+# The one job runs in the deploy GitHub Environment, which holds the private
+# inputs and which only main may use. GitHub offers no required reviewer on a
+# private repository below the Enterprise plan, so the gate is the manual
+# apply, not an environment approval. See docs/operations/cloud-controls.md
+# and ADR 0006.
 #
 # The operator role trusts this job through GitHub OIDC with the subject
 # repo:CraigDevJohnson@42454849/minecraft@1359070973:environment:deploy.
@@ -39,7 +42,7 @@ defaults:
 
 jobs:
   deploy:
-    name: ${{ inputs.mode || 'apply' }} as the operator
+    name: ${{ inputs.mode || 'plan' }} as the operator
     if: >-
       github.repository == 'CraigDevJohnson/minecraft' &&
       github.repository_id == '1359070973' &&
@@ -95,9 +98,9 @@ jobs:
           mask-aws-account-id: true
           retry-max-attempts: 2
           action-timeout-s: 60
-      - name: Plan, then apply the saved plan
+      - name: Plan, and in apply mode apply the saved plan
         env:
           DEPLOY_DIR: ${{ runner.temp }}/deploy
-          MODE: ${{ inputs.mode || 'apply' }}
+          MODE: ${{ inputs.mode || 'plan' }}
           AWS_EC2_METADATA_DISABLED: 'true'
         run: bash scripts/deploy_tofu.sh "$MODE"
