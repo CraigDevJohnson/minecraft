@@ -1,16 +1,18 @@
 # Deploys the infra root from GitHub Actions as the operator role. It runs
 # only when Craig starts it by hand (Run workflow): mode plan posts the plan and
 # its digest to the run summary, and mode apply, which he starts after reading
-# that plan and gives its digest, is his approval of that change. An apply run
+# that plan, gives its digest and approves as the deploy environment's reviewer,
+# is his approval of that change. An apply run
 # plans again and applies only a plan with that digest, so it applies exactly
 # the plan he read or nothing. No push starts it, because every run holds the
 # operator's write credentials, and the job runs only when Craig's own account
 # started the run (and any re-run of it), so another collaborator or an app
 # with write access cannot start it either. The one job runs in the deploy GitHub
-# Environment, which holds the private inputs and which only main may use.
-# GitHub offers no required reviewer on a private repository below the
-# Enterprise plan, so the gate is starting the run, not an environment
-# approval. See docs/operations/cloud-controls.md and ADR 0006.
+# Environment, which holds the private inputs, which only main may use, and
+# which has Craig as its required reviewer, so GitHub holds every run until he
+# approves it and only then hands it the operator's credentials. The digest
+# binds that approval to the plan he read. See docs/operations/cloud-controls.md
+# and ADR 0006.
 #
 # The operator role trusts this job through GitHub OIDC with the subject
 # repo:CraigDevJohnson@42454849/minecraft@1359070973:environment:deploy.

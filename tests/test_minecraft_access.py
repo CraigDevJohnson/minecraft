@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from minecraft_access import AccessError, change_allowlist  # noqa: E402
 
 JAVA_PLAYER = {"uuid": "12345678-1234-4234-8234-123456789abc", "name": "TestPlayer"}
-BEDROCK_PLAYER = {"uuid": "00000000-0000-0000-0009-01f64f65c7c3", "name": "FamilyTablet"}
+BEDROCK_PLAYER = {"uuid": "00000000-0000-0000-0009-01eed05d1005", "name": "SampleTablet"}
 
 
 class FakeMachine:

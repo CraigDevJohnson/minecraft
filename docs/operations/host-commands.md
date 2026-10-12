@@ -90,7 +90,7 @@ Requests use Python's standard library with default TLS verification. A python.o
 - Bedrock: the hostname and port 19132. Bedrock does not use SRV records.
 - After a start, the new address is visible within about a minute. Some resolvers hold a record longer than its TTL, and Java caches a lookup for 30 seconds. If a join fails right after a start, restart the client.
 
-The family allowlist remains the access control. The hostname is not a secret, but it is a private deployment input and stays out of the repository.
+The family allowlist and online authentication remain the access control. The hostname is not a secret; it is a deployment input, and the health check and runbooks name it.
 
 ## Timeouts and retries
 

@@ -14,3 +14,17 @@ updates:
       security:
         applies-to: security-updates
         patterns: ["*"]
+  - package-ecosystem: gomod
+    directories: ["/lambda/launcher", "/lambda/idlestop"]
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      routine:
+        applies-to: version-updates
+        update-types: [minor, patch]
+      security:
+        applies-to: security-updates
+        patterns: ["*"]

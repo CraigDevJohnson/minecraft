@@ -130,7 +130,7 @@ func TestAllowlistRejectsBadRequestsBeforeLookingAnythingUp(t *testing.T) {
 		{Operation: "add", Edition: "java", Name: "St"},
 		{Operation: "add", Edition: "java", Name: "Steve;whitelist off"},
 		{Operation: "add", Edition: "bedrock", Name: " Sample Player"},
-		{Operation: "add", Edition: "bedrock", Name: "Copper\"Tops"},
+		{Operation: "add", Edition: "bedrock", Name: "Sample\"Player"},
 		{Operation: "add", Edition: "bedrock", Name: "SeventeenCharacters"},
 		{Operation: "add", Edition: "bedrock", Name: ""},
 	} {
@@ -196,13 +196,13 @@ func lookupServer(t *testing.T) *httptest.Server {
 		case "/users/profiles/minecraft/Elsewhere":
 			http.Redirect(w, r, "/users/profiles/minecraft/Steve", http.StatusFound)
 		case "/v2/xbox/xuid/Sample Player":
-			_, _ = w.Write([]byte(`{"xuid": 2535428175563874}`))
+			_, _ = w.Write([]byte(`{"xuid": 2535400000000009}`))
 		case "/v2/xbox/xuid/Nobody":
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"message": "Unable to find user in our cache. Please try specifying a different gamertag."}`))
 		case "/v2/xbox/xuid/Zero":
 			_, _ = w.Write([]byte(`{"xuid": 0}`))
-		case "/v2/link/bedrock/2535428175563874":
+		case "/v2/link/bedrock/2535400000000009":
 			_, _ = w.Write([]byte(`{}`))
 		case "/v2/xbox/xuid/Linked Player":
 			_, _ = w.Write([]byte(`{"xuid": 2535400000000001}`))
@@ -231,8 +231,8 @@ func TestLookupResolvesJavaAndBedrockPlayers(t *testing.T) {
 		t.Fatalf("player=%+v err=%v; Mojang's exact name and dashed UUID are the record", player, err)
 	}
 	player, err = lookup.Lookup(context.Background(), "bedrock", "Sample Player")
-	// 2535428175563874 is 0x000901f55fc20c62: the XUID's top 16 bits and low 48 bits make the Floodgate UUID.
-	if err != nil || player != (Player{UUID: "00000000-0000-0000-0009-01f55fc20c62", Name: "Sample Player"}) {
+	// 2535400000000009 is 0x000901eed05d1009: the XUID's top 16 bits and low 48 bits make the Floodgate UUID.
+	if err != nil || player != (Player{UUID: "00000000-0000-0000-0009-01eed05d1009", Name: "Sample Player"}) {
 		t.Fatalf("player=%+v err=%v", player, err)
 	}
 }
