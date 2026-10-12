@@ -808,7 +808,7 @@ run "launcher_starts_only_this_host_for_only_the_site" {
   }
 
   assert {
-    condition     = aws_lambda_function.launcher["dev"].environment[0].variables == tomap({ HOST_ID = "i-0123456789abcdef0", INSTANCE = "survival", SERVER_NAME = "Family server", PUBLIC_HOSTNAME = "mc.example.com", BEDROCK_PORT = "19132", STATE_PARAMETER = "/minecraft-test/launcher/state", CLOUDFLARE_ZONE_ID = "0123456789abcdef0123456789abcdef", CLOUDFLARE_TOKEN_PARAMETER = "/minecraft-test/launcher/cloudflare-token", IDLE_STOP_STATE_PARAMETER = "" })
+    condition     = aws_lambda_function.launcher["dev"].environment[0].variables == tomap({ HOST_ID = "i-0123456789abcdef0", INSTANCE = "survival", SERVER_NAME = "Family server", PUBLIC_HOSTNAME = "mc.example.com", BEDROCK_PORT = "19132", STATE_PARAMETER = "/minecraft-test/launcher/state", CLOUDFLARE_ZONE_ID = "0123456789abcdef0123456789abcdef", CLOUDFLARE_TOKEN_PARAMETER = "/minecraft-test/launcher/cloudflare-token", IDLE_STOP_STATE_PARAMETER = "", SITE_ROLE_ARNS = "arn:aws:iam::111122223333:role/site-dev-server" })
     error_message = "The function must target this host, its one instance, the players' hostname and its own state, naming the token only by parameter."
   }
 
@@ -869,6 +869,10 @@ run "launcher_admits_the_control_role_on_every_site" {
   assert {
     condition     = aws_lambda_permission.launcher_url["dev"].principal == "arn:aws:iam::111122223333:role/site-dev-server" && aws_lambda_permission.launcher_url["prod"].principal == "arn:aws:iam::111122223333:role/site-prod-server"
     error_message = "The sites' own permissions must stay as they are beside the control role's."
+  }
+  assert {
+    condition     = aws_lambda_function.launcher["dev"].environment[0].variables["SITE_ROLE_ARNS"] == "arn:aws:iam::111122223333:role/site-dev-server,arn:aws:iam::111122223333:role/site-prod-server" && aws_lambda_function.launcher["prod"].environment[0].variables["SITE_ROLE_ARNS"] == aws_lambda_function.launcher["dev"].environment[0].variables["SITE_ROLE_ARNS"]
+    error_message = "Every function must know every site's role, so it refuses them a forced stop and the allowlist."
   }
 }
 

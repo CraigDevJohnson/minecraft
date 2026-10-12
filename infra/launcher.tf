@@ -216,6 +216,8 @@ resource "aws_lambda_function" "launcher" {
       CLOUDFLARE_ZONE_ID         = var.cloudflare_zone_id
       CLOUDFLARE_TOKEN_PARAMETER = local.launcher_token_name
       IDLE_STOP_STATE_PARAMETER  = var.idle_stop == null ? "" : local.idle_stop_state_name
+      # The sites' roles may start and stop; the launcher refuses them a forced stop and the allowlist.
+      SITE_ROLE_ARNS = join(",", sort(values(local.launcher_sites)))
     }
   }
   logging_config {

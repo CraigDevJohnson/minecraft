@@ -81,7 +81,7 @@ func TestGetServer(t *testing.T) {
 
 func TestNoServerIs404(t *testing.T) {
 	log, _ := quiet()
-	server := &Server{Launcher: &fakeLauncher{err: ErrNoServer}, Log: log}
+	server := &Server{Launcher: &fakeLauncher{err: ErrNoServer}, Log: log, Operator: anyone}
 	for _, method := range []string{"GET /server", "POST /server/start", "POST /server/stop", "POST /server/allowlist"} {
 		parts := strings.Fields(method)
 		body := ""
@@ -179,7 +179,7 @@ func TestStopAnswers(t *testing.T) {
 		log, logged := quiet()
 		launcher := &fakeLauncher{status: Status{Name: "Family server", State: Stopping}, stopped: tc.stopped, err: tc.err}
 		lost := 0
-		code, body := serveBody(t, &Server{Launcher: launcher, Log: log, StopFailed: func() { lost++ }}, "POST", "/server/stop", tc.body)
+		code, body := serveBody(t, &Server{Launcher: launcher, Log: log, StopFailed: func() { lost++ }, Operator: anyone}, "POST", "/server/stop", tc.body)
 		if code != tc.code || launcher.stops != 1 || launcher.forced != tc.force || lost != tc.lost {
 			t.Fatalf("%s: %d %v stops=%d forced=%v lost=%d", tc.name, code, body, launcher.stops, launcher.forced, lost)
 		}
@@ -225,7 +225,7 @@ func TestAllowlistAnswers(t *testing.T) {
 		{"bad gamertag", &fakeLauncher{allowlist: updated}, `{"operation":"add","edition":"bedrock","name":"Steve\"; rm -rf /"}`, 400, "bad_request", 0},
 		{"no body", &fakeLauncher{allowlist: updated}, "", 400, "bad_request", 0},
 	} {
-		code, body := serveBody(t, &Server{Launcher: tc.launcher, Log: log}, "POST", "/server/allowlist", tc.body)
+		code, body := serveBody(t, &Server{Launcher: tc.launcher, Log: log, Operator: anyone}, "POST", "/server/allowlist", tc.body)
 		if code != tc.code || len(tc.launcher.allowlisted) != tc.sent {
 			t.Fatalf("%s: %d %v (sent %d)", tc.name, code, body, len(tc.launcher.allowlisted))
 		}
@@ -247,11 +247,59 @@ func TestAllowlistAnswers(t *testing.T) {
 func TestAllowlistPassesTheRequestThrough(t *testing.T) {
 	log, _ := quiet()
 	launcher := &fakeLauncher{allowlist: AllowlistResult{Instance: "family", Edition: "bedrock", Operation: "remove", Allowlist: "unchanged"}}
-	code, body := serveBody(t, &Server{Launcher: launcher, Log: log}, "POST", "/server/allowlist", `{"operation":"remove","edition":"bedrock","name":"Sample Player"}`)
+	code, body := serveBody(t, &Server{Launcher: launcher, Log: log, Operator: anyone}, "POST", "/server/allowlist", `{"operation":"remove","edition":"bedrock","name":"Sample Player"}`)
 	if code != 200 || body["allowlist"] != "unchanged" {
 		t.Fatalf("%d %v", code, body)
 	}
 	if want := (AllowlistRequest{Operation: "remove", Edition: "bedrock", Name: "Sample Player"}); len(launcher.allowlisted) != 1 || launcher.allowlisted[0] != want {
 		t.Fatalf("sent %+v", launcher.allowlisted)
+	}
+}
+
+// anyone stands in for an operator's signed request.
+func anyone(*http.Request) bool { return true }
+
+func TestASiteCannotForceAStopOrChangeTheAllowlist(t *testing.T) {
+	for name, operator := range map[string]func(*http.Request) bool{
+		"a site's role":   func(*http.Request) bool { return false },
+		"no caller check": nil,
+	} {
+		log, _ := quiet()
+		launcher := &fakeLauncher{status: Status{Name: "Family server", State: Stopping}, stopped: true}
+		server := &Server{Launcher: launcher, Log: log, Operator: operator}
+		if code, body := serveBody(t, server, "POST", "/server/allowlist", `{"operation":"add","edition":"java","name":"Steve"}`); code != 403 || body["code"] != "forbidden" || len(launcher.allowlisted) != 0 {
+			t.Fatalf("%s: allowlist answered %d %v (sent %d)", name, code, body, len(launcher.allowlisted))
+		}
+		if code, body := serveBody(t, server, "POST", "/server/stop", `{"force": true}`); code != 403 || body["code"] != "forbidden" || launcher.stops != 0 {
+			t.Fatalf("%s: a forced stop answered %d %v (stops %d)", name, code, body, launcher.stops)
+		}
+		if code, body := serveBody(t, server, "POST", "/server/stop", ""); code != 202 || launcher.stops != 1 || launcher.forced {
+			t.Fatalf("%s: a plain stop answered %d %v (stops %d, forced %v)", name, code, body, launcher.stops, launcher.forced)
+		}
+	}
+}
+
+func TestOperatorCallerIsAnySignedCallerButASite(t *testing.T) {
+	sites := RoleNames("arn:aws:iam::111122223333:role/site-dev-server, arn:aws:iam::111122223333:role/lobby/site-prod-server")
+	if len(sites) != 2 || !sites["site-dev-server"] || !sites["site-prod-server"] {
+		t.Fatalf("site roles %v", sites)
+	}
+	for _, tc := range []struct {
+		arn   string
+		sites map[string]bool
+		want  bool
+	}{
+		{"arn:aws:sts::111122223333:assumed-role/site-dev-server/lobby", sites, false},
+		{"arn:aws:sts::111122223333:assumed-role/site-prod-server/lobby", sites, false},
+		{"arn:aws:sts::111122223333:assumed-role/minecraft-server-control/minecraft-server-stop-1", sites, true},
+		{"arn:aws:sts::111122223333:assumed-role/AWSReservedSSO_WorkloadsAdmin_0123456789abcdef/craig", sites, true},
+		{"arn:aws:iam::111122223333:user/operator", sites, true},
+		{"arn:aws:sts::111122223333:assumed-role//x", sites, false},
+		{"", sites, false},
+		{"arn:aws:sts::111122223333:assumed-role/minecraft-server-control/x", map[string]bool{}, false},
+	} {
+		if got := OperatorCaller(tc.arn, tc.sites); got != tc.want {
+			t.Fatalf("%q with sites %v: %v, want %v", tc.arn, tc.sites, got, tc.want)
+		}
 	}
 }

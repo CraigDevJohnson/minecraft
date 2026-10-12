@@ -2,10 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-lambda-go/events"
+	"github.com/awslabs/aws-lambda-go-api-proxy/httpadapter"
 )
 
 func environment(overrides map[string]string) func(string) string {
@@ -79,5 +84,38 @@ func TestWriteMetricIsEmbeddedMetricFormat(t *testing.T) {
 		len(metrics[0].Metrics) != 1 || metrics[0].Metrics[0].Name != "StartFailures" || metrics[0].Metrics[0].Unit != "Count" ||
 		line.FunctionName != "minecraft-test-dev-launcher" || line.StartFailures != 1 {
 		t.Fatalf("%q", buffer.String())
+	}
+}
+
+func TestTheOperatorCheckReadsTheCallerTheFunctionURLVerified(t *testing.T) {
+	operator := signedOperator(RoleNames("arn:aws:iam::111122223333:role/site-dev-server"))
+	var admitted []bool
+	proxy := httpadapter.NewV2(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		admitted = append(admitted, operator(r))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, caller := range []string{
+		"arn:aws:sts::111122223333:assumed-role/site-dev-server/lobby",
+		"arn:aws:sts::111122223333:assumed-role/minecraft-server-control/run",
+		"",
+	} {
+		request := events.APIGatewayV2HTTPRequest{RawPath: "/server/allowlist", RequestContext: events.APIGatewayV2HTTPRequestContext{
+			HTTP: events.APIGatewayV2HTTPRequestContextHTTPDescription{Method: "POST", Path: "/server/allowlist"},
+		}}
+		if caller != "" {
+			request.RequestContext.Authorizer = &events.APIGatewayV2HTTPRequestContextAuthorizerDescription{
+				IAM: &events.APIGatewayV2HTTPRequestContextAuthorizerIAMDescription{UserARN: caller},
+			}
+		}
+		if _, err := proxy.ProxyWithContext(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(admitted) != 3 || admitted[0] || !admitted[1] || admitted[2] {
+		t.Fatalf("admitted %v, want site refused, control role admitted, unsigned refused", admitted)
+	}
+	local, _ := http.NewRequest("POST", "/server/allowlist", nil)
+	if operator(local) {
+		t.Fatal("a request without the Function URL's event must not be an operator")
 	}
 }

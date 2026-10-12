@@ -27,6 +27,7 @@ import (
 	awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/awslabs/aws-lambda-go-api-proxy/core"
 	"github.com/awslabs/aws-lambda-go-api-proxy/httpadapter"
 )
 
@@ -109,6 +110,7 @@ func main() {
 		launcher.FollowUpStop = invokeSelf(finishStopTask)
 		server.StartFailed = func() { writeMetric(os.Stdout, name, startFailureMetric, time.Now()) }
 		server.StopFailed = func() { writeMetric(os.Stdout, name, stopFailureMetric, time.Now()) }
+		server.Operator = signedOperator(RoleNames(os.Getenv("SITE_ROLE_ARNS")))
 		proxy := httpadapter.NewV2(server.Handler())
 		lambda.Start(func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var task struct {
@@ -157,6 +159,18 @@ func main() {
 }
 
 // finish runs a follow-up with time left to record a failure before Lambda ends the run.
+// signedOperator reads the IAM caller the Function URL verified from the request's event and admits it as an
+// operator unless it is one of the sites' roles. A request without that caller (the local server) admits nobody.
+func signedOperator(siteRoles map[string]bool) func(*http.Request) bool {
+	return func(r *http.Request) bool {
+		request, ok := core.GetAPIGatewayV2ContextFromContext(r.Context())
+		if !ok || request.Authorizer == nil || request.Authorizer.IAM == nil {
+			return false
+		}
+		return OperatorCaller(request.Authorizer.IAM.UserARN, siteRoles)
+	}
+}
+
 func finish(ctx context.Context, name string, run func(context.Context) error, log *slog.Logger) error {
 	if deadline, ok := ctx.Deadline(); ok {
 		var cancel context.CancelFunc

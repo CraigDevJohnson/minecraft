@@ -5,10 +5,10 @@ Nothing about operating the family server runs on a workstation ([ADR 0006](../a
 | Entry point | What it does | Who |
 | --- | --- | --- |
 | The `/minecraft` page in The Lobby | status, Start server, Stop server | Members with the `minecraft` grant |
-| The **Server control** workflow (GitHub Actions) | status, start, stop, allowlist add or remove | Whoever may run workflows in this repository, through the `server` environment |
+| The **Server control** workflow (GitHub Actions) | status, start, stop (forced if asked), allowlist add or remove | Whoever may run workflows in this repository, through the `server` environment |
 | `task server:status`, `server:start`, `server:stop`, `server:allowlist` | The same requests from any terminal | Anyone with an AWS profile that may invoke the launcher (`workloads-admin` may) |
 
-Every one of them sends one SigV4-signed request to the launcher's Function URL. The launcher does the work in AWS with the same host adapter actions the workstation runbook used.
+Every one of them sends one SigV4-signed request to the launcher's Function URL. The launcher does the work in AWS with the same host adapter actions the workstation runbook used. It reads who signed each request: a site's role may only read the status, start and stop without force, and the allowlist and a forced stop answer it `403` with `forbidden`.
 
 ## The Server control workflow
 
@@ -42,7 +42,7 @@ They run [`scripts/launcher_call.sh`](../../scripts/launcher_call.sh), which the
 
 ## Deploys
 
-The **Deploy** workflow runs on every push to `main` that touches `infra/`, `lambda/`, `scripts/`, the tool lock or itself, and by hand with a `mode` of `plan` (look only) or `apply`. A push only plans: the job builds both function packages with the pinned Go toolchain through `scripts/package_idle_stop.py`, assumes `minecraft-operator` through GitHub OIDC, writes the private inputs from the `deploy` environment's secrets to files it never prints, runs `tofu init` and `plan`, and posts the plan to the run summary. Nothing applies until Craig reads that plan and starts the workflow by hand with `mode` set to `apply`; that run plans again and applies its own saved plan, and starting it is his approval of the change (aws-setup `aws-design.md` G11). The `deploy` environment admits only `main` and carries no required reviewer, because GitHub offers that rule on a private repository only with GitHub Enterprise. The job summary shows the plan's resource headers and the apply's progress lines and totals, nothing indented deeper and no `[id=…]` suffixes, because attribute values and physical ids carry the private inputs.
+The **Deploy** workflow runs only when Craig starts it by hand, with a `mode` of `plan` (look only, the default) or `apply`. No push starts it, because every run holds the operator's write credentials. A plan run builds both function packages with the pinned Go toolchain through `scripts/package_idle_stop.py`, assumes `minecraft-operator` through GitHub OIDC, writes the private inputs from the `deploy` environment's secrets to files it never prints, runs `tofu init` and `plan`, and posts the plan to the run summary. Nothing applies until Craig reads that plan and starts the workflow again with `mode` set to `apply`; that run plans again and applies its own saved plan, and starting it is his approval of the change (aws-setup `aws-design.md` G11). The `deploy` environment admits only `main` and carries no required reviewer, because GitHub offers that rule on a private repository only with GitHub Enterprise. The job summary shows the plan's resource headers and the apply's progress lines and totals, nothing indented deeper and no `[id=…]` suffixes, because attribute values and physical ids carry the private inputs.
 
 Pull request CI is unchanged: `task check` validates, formats and runs the mocked plan tests without AWS access. A merge to `main` produces the plan; the apply is one Run workflow in the Actions tab after reading it. The checkout on a workstation can stay behind `main` indefinitely; it is no longer part of a deploy.
 
@@ -139,7 +139,7 @@ These are the IAM pieces aws-setup's `aws-design.md` keeps with an administrator
    }
    ```
 
-After these, merge the change: the push to `main` runs the Deploy workflow in `plan` mode. Read its summary in the Actions tab. The first plan should show the launcher roles' new statements and environment, the two new Function URL permissions per site, the alarm's new metric, and the idle stop's new environment variable and statement; any change to the host, data disk, buckets or network is a stop condition, as in [infrastructure](infrastructure.md). Then start the workflow by hand (Actions, Deploy, Run workflow, `mode` set to `apply`): it plans again, applies, and its summary ends with the apply's resource lines. Then prove the controls from the Server control workflow: `status`, `start`, and `stop` with nobody playing. The stop archive lands in S3 beside the earlier ones.
+After these, merge the change, then start the Deploy workflow by hand (Actions, Deploy, Run workflow, `mode` left at `plan`). Read its summary. The first plan should show the launcher roles' new statements and environment, the two new Function URL permissions per site, the alarm's new metric, and the idle stop's new environment variable and statement; any change to the host, data disk, buckets or network is a stop condition, as in [infrastructure](infrastructure.md). Then start it again with `mode` set to `apply`: it plans again, applies, and its summary ends with the apply's resource lines. Then prove the controls from the Server control workflow: `status`, `start`, and `stop` with nobody playing. The stop archive lands in S3 beside the earlier ones.
 
 Later changes to these roles are the same commands again: a new boundary version, `update-assume-role-policy`, or `put-role-policy` with the updated committed JSON.
 

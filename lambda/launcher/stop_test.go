@@ -356,6 +356,23 @@ func TestFinishStopParksTheHostnameWhenSomeoneElseStoppedTheHost(t *testing.T) {
 	}
 }
 
+func TestFinishStopResumedAfterTheHostStoppedDoesNotAskTheHostAgain(t *testing.T) {
+	r := stopRig(t)
+	// An earlier run sent the drain and stopped EC2, then ran out of time; this run picks it up.
+	r.setSession(t, Session{RequestedAt: now, LaunchTime: now.Add(-time.Hour), Phase: Stopping, DrainCommandID: commandID, DrainSentAt: now})
+	r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameStopping, ec2types.InstanceStateNameStopped}
+	r.ssm.invocation = []ssm.GetCommandInvocationOutput{success(drainOutput)}
+	if err := r.launcher.FinishStop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.ssm.commands) != 0 || r.ec2.stops != 0 || strings.Join(r.pointedAt, ",") != parkedAddress {
+		t.Fatalf("commands=%v stops=%d pointed=%v", r.ssm.commands, r.ec2.stops, r.pointedAt)
+	}
+	if session := r.session(t); session.Phase != Stopped || session.DNS != "current" {
+		t.Fatalf("session %+v", session)
+	}
+}
+
 func TestFinishStopLeavesARestartedHostAlone(t *testing.T) {
 	r := stopRig(t)
 	r.ec2.launch = now.Add(-time.Minute)

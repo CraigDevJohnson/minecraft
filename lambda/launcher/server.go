@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 )
 
@@ -29,9 +30,44 @@ type Server struct {
 	// alarm. The request still answers the caller normally, so Lambda's own error count never sees it.
 	StartFailed func()
 	StopFailed  func()
+	// Operator reports whether the request came from an operator rather than a Lobby site: only an operator
+	// may change the allowlist or force a stop. Nil admits nobody.
+	Operator func(*http.Request) bool
 
 	mu        sync.Mutex
 	lastKnown string
+}
+
+// OperatorCaller reports whether the IAM caller a Function URL request was signed by is an operator. The URL's
+// resource policy admits the sites' roles and the server control role; anyone else who can call it holds an
+// administrator's own IAM grant. So every signed caller except a site's role is an operator, and an unsigned
+// request, or a function that does not know its sites, admits nobody.
+func OperatorCaller(userARN string, siteRoles map[string]bool) bool {
+	if userARN == "" || len(siteRoles) == 0 {
+		return false
+	}
+	if _, rest, ok := strings.Cut(userARN, ":assumed-role/"); ok {
+		role, _, _ := strings.Cut(rest, "/")
+		return role != "" && !siteRoles[role]
+	}
+	return true
+}
+
+// RoleNames turns a comma-separated list of role ARNs into the role names an assumed-role caller carries.
+func RoleNames(arns string) map[string]bool {
+	names := map[string]bool{}
+	for _, arn := range strings.Split(arns, ",") {
+		if _, path, ok := strings.Cut(strings.TrimSpace(arn), ":role/"); ok {
+			if name := path[strings.LastIndex(path, "/")+1:]; name != "" {
+				names[name] = true
+			}
+		}
+	}
+	return names
+}
+
+func (s *Server) operator(r *http.Request) bool {
+	return s.Operator != nil && s.Operator(r)
 }
 
 func (s *Server) Handler() http.Handler {
@@ -82,8 +118,8 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.remember(status))
 }
 
-// stop drains and stops the server. The body may carry {"force": true}, which the operator's workflow sends
-// to stop over players or a game that does not answer; the site never sends it.
+// stop drains and stops the server. The body may carry {"force": true}, which only an operator may send, to
+// stop over players or a game that does not answer.
 func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 	member := r.Header.Get(MemberHeader)
 	var request struct {
@@ -92,6 +128,11 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<10))
 	if len(bytes.TrimSpace(body)) > 0 && json.Unmarshal(body, &request) != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "bad_request"})
+		return
+	}
+	if request.Force && !s.operator(r) {
+		s.Log.Info("stop refused", "member", member, "reason", "force_not_allowed")
+		writeJSON(w, http.StatusForbidden, map[string]string{"code": "forbidden"})
 		return
 	}
 	status, stopped, err := s.Launcher.Stop(r.Context(), request.Force)
@@ -126,10 +167,15 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// allowlist adds or removes one player on the running server for the operator's workflow. The player's
+// allowlist adds or removes one player on the running server for an operator, never a site. The player's
 // name is not logged; the adapter's answer carries none either.
 func (s *Server) allowlist(w http.ResponseWriter, r *http.Request) {
 	member := r.Header.Get(MemberHeader)
+	if !s.operator(r) {
+		s.Log.Info("allowlist refused", "member", member, "reason", "not_an_operator")
+		writeJSON(w, http.StatusForbidden, map[string]string{"code": "forbidden"})
+		return
+	}
 	var request AllowlistRequest
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 4<<10))
 	if json.Unmarshal(body, &request) != nil || ValidateAllowlistRequest(request) != nil {

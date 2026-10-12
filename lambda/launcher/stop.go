@@ -88,7 +88,7 @@ func (l *Launcher) Stop(ctx context.Context, force bool) (Status, bool, error) {
 	}
 	if !force {
 		// Only a game that answers can say nobody is playing. A host in maintenance, or a start of ours that
-		// failed, has no game to ask; the operator's workflow stops those with the force flag.
+		// failed, has no game to ask; an operator stops those with the force flag.
 		if state != Ready {
 			return l.answer(state, current), false, ErrPlayersUnknown
 		}
@@ -182,9 +182,6 @@ func (l *Launcher) stopSteps(ctx context.Context, session *Session) error {
 	if err := l.followDrain(ctx, *session); err != nil {
 		return err
 	}
-	if err := l.confirmDrain(ctx); err != nil {
-		return err
-	}
 	h, err := l.describeHost(ctx)
 	if err != nil {
 		return err
@@ -194,11 +191,16 @@ func (l *Launcher) stopSteps(ctx context.Context, session *Session) error {
 		if !h.launchTime.Equal(session.LaunchTime) {
 			return errors.New("the host was started again before this stop finished")
 		}
+		// Only a running host can answer; its fresh status must agree with the drain before EC2 stops it.
+		if err := l.confirmDrain(ctx); err != nil {
+			return err
+		}
 		if _, err := l.EC2.StopInstances(ctx, &ec2.StopInstancesInput{InstanceIds: []string{l.Config.HostID}}); err != nil {
 			return fmt.Errorf("stop host after verified drain: %w", err)
 		}
 	case ec2types.InstanceStateNameStopping, ec2types.InstanceStateNameStopped:
-		// Someone else's stop got there first; this one only parks the hostname and records the outcome.
+		// An earlier run of this stop, or someone else's stop, got there first. The drain's evidence above
+		// stands, and the host can no longer answer a command; this run waits, parks and records the outcome.
 	default:
 		return fmt.Errorf("host cannot be stopped from %s", h.state)
 	}

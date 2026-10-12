@@ -79,7 +79,10 @@ class ServerControlRoleTests(unittest.TestCase):
         self.assertEqual(sorted(re.findall(r"secrets\.([A-Z_]+)", deploy)), ["BACKEND_CONFIG", "DEPLOYMENT_TFVARS"])
         self.assertIn("secrets.DEPLOYMENT_TFVARS", deploy)
         self.assertIn("secrets.BACKEND_CONFIG", deploy)
-        # A push to main may only plan; an apply is a run Craig starts by hand (ADR 0006).
+        # Every Deploy run holds the operator's write credentials, so only a run Craig starts may have them:
+        # no push or other event starts it, and a run he starts plans unless he picks apply (ADR 0006).
+        self.assertRegex(deploy, r"\non:\n  workflow_dispatch:\n")
+        self.assertNotRegex(deploy, r"(?m)^  (push|pull_request|pull_request_target|schedule|workflow_run|repository_dispatch|release|issue_comment):")
         self.assertIn("MODE: ${{ inputs.mode || 'plan' }}", deploy)
         self.assertNotIn("|| 'apply'", deploy)
 
