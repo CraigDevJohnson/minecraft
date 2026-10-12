@@ -24,9 +24,14 @@ SHORTCUT = r"""(^[ \t]*(-[ \t]+)*|:[ \t]+|[\[{,][ \t]*)([&*!]|<<[ \t]*:)|^[ \t]*
 # A quoted string, single or double.
 QUOTED = r"""'[^']*'|"(?:[^"\\]|\\.)*\""""
 
-# So could an escape in a double-quoted key ("id-token" is id-token), or a character outside printable ASCII,
-# which one YAML parser may read as a line break where another does not.
+# So could an escape in a double-quoted key ("id\u002dtoken" is id-token), or a character outside printable
+# ASCII, which one YAML parser may read as a line break where another does not.
 NOT_ASCII = r"[^\t\r\x20-\x7e]"
+
+# The guard reads one line at a time, so a quoted scalar or flow collection may not run onto the next line: a quote
+# that opens a value and does not close on its line, or a [ or { that opens one and is not closed on its line.
+OPEN_QUOTE = r"""(^[ \t]*(-[ \t]+)*|:[ \t]+|[\[{,][ \t]*)["']"""
+OPEN_FLOW = r"(^[ \t]*(-[ \t]+)*|:[ \t]+)[\[{]"
 
 
 def workflows():
@@ -44,7 +49,7 @@ def triggers(text):
 
 def yaml_shortcuts(text):
     """(line number, line) for every character outside printable ASCII, and for every anchor, alias, merge key, tag,
-    complex key or double-quoted escape outside a block scalar."""
+    complex key, double-quoted escape, or quoted scalar or flow collection left open, outside a block scalar."""
     found, scalar = [], None
     # Split on newlines only, so another line break stays on its line and is reported.
     for number, line in enumerate(text.split("\n"), 1):
@@ -60,11 +65,23 @@ def yaml_shortcuts(text):
         escaped = any(s.startswith('"') and "\\" in s for s in re.findall(QUOTED, code))
         code = re.sub(QUOTED, "x", code)
         code = re.sub(r"(^|\s)#.*$", "", code).rstrip()
-        if escaped or re.search(SHORTCUT, code):
+        if escaped or re.search(SHORTCUT, code) or re.search(OPEN_QUOTE, code) or flow_left_open(code):
             found.append((number, line.strip()))
         if re.search(r"(:[ \t]+|^[ \t]*(-[ \t]+)*)[|>][-+0-9]*$", code):
             scalar = indent
     return found
+
+
+def flow_left_open(code):
+    """Whether a flow collection that opens a value on this line is still open at its end."""
+    start = re.search(OPEN_FLOW, code)
+    depth = 0
+    for character in code[start.end() - 1:] if start else "":
+        depth += character in "[{"
+        depth -= character in "]}"
+        if depth == 0:
+            return False
+    return bool(start)
 
 
 def oidc_requests(text):
@@ -143,6 +160,15 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertTrue(yaml_shortcuts('jobs:\n  "a\\x62":\n'))
         unescaped = "run: bash a.sh \"$MODE\"\nb: printf '%s\\n' x\nc: |\n  printf \"a\\tb\"\n"
         self.assertEqual(yaml_shortcuts(unescaped), [])
+        # A quoted scalar or flow collection that runs onto the next line is refused, escaped or not; one closed on its
+        # line, an apostrophe inside a plain scalar and shell brackets in a block scalar are fine.
+        continued = 'on: [push, "\\\n  pull_request_target"]\n'
+        self.assertEqual([n for n, _ in yaml_shortcuts(continued)], [1])
+        for text in ("on: [push,\n  pull_request_target]\n", "jobs:\n  a:\n    permissions: 'write-\n      all'\n",
+                     "  - {a: b,\n    c: d}\n", "x:\n  - 'a\n    b'\n"):
+            self.assertTrue(yaml_shortcuts(text), text)
+        closed = "on: [push, 'workflow_dispatch']\nname: it's a deploy\nb: {c: [d, e]}\nrun: |\n  if [ -n x ]; then\n"
+        self.assertEqual(yaml_shortcuts(closed), [])
         # Only printable ASCII, so no parser can find a line break the guard does not, anywhere in the file.
         for character in ("\u2028", "\x85", "\x0b", "\ufeff", "\u00e9"):
             self.assertEqual([n for n, _ in yaml_shortcuts("jobs:\n  a: |\n    x" + character + "y\n")], [3], repr(character))
