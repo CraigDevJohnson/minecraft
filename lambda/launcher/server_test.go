@@ -218,6 +218,7 @@ func TestAllowlistAnswers(t *testing.T) {
 		{"updated", &fakeLauncher{allowlist: updated}, request, 200, "updated", 1},
 		{"not ready", &fakeLauncher{err: ErrServerNotReady{State: Stopped}}, request, 409, "not_ready", 1},
 		{"unknown player", &fakeLauncher{err: ErrPlayerNotFound}, request, 404, "player_not_found", 1},
+		{"linked gamertag", &fakeLauncher{err: ErrLinkedAccount}, request, 409, "linked_account", 1},
 		{"adapter failure", &fakeLauncher{err: errors.New("the host's adapter refused the allowlist change")}, request, 502, "allowlist_failed", 1},
 		{"bad operation", &fakeLauncher{allowlist: updated}, `{"operation":"ban","edition":"java","name":"Steve"}`, 400, "bad_request", 0},
 		{"bad edition", &fakeLauncher{allowlist: updated}, `{"operation":"add","edition":"pocket","name":"Steve"}`, 400, "bad_request", 0},

@@ -176,6 +176,79 @@ func TestParkingLeavesAStartThatBeganMeanwhileAlone(t *testing.T) {
 	}
 }
 
+func TestAStopLostAfterEC2StoppedTheHostIsParkedByARepeatedStop(t *testing.T) {
+	r := stopRig(t)
+	var owed Session
+	r.ec2.onStop = func() { owed = r.session(t) }
+	if err := r.launcher.FinishStop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if owed.Phase != Stopping || owed.DNS != "pending" || owed.DrainCommandID != commandID {
+		t.Fatalf("the record must owe the parking before EC2 stops the host: %+v", owed)
+	}
+	// The run that stopped EC2 ended there, or its handoff failed: the host is off, the record owes the parking.
+	failed := owed
+	failed.Phase, failed.Detail = StopFailed, "hand off the rest of the stop: throttled"
+	for _, tc := range []struct {
+		lost Session
+		want string
+	}{{owed, Stopped}, {failed, StopFailed}} {
+		r := newRig(ec2types.InstanceStateNameStopped, time.Hour)
+		r.setSession(t, tc.lost)
+		if status, err := r.launcher.Status(context.Background()); err != nil || status.State != Stopped || status.Connection.Java != nil {
+			t.Fatalf("%s: an unparked hostname must not be offered: %+v err=%v", tc.lost.Phase, status, err)
+		}
+		status, stopped, err := r.launcher.Stop(context.Background(), false)
+		if err != nil || stopped || status.State != Stopped || status.Connection.Java == nil || strings.Join(r.pointedAt, ",") != parkedAddress || r.ec2.stops != 0 {
+			t.Fatalf("%s: err=%v stopped=%v status=%+v pointed=%v stops=%d", tc.lost.Phase, err, stopped, status, r.pointedAt, r.ec2.stops)
+		}
+		if session := r.session(t); session.Phase != tc.want || session.DNS != "current" || !session.RequestedAt.Equal(now) {
+			t.Fatalf("%s: session %+v", tc.lost.Phase, session)
+		}
+	}
+	// A stop that failed before EC2 stopped the host owes nothing: whoever stopped the host later parked it.
+	r = newRig(ec2types.InstanceStateNameStopped, time.Hour)
+	r.setSession(t, Session{RequestedAt: now, LaunchTime: now.Add(-time.Hour), Phase: StopFailed, Detail: "the drain ended with status Failed"})
+	if status, _, err := r.launcher.Stop(context.Background(), false); err != nil || status.Connection.Java == nil || len(r.pointedAt) != 0 {
+		t.Fatalf("status=%+v err=%v pointed=%v", status, err, r.pointedAt)
+	}
+}
+
+func TestParkingGivesTheHostnameBackToAStartThatRanMeanwhile(t *testing.T) {
+	start := Session{RequestedAt: now.Add(time.Minute), Phase: Starting}
+	// A Member started the host while the park was on its way, and the start's follow-up pointed the hostname
+	// at the new run before the park landed.
+	startMeanwhile := func(r *rig) {
+		r.launcher.PointDNS = func(_ context.Context, target string) error {
+			r.pointedAt = append(r.pointedAt, target)
+			if target == parkedAddress {
+				r.setSession(t, start)
+				r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameRunning}
+				r.ec2.launch = now.Add(time.Minute)
+			}
+			return nil
+		}
+	}
+	r := stopRig(t)
+	startMeanwhile(r)
+	_ = r.launcher.FinishStop(context.Background())
+	if strings.Join(r.pointedAt, ",") != parkedAddress+","+address {
+		t.Fatalf("the follow-up's park outlasted the start: pointed=%v", r.pointedAt)
+	}
+	if session := r.session(t); session != start {
+		t.Fatalf("the start's record was overwritten: %+v", session)
+	}
+	r = newRig(ec2types.InstanceStateNameStopped, time.Hour)
+	r.setSession(t, Session{RequestedAt: now.Add(-time.Hour), LaunchTime: now.Add(-2 * time.Hour), Phase: Stopped, DNS: "failed"})
+	startMeanwhile(r)
+	if _, _, err := r.launcher.Stop(context.Background(), false); err != nil || strings.Join(r.pointedAt, ",") != parkedAddress+","+address {
+		t.Fatalf("a repeated stop's park outlasted the start: err=%v pointed=%v", err, r.pointedAt)
+	}
+	if session := r.session(t); session != start {
+		t.Fatalf("the start's record was overwritten: %+v", session)
+	}
+}
+
 func TestStatusFollowsTheHostOnceOurStopRanOut(t *testing.T) {
 	stale := Session{RequestedAt: now.Add(-stopDeadline), LaunchTime: now.Add(-2 * time.Hour), Phase: Stopping, DrainCommandID: commandID}
 	r := newRig(ec2types.InstanceStateNameRunning, 2*time.Hour)

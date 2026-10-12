@@ -195,6 +195,9 @@ func (s *Server) allowlist(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrPlayerNotFound):
 		s.Log.Info("allowlist refused", "member", member, "reason", "player_not_found", "edition", request.Edition)
 		writeJSON(w, http.StatusNotFound, map[string]string{"code": "player_not_found"})
+	case errors.Is(err, ErrLinkedAccount):
+		s.Log.Info("allowlist refused", "member", member, "reason", "linked_account", "edition", request.Edition)
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "linked_account"})
 	case err != nil:
 		s.Log.Error("allowlist", "member", member, "edition", request.Edition, "operation", request.Operation, "err", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"code": "allowlist_failed"})

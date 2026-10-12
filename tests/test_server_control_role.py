@@ -63,7 +63,7 @@ class ServerControlRoleTests(unittest.TestCase):
                 text = (ROOT / f".github/workflows/{name}.yml").read_text()
                 for denied in ["pull_request:", "pull_request_target:", "workflow_call:", "schedule:", "aws-access-key-id:", "aws-secret-access-key:"]:
                     self.assertNotIn(denied, text)
-                for required in ["workflow_dispatch:", "github.ref == 'refs/heads/main'", "github.repository_id == '1359070973'", "github.repository_owner_id == '42454849'", "persist-credentials: false", "allowed-account-ids: '793680745829'", "audience: sts.amazonaws.com", f"vars.{role_variable}", "::add-mask::"]:
+                for required in ["workflow_dispatch:", "github.ref == 'refs/heads/main'", "github.repository_id == '1359070973'", "github.repository_owner_id == '42454849'", "github.actor_id == '42454849'", "github.triggering_actor == 'CraigDevJohnson'", "persist-credentials: false", "allowed-account-ids: '793680745829'", "audience: sts.amazonaws.com", f"vars.{role_variable}", "::add-mask::"]:
                     self.assertIn(required, text)
                 self.assertEqual(text.count("id-token: write"), 1)
         server = (ROOT / ".github/workflows/server-control.yml").read_text()

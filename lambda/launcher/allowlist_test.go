@@ -33,6 +33,9 @@ func allowlistRig(t *testing.T) (*rig, *[]string) {
 		if name == "Nobody" {
 			return Player{}, ErrPlayerNotFound
 		}
+		if name == "Linked Player" {
+			return Player{}, ErrLinkedAccount
+		}
 		if name == "Outage" {
 			return Player{}, errors.New("Mojang answered 503")
 		}
@@ -108,6 +111,11 @@ func TestAllowlistNeverSendsAnUnknownPlayer(t *testing.T) {
 	}
 	if _, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Outage"}); err == nil || errors.Is(err, ErrPlayerNotFound) || !strings.Contains(err.Error(), "look up player") {
 		t.Fatalf("err=%v", err)
+	}
+	for _, operation := range []string{"add", "remove"} {
+		if _, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: operation, Edition: "bedrock", Name: "Linked Player"}); !errors.Is(err, ErrLinkedAccount) {
+			t.Fatalf("%s: err=%v; a linked gamertag's own entry would not change who may join", operation, err)
+		}
 	}
 	if len(r.ssm.commands) != 0 {
 		t.Fatal("a failed lookup must send nothing")
@@ -194,6 +202,20 @@ func lookupServer(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"message": "Unable to find user in our cache. Please try specifying a different gamertag."}`))
 		case "/v2/xbox/xuid/Zero":
 			_, _ = w.Write([]byte(`{"xuid": 0}`))
+		case "/v2/link/bedrock/2535428175563874":
+			_, _ = w.Write([]byte(`{}`))
+		case "/v2/xbox/xuid/Linked Player":
+			_, _ = w.Write([]byte(`{"xuid": 2535400000000001}`))
+		case "/v2/link/bedrock/2535400000000001":
+			_, _ = w.Write([]byte(`{"bedrock_id": 2535400000000001, "java_id": "069a79f4-44e9-4726-a5be-fca90e38aaf5", "java_name": "Steve", "last_name_update": 1700000000000}`))
+		case "/v2/xbox/xuid/Link Missing":
+			_, _ = w.Write([]byte(`{"xuid": 2535400000000002}`))
+		case "/v2/link/bedrock/2535400000000002":
+			w.WriteHeader(http.StatusNotFound)
+		case "/v2/xbox/xuid/Link Outage":
+			_, _ = w.Write([]byte(`{"xuid": 2535400000000003}`))
+		case "/v2/link/bedrock/2535400000000003":
+			w.WriteHeader(http.StatusServiceUnavailable)
 		default:
 			w.WriteHeader(http.StatusTeapot)
 		}
@@ -212,6 +234,22 @@ func TestLookupResolvesJavaAndBedrockPlayers(t *testing.T) {
 	// 2535428175563874 is 0x000901f55fc20c62: the XUID's top 16 bits and low 48 bits make the Floodgate UUID.
 	if err != nil || player != (Player{UUID: "00000000-0000-0000-0009-01f55fc20c62", Name: "Sample Player"}) {
 		t.Fatalf("player=%+v err=%v", player, err)
+	}
+}
+
+func TestLookupRefusesAGamertagLinkedToAJavaAccount(t *testing.T) {
+	server := lookupServer(t)
+	defer server.Close()
+	lookup := &PlayerLookup{Client: lookupClient(), Mojang: server.URL, Geyser: server.URL}
+	if _, err := lookup.Lookup(context.Background(), "bedrock", "Linked Player"); !errors.Is(err, ErrLinkedAccount) {
+		t.Fatalf("err=%v; Floodgate admits a linked gamertag as its Java account", err)
+	}
+	// Not knowing whether the gamertag is linked is a lookup failure, never a missing player or a clean answer.
+	for _, tc := range []struct{ name, want string }{{"Link Missing", "did not say whether"}, {"Link Outage", "GeyserMC answered 503"}} {
+		_, err := lookup.Lookup(context.Background(), "bedrock", tc.name)
+		if err == nil || errors.Is(err, ErrPlayerNotFound) || errors.Is(err, ErrLinkedAccount) || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: err=%v", tc.name, err)
+		}
 	}
 }
 

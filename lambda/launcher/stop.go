@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -71,15 +72,18 @@ func (l *Launcher) Stop(ctx context.Context, force bool) (Status, bool, error) {
 	case h.state == ec2types.InstanceStateNamePending || state == Starting:
 		return l.answer(state, current), false, ErrStarting
 	case h.state == ec2types.InstanceStateNameStopped && unparked(session):
-		// A stop of ours stopped the host but could not park the hostname, which still points at the old
+		// A stop of ours has the host off but did not park the hostname, which may still point at the old
 		// address: park it now. Until that succeeds the status shows no address.
-		if err := l.PointDNS(ctx, parkedAddress); err != nil {
-			return l.answer(state, session), false, fmt.Errorf("park the hostname: %w", err)
+		if err := l.park(ctx, session); err != nil {
+			return l.answer(state, current), false, fmt.Errorf("park the hostname: %w", err)
 		}
 		parked := session
 		parked.DNS = "current"
+		if parked.Phase == Stopping {
+			parked.Phase, parked.Detail = Stopped, ""
+		}
 		if err := l.saveParked(ctx, parked); err != nil {
-			return l.answer(state, session), false, err
+			return l.answer(state, current), false, err
 		}
 		return l.answer(state, parked), false, nil
 	case h.state != ec2types.InstanceStateNameRunning || state == Stopping:
@@ -109,9 +113,43 @@ func (l *Launcher) Stop(ctx context.Context, force bool) (Status, bool, error) {
 	return l.answer(Stopping, session), true, nil
 }
 
-// unparked reports whether a finished stop of ours left the hostname pointing at the host's old address.
+// unparked reports whether a stop of ours may have left the hostname pointing at the host's old address once
+// the host is off: its parking failed, or its run ended between the EC2 stop and the parking.
 func unparked(session Session) bool {
-	return session.Phase == Stopped && session.DNS == "failed"
+	switch session.Phase {
+	case Stopping, StopFailed, Stopped:
+		return session.DNS == "pending" || session.DNS == "failed"
+	}
+	return false
+}
+
+// park points the players' hostname at the parked address once a stop of ours has the host off. A Member may
+// start the host as soon as EC2 shows it stopped, and that start's follow-up points the hostname at the new
+// run once it runs; a park that lands after that would leave a ready game without its address. So once the
+// park is done, a start recorded meanwhile whose host already runs gets the hostname back. A start recorded
+// after that check points the hostname itself once its host runs, which is later than this park.
+func (l *Launcher) park(ctx context.Context, stop Session) error {
+	if err := l.PointDNS(ctx, parkedAddress); err != nil {
+		return err
+	}
+	saved, err := l.loadSession(ctx)
+	if err != nil {
+		return fmt.Errorf("check for a start after parking: %w", err)
+	}
+	if saved.RequestedAt.Equal(stop.RequestedAt) {
+		return nil
+	}
+	h, err := l.describeHost(ctx)
+	if err != nil {
+		return fmt.Errorf("check for a start after parking: %w", err)
+	}
+	if h.state != ec2types.InstanceStateNameRunning || net.ParseIP(h.publicIP) == nil {
+		return nil
+	}
+	if err := l.PointDNS(ctx, h.publicIP); err != nil {
+		return fmt.Errorf("point the hostname back at the host a start ran meanwhile: %w", err)
+	}
+	return nil
 }
 
 // saveParked records the parked hostname on the stop's own record. A start that began meanwhile owns the
@@ -195,30 +233,42 @@ func (l *Launcher) stopSteps(ctx context.Context, session *Session) error {
 		if err := l.confirmDrain(ctx); err != nil {
 			return err
 		}
-		if _, err := l.EC2.StopInstances(ctx, &ec2.StopInstancesInput{InstanceIds: []string{l.Config.HostID}}); err != nil {
-			return fmt.Errorf("stop host after verified drain: %w", err)
-		}
 	case ec2types.InstanceStateNameStopping, ec2types.InstanceStateNameStopped:
 		// An earlier run of this stop, or someone else's stop, got there first. The drain's evidence above
 		// stands, and the host can no longer answer a command; this run waits, parks and records the outcome.
 	default:
 		return fmt.Errorf("host cannot be stopped from %s", h.state)
 	}
+	// The record owes the parking before the host goes off, so a stop whose run ends between the EC2 stop and
+	// the parking, or whose last record is lost, shows no address once the host is off and is parked by a
+	// repeated stop.
+	if session.DNS != "pending" {
+		session.DNS = "pending"
+		if err := l.saveOwned(ctx, *session); err != nil {
+			return err
+		}
+	}
+	if h.state == ec2types.InstanceStateNameRunning {
+		if _, err := l.EC2.StopInstances(ctx, &ec2.StopInstancesInput{InstanceIds: []string{l.Config.HostID}}); err != nil {
+			return fmt.Errorf("stop host after verified drain: %w", err)
+		}
+	}
 	if err := l.waitStopped(ctx); err != nil {
 		return err
 	}
 	// Parking goes last, as in the workstation stop; its failure is recorded and alarmed, never hidden.
+	parkErr := l.park(ctx, *session)
 	session.DNS = "current"
-	if err := l.PointDNS(ctx, parkedAddress); err != nil {
+	if parkErr != nil {
 		session.DNS = "failed"
 	}
 	session.Phase = Stopped
 	session.Detail = ""
 	if err := l.saveOwned(ctx, *session); err != nil {
-		return err
+		return errors.Join(parkErr, err)
 	}
-	if session.DNS == "failed" {
-		return errors.New("the host stopped but DNS was not parked")
+	if parkErr != nil {
+		return fmt.Errorf("the host stopped but DNS was not parked: %w", parkErr)
 	}
 	return nil
 }

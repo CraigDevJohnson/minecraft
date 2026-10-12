@@ -57,6 +57,9 @@ var (
 	ErrBadAllowlistRequest = errors.New("bad allowlist request")
 	// ErrPlayerNotFound means no account of that edition has the name.
 	ErrPlayerNotFound = errors.New("no such player")
+	// ErrLinkedAccount means the gamertag is linked to a Java account, which is the identity the server
+	// sees when that player joins: the Java account's name is the one to allowlist.
+	ErrLinkedAccount = errors.New("the gamertag is linked to a Java account")
 )
 
 // ErrServerNotReady refuses an allowlist change while the game is not answering: the adapter changes the
@@ -123,7 +126,7 @@ func (l *Launcher) Allowlist(ctx context.Context, request AllowlistRequest) (All
 		return AllowlistResult{}, ErrServerNotReady{State: state}
 	}
 	player, err := l.LookupPlayer(ctx, request.Edition, request.Name)
-	if errors.Is(err, ErrPlayerNotFound) {
+	if errors.Is(err, ErrPlayerNotFound) || errors.Is(err, ErrLinkedAccount) {
 		return AllowlistResult{}, err
 	}
 	if err != nil {

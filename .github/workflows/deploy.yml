@@ -2,7 +2,9 @@
 # only when Craig starts it by hand (Run workflow): mode plan posts the plan to
 # the run summary, and mode apply, which he starts after reading that plan, is
 # his approval of that change. No push starts it, because every run holds the
-# operator's write credentials. The one job runs in the deploy GitHub
+# operator's write credentials, and the job runs only when Craig's own account
+# started the run (and any re-run of it), so another collaborator or an app
+# with write access cannot start it either. The one job runs in the deploy GitHub
 # Environment, which holds the private inputs and which only main may use.
 # GitHub offers no required reviewer on a private repository below the
 # Enterprise plan, so the gate is starting the run, not an environment
@@ -39,6 +41,8 @@ jobs:
       github.repository == 'CraigDevJohnson/minecraft' &&
       github.repository_id == '1359070973' &&
       github.repository_owner_id == '42454849' &&
+      github.actor_id == '42454849' &&
+      github.triggering_actor == 'CraigDevJohnson' &&
       github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 30

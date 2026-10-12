@@ -1,6 +1,8 @@
 # Controls the family server from anywhere with GitHub: status, start, stop and
 # allowlist changes, each one signed request to the launcher's Function URL.
-# Nothing runs here but that request; the launcher does the work in AWS. See
+# Nothing runs here but that request; the launcher does the work in AWS. The
+# job runs only when Craig's own account started the run (and any re-run of it):
+# the launcher treats this role as the operator. See
 # docs/operations/cloud-controls.md and ADR 0006.
 #
 # The minecraft-server-control role trusts this job through GitHub OIDC with
@@ -48,6 +50,8 @@ jobs:
       github.repository == 'CraigDevJohnson/minecraft' &&
       github.repository_id == '1359070973' &&
       github.repository_owner_id == '42454849' &&
+      github.actor_id == '42454849' &&
+      github.triggering_actor == 'CraigDevJohnson' &&
       github.ref == 'refs/heads/main' &&
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04

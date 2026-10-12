@@ -89,8 +89,10 @@ type Session struct {
 	RequestedAt time.Time `json:"requested_at,omitzero"`
 	LaunchTime  time.Time `json:"launch_time,omitzero"`
 	// Phase is starting, ready or failed for a start; stopping, stopped or stop-failed for a stop.
-	Phase  string `json:"phase,omitempty"`
-	DNS    string `json:"dns,omitempty"` // current or failed
+	Phase string `json:"phase,omitempty"`
+	// DNS is current or failed once a start or stop has pointed or parked the hostname, and pending while a
+	// stop owes its parking.
+	DNS    string `json:"dns,omitempty"`
 	Detail string `json:"detail,omitempty"`
 	// A stop's drain command on the host, once sent, so a fresh run can follow it where the last one ended.
 	DrainCommandID string    `json:"drain_command_id,omitempty"`
@@ -340,8 +342,9 @@ func (l *Launcher) current(h host, session Session) Session {
 		return current
 	}
 	if h.state == ec2types.InstanceStateNameStopped && unparked(session) {
-		// The host is off but the hostname still points at its old address: a repeated stop parks it.
-		return session
+		// The host is off but the hostname may still point at its old address: the status shows none until a
+		// repeated stop parks it.
+		return Session{DNS: "failed"}
 	}
 	return Session{}
 }

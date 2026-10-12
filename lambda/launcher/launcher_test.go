@@ -41,6 +41,8 @@ type fakeEC2 struct {
 	stops    int
 	// onDescribe runs at each DescribeInstances, before its answer.
 	onDescribe func()
+	// onStop runs at each StopInstances.
+	onStop func()
 }
 
 func (f *fakeEC2) DescribeInstances(context.Context, *ec2.DescribeInstancesInput, ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
@@ -83,6 +85,9 @@ func (f *fakeEC2) StopInstances(_ context.Context, input *ec2.StopInstancesInput
 		panic("stopped another host")
 	}
 	f.stops++
+	if f.onStop != nil {
+		f.onStop()
+	}
 	return &ec2.StopInstancesOutput{}, f.stopErr
 }
 
