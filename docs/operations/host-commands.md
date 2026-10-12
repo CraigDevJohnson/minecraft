@@ -1,5 +1,7 @@
 # Host and session commands
 
+Everyday operation no longer uses these commands: the launcher starts, stops and allowlists the server from AWS, asked from the `/minecraft` page, the Server control workflow or `task server:*` ([cloud controls](cloud-controls.md), [ADR 0006](../adr/0006-cloud-controls.md)). The commands below remain for restoring an archive, the Crafty console over a port-forward, and a hands-on emergency.
+
 Run `scripts/minecraft_host.py` on the operator computer with Python 3.11+ and AWS CLI v2 installed. AWS CLI was available during implementation; the repository does not install it. Use the existing operator AWS profile/session. The game host's IAM role receives no EC2 start/stop permissions.
 
 The private deployment handoff is the direct JSON object produced by `tofu output -json deployment`, described in [infrastructure operations](infrastructure.md). The command consumes `account_id`, `host_id`, `region`, and the `instances` mapping, plus `public_hostname` and `cloudflare_zone_id` when the deployment has them. `account_id` must be a 12-digit ASCII string, matching the reviewed infrastructure account. Keep this file private and outside tracked files; it contains deployment identifiers. For example, after an authorized deployment:

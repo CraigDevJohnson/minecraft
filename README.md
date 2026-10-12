@@ -19,6 +19,7 @@ Report suspected vulnerabilities using the [security policy](SECURITY.md).
 - [Live persistence and recovery rehearsal](docs/operations/live-recovery-rehearsal.md)
 - [Optional idle stop](docs/operations/idle-stop.md)
 - [Launcher backend for The Lobby](docs/operations/launcher.md)
+- [Cloud controls: stop, start, allowlist and deploy from anywhere](docs/operations/cloud-controls.md)
 - [Pinned content and explicit local runtime validation](docs/operations/runtime-content.md)
 - [Family device joins, console rollback, and play acceptance](docs/operations/family-device-validation.md)
 - [Creative world, separate ports and shared-host operation](docs/operations/creative-world.md)
