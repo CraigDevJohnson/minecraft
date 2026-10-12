@@ -98,6 +98,7 @@ type fakeSSM struct {
 	putErr     error
 	online     []bool // successive SSM ping answers; the last repeats
 	commands   []string
+	limits     []string                         // each command's executionTimeout
 	invocation []ssm.GetCommandInvocationOutput // successive answers; the last repeats
 }
 
@@ -134,6 +135,7 @@ func (f *fakeSSM) SendCommand(_ context.Context, input *ssm.SendCommandInput, _ 
 		panic("sent a command to another host or document")
 	}
 	f.commands = append(f.commands, input.Parameters["commands"]...)
+	f.limits = append(f.limits, input.Parameters["executionTimeout"]...)
 	return &ssm.SendCommandOutput{Command: &ssmtypes.Command{CommandId: aws.String(commandID)}}, nil
 }
 

@@ -21,11 +21,14 @@ import (
 // docs/operations/allowlist.md describes for the workstation, with the player's verified identity looked up
 // first so a typo never reaches the server.
 const (
-	// allowlistTimeout bounds the whole change: SSM delivery, the adapter's own 60-second verification and
-	// margin. The caller waits for the answer.
-	allowlistTimeout = 3 * time.Minute
-	// allowlistExecutionSeconds is the adapter's execution limit on the host.
-	allowlistExecutionSeconds = 120
+	// allowlistTimeout bounds the whole change: SSM delivery, the adapter's execution limit and margin. The
+	// caller waits for the answer.
+	allowlistTimeout = 6 * time.Minute
+	// allowlistExecutionSeconds is the adapter's execution limit on the host. It covers every bounded step, so
+	// a slow but working Crafty never cuts off a change already sent: the adapter install, four Crafty API
+	// calls of up to 30 seconds each (the server list, its stats, the console line and a name-only removal's
+	// reload), the 60-second verification, and margin.
+	allowlistExecutionSeconds = 240
 )
 
 var javaName = regexp.MustCompile(`^[A-Za-z0-9_]{3,16}$`)

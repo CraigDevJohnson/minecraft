@@ -59,6 +59,10 @@ func TestAllowlistRunsTheAdapterWithThePlayersIdentity(t *testing.T) {
 	if len(r.ssm.commands) != 1 {
 		t.Fatalf("commands %v", r.ssm.commands)
 	}
+	// Four Crafty calls of up to 30 seconds, the 60-second verification and the install must all fit.
+	if len(r.ssm.limits) != 1 || r.ssm.limits[0] != "240" {
+		t.Fatalf("execution limits %v", r.ssm.limits)
+	}
 	script := r.ssm.commands[0]
 	encoded, _ := json.Marshal(steve)
 	for _, want := range []string{
