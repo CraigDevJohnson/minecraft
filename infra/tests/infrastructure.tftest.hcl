@@ -422,7 +422,7 @@ run "idle_stop_drains_and_stops_only_this_host" {
   }
 
   assert {
-    condition     = aws_lambda_function.idle_stop[0].environment[0].variables == tomap({ HOST_ID = "i-0123456789abcdef0", STATE_PARAMETER = "/minecraft-test/idle-stop/state", PUBLIC_HOSTNAME = "mc.example.com", CLOUDFLARE_ZONE_ID = "0123456789abcdef0123456789abcdef", CLOUDFLARE_TOKEN_SECRET_ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef", IDLE_MINUTES = "30", INSTANCES = "survival" })
+    condition     = aws_lambda_function.idle_stop[0].environment[0].variables == tomap({ HOST_ID = "i-0123456789abcdef0", STATE_PARAMETER = "/minecraft-test/idle-stop/state", PUBLIC_HOSTNAME = "mc.example.com", CLOUDFLARE_ZONE_ID = "0123456789abcdef0123456789abcdef", CLOUDFLARE_TOKEN_SECRET_ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef", IDLE_MINUTES = "30", INSTANCES = "survival", LAUNCHER_STATE_PARAMETER = "" })
     error_message = "The function must target this host, its own state, the game endpoint and the configured instances, with a 30-minute default."
   }
 
@@ -795,15 +795,16 @@ run "launcher_starts_only_this_host_for_only_the_site" {
     condition = toset([for statement in jsondecode(aws_iam_role_policy.launcher["dev"].policy).Statement : jsonencode(statement)]) == toset([
       jsonencode({ Sid = "ObserveHost", Effect = "Allow", Action = ["ec2:DescribeInstances"], Resource = "*" }),
       jsonencode({ Sid = "StartOnlyThisHost", Effect = "Allow", Action = ["ec2:StartInstances"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0123456789abcdef0"] }),
+      jsonencode({ Sid = "StopOnlyThisHost", Effect = "Allow", Action = ["ec2:StopInstances"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0123456789abcdef0"] }),
       jsonencode({ Sid = "StartGameOnlyOnThisHostWithShellDocument", Effect = "Allow", Action = ["ssm:SendCommand"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0123456789abcdef0", "arn:aws:ssm:us-west-2::document/AWS-RunShellScript"] }),
       jsonencode({ Sid = "FollowStart", Effect = "Allow", Action = ["ssm:GetCommandInvocation", "ssm:DescribeInstanceInformation"], Resource = "*" }),
       jsonencode({ Sid = "OwnStateOnly", Effect = "Allow", Action = ["ssm:GetParameter", "ssm:PutParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/state"] }),
       jsonencode({ Sid = "ReadOnlyCloudflareToken", Effect = "Allow", Action = ["ssm:GetParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/cloudflare-token"] }),
       jsonencode({ Sid = "DecryptTokenThroughSsmOnly", Effect = "Allow", Action = ["kms:Decrypt"], Resource = ["arn:aws:kms:us-west-2:111122223333:key/*"], Condition = { StringEquals = { "kms:ViaService" = "ssm.us-west-2.amazonaws.com" }, "ForAnyValue:StringEquals" = { "kms:ResourceAliases" = "alias/aws/ssm" } } }),
-      jsonencode({ Sid = "FinishStartsInItself", Effect = "Allow", Action = ["lambda:InvokeFunction"], Resource = ["arn:aws:lambda:us-west-2:111122223333:function:minecraft-test-dev-launcher"] }),
+      jsonencode({ Sid = "FollowUpInItself", Effect = "Allow", Action = ["lambda:InvokeFunction"], Resource = ["arn:aws:lambda:us-west-2:111122223333:function:minecraft-test-dev-launcher"] }),
       jsonencode({ Sid = "OwnLogsOnly", Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = ["arn:aws:logs:us-west-2:111122223333:log-group:/aws/lambda/minecraft-test-dev-launcher:*"] }),
     ])
-    error_message = "The launcher may start only this host and its game, and read only its own state, token and logs. It can never stop the host."
+    error_message = "The launcher may start and stop only this host and drive only its game, and read only its own state, token and logs."
   }
 
   assert {
@@ -817,13 +818,13 @@ run "launcher_starts_only_this_host_for_only_the_site" {
   }
 
   assert {
-    condition     = aws_lambda_function_url.launcher["dev"].authorization_type == "AWS_IAM" && aws_lambda_permission.launcher_url["dev"].principal == "arn:aws:iam::111122223333:role/site-dev-server" && aws_lambda_permission.launcher_url["dev"].function_url_auth_type == "AWS_IAM" && aws_lambda_permission.launcher_invoke["dev"].principal == "arn:aws:iam::111122223333:role/site-dev-server" && aws_lambda_permission.launcher_invoke["dev"].invoked_via_function_url == true
-    error_message = "Only the site's role may call the launcher, and only through its signed Function URL."
+    condition     = aws_lambda_function_url.launcher["dev"].authorization_type == "AWS_IAM" && aws_lambda_permission.launcher_url["dev"].principal == "arn:aws:iam::111122223333:role/site-dev-server" && aws_lambda_permission.launcher_url["dev"].function_url_auth_type == "AWS_IAM" && aws_lambda_permission.launcher_invoke["dev"].principal == "arn:aws:iam::111122223333:role/site-dev-server" && aws_lambda_permission.launcher_invoke["dev"].invoked_via_function_url == true && length(aws_lambda_permission.launcher_control_url) == 0 && length(aws_lambda_permission.launcher_control_invoke) == 0
+    error_message = "Only the site's role may call the launcher, and only through its signed Function URL, until a control role is configured."
   }
 
   assert {
-    condition     = aws_ssm_parameter.launcher_state[0].type == "String" && aws_cloudwatch_log_group.launcher["dev"].retention_in_days == 30 && toset([for query in aws_cloudwatch_metric_alarm.launcher_failing["dev"].metric_query : "${query.metric[0].namespace}/${query.metric[0].metric_name}/${query.metric[0].dimensions["FunctionName"]}" if length(query.metric) > 0]) == toset(["AWS/Lambda/Errors/minecraft-test-dev-launcher", "AWS/Lambda/AsyncEventsDropped/minecraft-test-dev-launcher", "Minecraft/Launcher/StartFailures/minecraft-test-dev-launcher"]) && aws_sns_topic_subscription.launcher_alerts["dev"].endpoint == "operator@example.invalid"
-    error_message = "State must be a plain parameter, logs must expire after 30 days, and a failed start must email the private budget recipient."
+    condition     = aws_ssm_parameter.launcher_state[0].type == "String" && aws_cloudwatch_log_group.launcher["dev"].retention_in_days == 30 && toset([for query in aws_cloudwatch_metric_alarm.launcher_failing["dev"].metric_query : "${query.metric[0].namespace}/${query.metric[0].metric_name}/${query.metric[0].dimensions["FunctionName"]}" if length(query.metric) > 0]) == toset(["AWS/Lambda/Errors/minecraft-test-dev-launcher", "AWS/Lambda/AsyncEventsDropped/minecraft-test-dev-launcher", "Minecraft/Launcher/StartFailures/minecraft-test-dev-launcher", "Minecraft/Launcher/StopFailures/minecraft-test-dev-launcher"]) && aws_sns_topic_subscription.launcher_alerts["dev"].endpoint == "operator@example.invalid"
+    error_message = "State must be a plain parameter, logs must expire after 30 days, and a failed start or stop must email the private budget recipient."
   }
 }
 
@@ -849,6 +850,64 @@ run "launcher_sees_the_idle_stop_drain" {
     condition     = one([for statement in jsondecode(aws_iam_role_policy.launcher["dev"].policy).Statement : statement if statement.Sid == "ReadIdleStopProgress"]) == { Sid = "ReadIdleStopProgress", Effect = "Allow", Action = ["ssm:GetParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/idle-stop/state"] }
     error_message = "The launcher may only read the idle stop's state, never write it."
   }
+
+  assert {
+    condition     = one([for statement in jsondecode(aws_iam_role_policy.idle_stop[0].policy).Statement : statement if statement.Sid == "ReadLauncherProgress"]) == { Sid = "ReadLauncherProgress", Effect = "Allow", Action = ["ssm:GetParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/state"] } && aws_lambda_function.idle_stop[0].environment[0].variables["LAUNCHER_STATE_PARAMETER"] == "/minecraft-test/launcher/state"
+    error_message = "The idle stop may only read the launcher's state, never write it, so it stands aside while the launcher stops the host."
+  }
+}
+
+run "launcher_admits_the_control_role_on_every_site" {
+  command = plan
+  variables {
+    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server", prod = "arn:aws:iam::111122223333:role/site-prod-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary", control_role_arn = "arn:aws:iam::111122223333:role/minecraft-server-control" }
+  }
+  assert {
+    condition     = keys(aws_lambda_permission.launcher_control_url) == ["dev", "prod"] && aws_lambda_permission.launcher_control_url["dev"].principal == "arn:aws:iam::111122223333:role/minecraft-server-control" && aws_lambda_permission.launcher_control_url["prod"].function_url_auth_type == "AWS_IAM" && aws_lambda_permission.launcher_control_invoke["prod"].principal == "arn:aws:iam::111122223333:role/minecraft-server-control" && aws_lambda_permission.launcher_control_invoke["dev"].invoked_via_function_url == true
+    error_message = "The control role may call each site's function, only through its signed Function URL, beside that site's own role."
+  }
+  assert {
+    condition     = aws_lambda_permission.launcher_url["dev"].principal == "arn:aws:iam::111122223333:role/site-dev-server" && aws_lambda_permission.launcher_url["prod"].principal == "arn:aws:iam::111122223333:role/site-prod-server"
+    error_message = "The sites' own permissions must stay as they are beside the control role's."
+  }
+}
+
+run "reject_a_control_role_in_another_account" {
+  command = plan
+  variables {
+    launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary", control_role_arn = "arn:aws:iam::999900001111:role/minecraft-server-control" }
+  }
+  expect_failures = [var.launcher]
+}
+
+run "ci_deploys_as_the_operator_without_assuming_it" {
+  command = plan
+  variables {
+    operator_role_arn = null
+    package_dir       = "tests/fixtures/packages"
+    launcher          = { sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
+    idle_stop         = { cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef" }
+  }
+  assert {
+    condition     = output.deployment.operator_role_arn == null && aws_lambda_function.launcher["dev"].filename == "tests/fixtures/packages/launcher.zip" && aws_lambda_function.idle_stop[0].filename == "tests/fixtures/packages/idle-stop.zip"
+    error_message = "The Deploy workflow runs as the operator role itself and reads both packages from package_dir; the private inputs name no package paths."
+  }
+}
+
+run "reject_a_function_without_a_package_anywhere" {
+  command = plan
+  variables {
+    launcher = { sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
+  }
+  expect_failures = [var.launcher]
+}
+
+run "reject_a_package_dir_with_a_trailing_slash" {
+  command = plan
+  variables {
+    package_dir = "tests/fixtures/packages/"
+  }
+  expect_failures = [var.package_dir]
 }
 
 run "launcher_serves_every_site_from_one_start_record" {
@@ -869,7 +928,7 @@ run "launcher_serves_every_site_from_one_start_record" {
     error_message = "Every environment's function must start the same host from the same start record and token, so a start from one site shows on the others."
   }
   assert {
-    condition     = one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "FinishStartsInItself"]).Resource == ["arn:aws:lambda:us-west-2:111122223333:function:minecraft-test-prod-launcher"] && one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "OwnLogsOnly"]).Resource == ["arn:aws:logs:us-west-2:111122223333:log-group:/aws/lambda/minecraft-test-prod-launcher:*"] && one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "OwnStateOnly"]).Resource == ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/state"]
+    condition     = one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "FollowUpInItself"]).Resource == ["arn:aws:lambda:us-west-2:111122223333:function:minecraft-test-prod-launcher"] && one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "OwnLogsOnly"]).Resource == ["arn:aws:logs:us-west-2:111122223333:log-group:/aws/lambda/minecraft-test-prod-launcher:*"] && one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "OwnStateOnly"]).Resource == ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/state"]
     error_message = "A function may finish starts only in itself and write only its own logs, while sharing the one start record."
   }
   assert {

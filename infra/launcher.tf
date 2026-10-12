@@ -2,6 +2,10 @@ locals {
   # One function per Lobby environment the launcher serves (var.launcher.sites), all starting the same host.
   launcher_sites = var.launcher == null ? {} : var.launcher.sites
   launcher_count = var.launcher == null ? 0 : 1
+  # The operator's control role (the Server control workflow and the Task targets) may call every site's
+  # function; without one, only the sites may.
+  launcher_control_sites = try(var.launcher.control_role_arn, null) == null ? {} : local.launcher_sites
+  launcher_package_path  = var.package_dir == null ? try(var.launcher.package_path, null) : "${var.package_dir}/launcher.zip"
   # The site may call only backends named *-<its environment>-* (the-lobby's site boundary), so each name carries the environment it serves.
   launcher_names    = { for environment in keys(local.launcher_sites) : environment => "${var.resource_prefix}-${environment}-launcher" }
   launcher_arns     = { for environment, name in local.launcher_names : environment => "arn:aws:lambda:${var.region}:${var.account_id}:function:${name}" }
@@ -107,6 +111,13 @@ resource "aws_iam_role_policy" "launcher" {
         Resource = [local.launcher_host_arn]
       },
       {
+        # A stop goes through the host's drain first (ADR 0006); EC2 stops only after its evidence is complete.
+        Sid      = "StopOnlyThisHost"
+        Effect   = "Allow"
+        Action   = ["ec2:StopInstances"]
+        Resource = [local.launcher_host_arn]
+      },
+      {
         Sid      = "StartGameOnlyOnThisHostWithShellDocument"
         Effect   = "Allow"
         Action   = ["ssm:SendCommand"]
@@ -142,7 +153,7 @@ resource "aws_iam_role_policy" "launcher" {
         }
       },
       {
-        Sid      = "FinishStartsInItself"
+        Sid      = "FollowUpInItself"
         Effect   = "Allow"
         Action   = ["lambda:InvokeFunction"]
         Resource = [local.launcher_arns[each.key]]
@@ -166,7 +177,7 @@ resource "aws_iam_role_policy" "launcher" {
 resource "aws_ssm_parameter" "launcher_state" {
   count       = local.launcher_count
   name        = local.launcher_state_name
-  description = "The launcher's last start and its outcome; owned by the function after creation."
+  description = "The launcher's last start or stop and its outcome; owned by the function after creation."
   type        = "String"
   value       = "{}"
   lifecycle {
@@ -183,15 +194,16 @@ resource "aws_cloudwatch_log_group" "launcher" {
 resource "aws_lambda_function" "launcher" {
   for_each         = local.launcher_sites
   function_name    = local.launcher_names[each.key]
-  description      = "Answers The Lobby's Minecraft Launcher (${each.key} site) and starts the family server."
+  description      = "Answers The Lobby's Minecraft Launcher (${each.key} site) and starts or stops the family server."
   role             = aws_iam_role.launcher[each.key].arn
   runtime          = "provided.al2023"
   architectures    = ["arm64"]
   handler          = "bootstrap"
-  filename         = var.launcher.package_path
-  source_code_hash = filebase64sha256(var.launcher.package_path)
+  filename         = local.launcher_package_path
+  source_code_hash = filebase64sha256(local.launcher_package_path)
   memory_size      = 128
-  # A request answers in seconds; the follow-up run of a start waits for EC2, SSM and the game.
+  # A request answers in seconds; the follow-up run of a start or stop waits for EC2, SSM and the game, and a
+  # stop's hands the rest to a fresh run when this runs out.
   timeout = 900
   environment {
     variables = {
@@ -213,7 +225,7 @@ resource "aws_lambda_function" "launcher" {
   depends_on = [aws_iam_role_policy.launcher]
 }
 
-# A lost follow-up is reported failed after its deadline and can be started again, so it is never retried
+# A lost follow-up is reported failed after its deadline and can be requested again, so it is never retried
 # late into a session somebody else has already handled.
 resource "aws_lambda_function_event_invoke_config" "launcher" {
   for_each                     = local.launcher_sites
@@ -248,6 +260,26 @@ resource "aws_lambda_permission" "launcher_invoke" {
   invoked_via_function_url = true
 }
 
+# The operator's control role may call every site's function the same way (ADR 0006): the Server control
+# workflow and the Task targets send it the same signed requests the site sends.
+resource "aws_lambda_permission" "launcher_control_url" {
+  for_each               = local.launcher_control_sites
+  statement_id           = "AllowControlRoleThroughFunctionUrl"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.launcher[each.key].function_name
+  principal              = var.launcher.control_role_arn
+  function_url_auth_type = "AWS_IAM"
+}
+
+resource "aws_lambda_permission" "launcher_control_invoke" {
+  for_each                 = local.launcher_control_sites
+  statement_id             = "AllowControlRoleInvokeThroughFunctionUrl"
+  action                   = "lambda:InvokeFunction"
+  function_name            = aws_lambda_function.launcher[each.key].function_name
+  principal                = var.launcher.control_role_arn
+  invoked_via_function_url = true
+}
+
 resource "aws_sns_topic" "launcher_alerts" {
   for_each = local.launcher_sites
   name     = "${local.launcher_names[each.key]}-alerts"
@@ -260,13 +292,14 @@ resource "aws_sns_topic_subscription" "launcher_alerts" {
   endpoint  = var.budget_notification_email
 }
 
-# One alarm for every way a start can go wrong without a Member noticing at once: a failed run (Lambda's
-# errors), a follow-up that aged out before it ran (dropped async events), and a start request that failed or
-# could not hand off its follow-up, which the function counts itself because the site still gets an answer.
+# One alarm for every way a start or stop can go wrong without a Member noticing at once: a failed run
+# (Lambda's errors), a follow-up that aged out before it ran (dropped async events), and a start or stop
+# request that failed or could not hand off its follow-up, which the function counts itself because the
+# caller still gets an answer.
 resource "aws_cloudwatch_metric_alarm" "launcher_failing" {
   for_each            = local.launcher_sites
   alarm_name          = "${local.launcher_names[each.key]}-failing"
-  alarm_description   = "A start from The Lobby failed, lost its follow-up, or could not update DNS. See docs/operations/launcher.md."
+  alarm_description   = "A start or stop through the launcher failed, lost its follow-up, or could not update DNS. See docs/operations/launcher.md."
   evaluation_periods  = 1
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
@@ -276,7 +309,7 @@ resource "aws_cloudwatch_metric_alarm" "launcher_failing" {
 
   metric_query {
     id          = "failures"
-    expression  = "FILL(errors, 0) + FILL(dropped, 0) + FILL(starts, 0)"
+    expression  = "FILL(errors, 0) + FILL(dropped, 0) + FILL(starts, 0) + FILL(stops, 0)"
     label       = "Launcher failures"
     return_data = true
   }
@@ -305,6 +338,16 @@ resource "aws_cloudwatch_metric_alarm" "launcher_failing" {
     metric {
       namespace   = "Minecraft/Launcher"
       metric_name = "StartFailures"
+      dimensions  = { FunctionName = aws_lambda_function.launcher[each.key].function_name }
+      period      = 300
+      stat        = "Sum"
+    }
+  }
+  metric_query {
+    id = "stops"
+    metric {
+      namespace   = "Minecraft/Launcher"
+      metric_name = "StopFailures"
       dimensions  = { FunctionName = aws_lambda_function.launcher[each.key].function_name }
       period      = 300
       stat        = "Sum"

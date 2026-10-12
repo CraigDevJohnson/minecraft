@@ -1,6 +1,8 @@
 # Copy to ignored operator-config/<environment>/deployment.tfvars and replace all
 # examples with reviewed private inputs during issue #7. Never commit real values.
 account_id                = "111122223333"
+# The operator role a workstation assumes. Leave it out of the copy the Deploy
+# workflow reads: that job already runs as the operator role (ADR 0006).
 operator_role_arn         = "arn:aws:iam::111122223333:role/minecraft-operator"
 environment               = "family"
 resource_prefix           = "minecraft-family"
@@ -14,8 +16,10 @@ instance_ids              = ["survival"]
 monthly_budget_usd        = 25
 budget_notification_email = "operator@example.invalid"
 
-# Optional: drain and stop an idle host. Build the package with `task lambda:package`
-# and see docs/operations/idle-stop.md before enabling it.
+# Optional: drain and stop an idle host. See docs/operations/idle-stop.md before
+# enabling it. The Deploy workflow builds the package and names it through
+# package_dir, so its copy of this file has no package_path; a workstation plan
+# builds it with `task lambda:package` and names it here.
 # idle_stop = {
 #   package_path = "/absolute/path/to/minecraft/.build/idle-stop.zip"
 #   idle_minutes = 30
@@ -23,9 +27,10 @@ budget_notification_email = "operator@example.invalid"
 # }
 
 # Optional: the backend for The Lobby's Minecraft Launcher, one function per Lobby
-# environment in sites (each may be called only by that site's role). Build the
-# package with `task lambda:package:launcher` and see docs/operations/launcher.md
-# before enabling it.
+# environment in sites (each may be called only by that site's role, and by the
+# server control role in control_role_arn). See docs/operations/launcher.md and
+# docs/operations/cloud-controls.md before enabling it. The package follows the
+# same rule as idle_stop's.
 # launcher = {
 #   package_path = "/absolute/path/to/minecraft/.build/launcher.zip"
 #   sites = {
@@ -33,6 +38,7 @@ budget_notification_email = "operator@example.invalid"
 #     prod = "arn:aws:iam::111122223333:role/site-prod-server"
 #   }
 #   permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary"
+#   control_role_arn         = "arn:aws:iam::111122223333:role/minecraft-server-control"
 # }
 
 # Retained data disk size in GiB. Grow only: never decrease it for an existing disk
