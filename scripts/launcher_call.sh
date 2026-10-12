@@ -94,6 +94,24 @@ except ValueError:
 print(value if isinstance(value, (str, int)) else "")' "$1"
 }
 
+# settle WANT WAITING MINUTES: judges a 200 answer, which means the launcher changed nothing. The server is
+# already WANT, or someone else's transition to it is under way and gets followed; anything else fails.
+settle() {
+	local state
+	state="$(field state)"
+	case "$state" in
+	"$1") printf 'nothing to do: the server is already %s\n' "$state" ;;
+	"$2")
+		printf 'a change to %s is already under way\n' "$1"
+		follow "$2" "$1" "$3"
+		;;
+	*)
+		printf 'nothing changed: the server is %s, not %s\n' "${state:-unread}" "$1" >&2
+		return 1
+		;;
+	esac
+}
+
 # follow WAITING WANT MINUTES: polls GET /server until the state leaves WAITING. Reaching WANT succeeds; any
 # other state, or MINUTES passing, fails. An unknown state (AWS could not be read) is waited out.
 follow() {
@@ -128,7 +146,7 @@ start)
 	printf '%s\n' "$answer"
 	case "$status" in
 	202) follow starting ready 20 ;;
-	200) printf 'nothing to start: the server is %s\n' "$(field state)" ;;
+	200) settle ready starting 20 ;;
 	*)
 		printf 'the launcher answered %s\n' "$status" >&2
 		exit 1
@@ -144,7 +162,7 @@ stop)
 	printf '%s\n' "$answer"
 	case "$status" in
 	202) follow stopping stopped 80 ;;
-	200) printf 'nothing to stop: the server is %s\n' "$(field state)" ;;
+	200) settle stopped stopping 80 ;;
 	409)
 		printf 'the stop was refused: %s\n' "$(field code)" >&2
 		exit 1

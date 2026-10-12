@@ -69,6 +69,11 @@ class ServerControlRoleTests(unittest.TestCase):
         server = (ROOT / ".github/workflows/server-control.yml").read_text()
         self.assertIn("environment: server", server)
         self.assertNotIn("secrets.", server)
+        # The log shows a step's environment; the player's name is masked from the event file before then.
+        mask = server.index('.get("player")')
+        self.assertLess(server.index("GITHUB_EVENT_PATH"), server.index("PLAYER: ${{ inputs.player }}"))
+        self.assertLess(mask, server.index("PLAYER: ${{ inputs.player }}"))
+        self.assertEqual(server.count("${{ inputs.player }}"), 1)
         deploy = (ROOT / ".github/workflows/deploy.yml").read_text()
         self.assertIn("environment: deploy", deploy)
         self.assertEqual(sorted(re.findall(r"secrets\.([A-Z_]+)", deploy)), ["BACKEND_CONFIG", "DEPLOYMENT_TFVARS"])

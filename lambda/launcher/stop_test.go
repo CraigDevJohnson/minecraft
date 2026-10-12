@@ -127,6 +127,55 @@ func TestStopIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestAStoppedHostLeftUnparkedShowsNoAddressUntilAStopParksIt(t *testing.T) {
+	r := newRig(ec2types.InstanceStateNameStopped, time.Hour)
+	r.setSession(t, Session{RequestedAt: now.Add(-time.Hour), LaunchTime: now.Add(-2 * time.Hour), Phase: Stopped, DNS: "failed", DrainCommandID: commandID})
+	status, err := r.launcher.Status(context.Background())
+	if err != nil || status.State != Stopped || status.Connection.Java != nil {
+		t.Fatalf("an unparked hostname must not be offered: state=%s connection=%+v err=%v", status.State, status.Connection, err)
+	}
+	r.dnsErr = errors.New("cloudflare down")
+	status, stopped, err := r.launcher.Stop(context.Background(), false)
+	if err == nil || stopped || status.State != Stopped || status.Connection.Java != nil || strings.Join(r.pointedAt, ",") != parkedAddress {
+		t.Fatalf("a parking retry that fails must say so: err=%v stopped=%v status=%+v pointed=%v", err, stopped, status, r.pointedAt)
+	}
+	if session := r.session(t); !unparked(session) {
+		t.Fatalf("session %+v", session)
+	}
+	r.dnsErr = nil
+	status, stopped, err = r.launcher.Stop(context.Background(), false)
+	if err != nil || stopped || status.State != Stopped || status.Connection.Java == nil || len(r.pointedAt) != 2 || r.ec2.stops != 0 {
+		t.Fatalf("a repeated stop must park the hostname: err=%v stopped=%v status=%+v pointed=%v stops=%d", err, stopped, status, r.pointedAt, r.ec2.stops)
+	}
+	if session := r.session(t); session.Phase != Stopped || session.DNS != "current" || session.DrainCommandID != commandID {
+		t.Fatalf("session %+v", session)
+	}
+	status, err = r.launcher.Status(context.Background())
+	if err != nil || status.State != Stopped || status.Connection.Java == nil {
+		t.Fatalf("status after parking: %+v err=%v", status, err)
+	}
+	if _, _, err := r.launcher.Stop(context.Background(), false); err != nil || len(r.pointedAt) != 2 {
+		t.Fatalf("a parked hostname is not parked again: err=%v pointed=%v", err, r.pointedAt)
+	}
+}
+
+func TestParkingLeavesAStartThatBeganMeanwhileAlone(t *testing.T) {
+	r := newRig(ec2types.InstanceStateNameStopped, time.Hour)
+	r.setSession(t, Session{RequestedAt: now.Add(-time.Hour), LaunchTime: now.Add(-2 * time.Hour), Phase: Stopped, DNS: "failed"})
+	start := Session{RequestedAt: now, Phase: Starting}
+	r.launcher.PointDNS = func(_ context.Context, target string) error {
+		r.pointedAt = append(r.pointedAt, target)
+		r.setSession(t, start) // a Member pressed Start while the hostname was being parked
+		return nil
+	}
+	if _, _, err := r.launcher.Stop(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if session := r.session(t); session.Phase != Starting || !session.RequestedAt.Equal(now) {
+		t.Fatalf("the start's record was overwritten: %+v", session)
+	}
+}
+
 func TestStatusFollowsTheHostOnceOurStopRanOut(t *testing.T) {
 	stale := Session{RequestedAt: now.Add(-stopDeadline), LaunchTime: now.Add(-2 * time.Hour), Phase: Stopping, DrainCommandID: commandID}
 	r := newRig(ec2types.InstanceStateNameRunning, 2*time.Hour)

@@ -6,8 +6,9 @@
 # deployment.tfvars and backend.hcl, and the packages it built under packages/.
 # The full plan and apply output goes to a file, not the log: attribute values
 # show the private inputs, so only the resource headers, the progress lines and
-# the totals reach the log and the job summary. OpenTofu's own errors still go
-# to the log, because they are written to stderr.
+# the totals reach the log and the job summary, and the progress lines lose
+# their "[id=...]" suffix, which carries physical ids such as bucket names.
+# OpenTofu's own errors still go to the log, because they are written to stderr.
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -43,11 +44,13 @@ out="$(mktemp)"
 trap 'rm -f "$out"' EXIT
 
 # report STEP: writes the trimmed output of the last step to the log and the job summary. It keeps the
-# "# address will be ..." headers, the progress lines and the totals, and drops everything indented deeper,
-# which is where the attribute values are.
+# "# address will be ..." headers, the progress lines and the totals, drops everything indented deeper,
+# which is where the attribute values are, and strips the "[id=...]" suffix from the progress lines,
+# which names the private inputs (the bucket, the hostname's record) and other physical ids.
 report() {
 	local trimmed
-	trimmed="$(grep -E '^(Plan:|Apply complete!|No changes\.|  # |[^ ]+: (Creating|Modifying|Destroying|Refreshing state|Reading|Read complete|Still |Creation complete|Modifications complete|Destruction complete))' "$out" || true)"
+	trimmed="$(grep -E '^(Plan:|Apply complete!|No changes\.|  # |[^ ]+: (Creating|Modifying|Destroying|Refreshing state|Reading|Read complete|Still |Creation complete|Modifications complete|Destruction complete))' "$out" |
+		sed -E 's/ \[id=[^]]*\]//' || true)"
 	{
 		printf '## OpenTofu %s\n\n' "$1"
 		printf '%s\n' "\`\`\`text" "${trimmed:-(nothing to report)}" "\`\`\`"

@@ -70,6 +70,18 @@ func (l *Launcher) Stop(ctx context.Context, force bool) (Status, bool, error) {
 	switch {
 	case h.state == ec2types.InstanceStateNamePending || state == Starting:
 		return l.answer(state, current), false, ErrStarting
+	case h.state == ec2types.InstanceStateNameStopped && unparked(session):
+		// A stop of ours stopped the host but could not park the hostname, which still points at the old
+		// address: park it now. Until that succeeds the status shows no address.
+		if err := l.PointDNS(ctx, parkedAddress); err != nil {
+			return l.answer(state, session), false, fmt.Errorf("park the hostname: %w", err)
+		}
+		parked := session
+		parked.DNS = "current"
+		if err := l.saveParked(ctx, parked); err != nil {
+			return l.answer(state, session), false, err
+		}
+		return l.answer(state, parked), false, nil
 	case h.state != ec2types.InstanceStateNameRunning || state == Stopping:
 		// Stopped, stopping, or a stop already under way (ours or the idle stop's): nothing to do.
 		return l.answer(state, current), false, nil
@@ -95,6 +107,24 @@ func (l *Launcher) Stop(ctx context.Context, force bool) (Status, bool, error) {
 		return l.answer(Stopping, session), true, fmt.Errorf("hand off the rest of the stop: %w", err)
 	}
 	return l.answer(Stopping, session), true, nil
+}
+
+// unparked reports whether a finished stop of ours left the hostname pointing at the host's old address.
+func unparked(session Session) bool {
+	return session.Phase == Stopped && session.DNS == "failed"
+}
+
+// saveParked records the parked hostname on the stop's own record. A start that began meanwhile owns the
+// record now and is left alone: it points the hostname at the host itself.
+func (l *Launcher) saveParked(ctx context.Context, session Session) error {
+	saved, err := l.loadSession(ctx)
+	if err != nil {
+		return err
+	}
+	if !saved.RequestedAt.Equal(session.RequestedAt) || !unparked(saved) {
+		return nil
+	}
+	return l.saveSession(ctx, session)
 }
 
 // FinishStop does the rest of a stop: the same steps as `minecraft_host.py stop`. It drains the game on the

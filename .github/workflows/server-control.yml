@@ -64,6 +64,14 @@ jobs:
           persist-credentials: false
       - name: Mask the account id
         run: printf '::add-mask::%s\n' '793680745829'
+      - name: Mask the player's name
+        # The log prints the next step's environment, the name among it. Reading the name from the event
+        # file keeps it out of this step's own script and environment, so the mask lands before it shows.
+        run: |
+          player="$(python3 -c 'import json, os; print(json.load(open(os.environ["GITHUB_EVENT_PATH"])).get("inputs", {}).get("player") or "")')"
+          if [[ -n "$player" ]]; then
+            printf '::add-mask::%s\n' "$player"
+          fi
       - name: Obtain the server control role's credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:

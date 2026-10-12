@@ -339,6 +339,10 @@ func (l *Launcher) current(h host, session Session) Session {
 	if current, ok := l.sessionFor(h, session); ok && h.state == ec2types.InstanceStateNameRunning {
 		return current
 	}
+	if h.state == ec2types.InstanceStateNameStopped && unparked(session) {
+		// The host is off but the hostname still points at its old address: a repeated stop parks it.
+		return session
+	}
 	return Session{}
 }
 
