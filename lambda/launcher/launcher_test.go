@@ -36,7 +36,9 @@ type fakeEC2 struct {
 	ip       string
 	err      error
 	startErr error
+	stopErr  error
 	starts   int
+	stops    int
 	// onDescribe runs at each DescribeInstances, before its answer.
 	onDescribe func()
 }
@@ -72,6 +74,16 @@ func (f *fakeEC2) StartInstances(_ context.Context, input *ec2.StartInstancesInp
 	}
 	f.starts++
 	return &ec2.StartInstancesOutput{}, f.startErr
+}
+
+func (f *fakeEC2) StopInstances(_ context.Context, input *ec2.StopInstancesInput, _ ...func(*ec2.Options)) (*ec2.StopInstancesOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(input.InstanceIds) != 1 || input.InstanceIds[0] != hostID {
+		panic("stopped another host")
+	}
+	f.stops++
+	return &ec2.StopInstancesOutput{}, f.stopErr
 }
 
 type fakeSSM struct {
@@ -147,15 +159,18 @@ func (f *fakeSSM) DescribeInstanceInformation(context.Context, *ssm.DescribeInst
 }
 
 type rig struct {
-	ec2       *fakeEC2
-	ssm       *fakeSSM
-	launcher  *Launcher
-	gameUp    bool
-	pinged    []string
-	dnsErr    error
-	pointedAt []string
-	followUps int
-	followErr error
+	ec2           *fakeEC2
+	ssm           *fakeSSM
+	launcher      *Launcher
+	gameUp        bool
+	players       int
+	pinged        []string
+	dnsErr        error
+	pointedAt     []string
+	followUps     int
+	followErr     error
+	followUpStops int
+	followStopErr error
 }
 
 func newRig(state ec2types.InstanceStateName, launchedAgo time.Duration) *rig {
@@ -170,7 +185,7 @@ func newRig(state ec2types.InstanceStateName, launchedAgo time.Duration) *rig {
 		Ping: func(_ context.Context, target string) (int, error) {
 			r.pinged = append(r.pinged, target)
 			if r.gameUp {
-				return 0, nil
+				return r.players, nil
 			}
 			return 0, errors.New("no answer")
 		},
@@ -178,8 +193,9 @@ func newRig(state ec2types.InstanceStateName, launchedAgo time.Duration) *rig {
 			r.pointedAt = append(r.pointedAt, target)
 			return r.dnsErr
 		},
-		FollowUp: func(context.Context) error { r.followUps++; return r.followErr },
-		Now:      func() time.Time { return now },
+		FollowUp:     func(context.Context) error { r.followUps++; return r.followErr },
+		FollowUpStop: func(context.Context) error { r.followUpStops++; return r.followStopErr },
+		Now:          func() time.Time { return now },
 	}
 	return r
 }

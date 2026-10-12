@@ -33,15 +33,18 @@ type fakeAWS struct {
 	stopErr    error
 	stopState  ec2types.InstanceStateName
 
-	parameter    string
-	puts         int
-	putCalls     int
-	putFailures  map[int]bool
-	sent         []*ssm.SendCommandInput
-	invocation   *ssm.GetCommandInvocationOutput
-	invokeErr    error
-	confirmation *ssm.GetCommandInvocationOutput
-	confirmErr   error
+	parameter string
+	// launcherParameter answers reads of the launcher's state; nil reads as a missing parameter.
+	launcherParameter *string
+	launcherErr       error
+	puts              int
+	putCalls          int
+	putFailures       map[int]bool
+	sent              []*ssm.SendCommandInput
+	invocation        *ssm.GetCommandInvocationOutput
+	invokeErr         error
+	confirmation      *ssm.GetCommandInvocationOutput
+	confirmErr        error
 }
 
 func (f *fakeAWS) DescribeInstances(_ context.Context, in *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
@@ -111,7 +114,16 @@ func (f *fakeAWS) drains() int {
 	return count
 }
 
-func (f *fakeAWS) GetParameter(_ context.Context, _ *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
+func (f *fakeAWS) GetParameter(_ context.Context, in *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
+	if aws.ToString(in.Name) == launcherStateParameter {
+		if f.launcherErr != nil {
+			return nil, f.launcherErr
+		}
+		if f.launcherParameter == nil {
+			return nil, &ssmtypes.ParameterNotFound{}
+		}
+		return &ssm.GetParameterOutput{Parameter: &ssmtypes.Parameter{Value: f.launcherParameter}}, nil
+	}
 	return &ssm.GetParameterOutput{Parameter: &ssmtypes.Parameter{Value: aws.String(f.parameter)}}, nil
 }
 
@@ -411,13 +423,95 @@ func TestUnchangedStateIsNotRewritten(t *testing.T) {
 	}
 }
 
+const launcherStateParameter = "/test/launcher/state"
+
+// launcherSession is the launcher's record as lambda/launcher writes it, with the fields the idle stop reads.
+func launcherSession(phase string, launchTime, requestedAt time.Time) *string {
+	encoded, err := json.Marshal(map[string]any{"phase": phase, "launch_time": launchTime, "requested_at": requestedAt})
+	if err != nil {
+		panic(err)
+	}
+	return aws.String(string(encoded))
+}
+
+func TestLauncherStopStandsTheIdleStopAside(t *testing.T) {
+	h := newHarness()
+	h.ctl.Config.LauncherStateParameter = launcherStateParameter
+	h.mustAction(t, "idle-started")
+	h.now = h.now.Add(10 * time.Minute)
+	h.aws.launcherParameter = launcherSession("stopping", launched, h.now.Add(-time.Minute))
+	h.mustAction(t, "launcher-stopping")
+	if h.state(t).IdleSince != nil {
+		t.Fatal("the idle countdown must clear while the launcher stops the host")
+	}
+	h.now = h.now.Add(time.Hour)
+	h.mustAction(t, "launcher-stopping")
+	if h.aws.drains() != 0 || h.aws.stopped != 0 || len(h.addresses) != 1 {
+		t.Fatalf("drains=%d stops=%d pings=%d; the idle stop must neither ping nor drain while the launcher stops the host", h.aws.drains(), h.aws.stopped, len(h.addresses))
+	}
+}
+
+func TestOnlyACurrentLauncherStopStandsTheIdleStopAside(t *testing.T) {
+	for name, record := range map[string]*string{
+		"missing":           nil,
+		"finished stop":     launcherSession("stopped", launched, launched.Add(4*time.Minute)),
+		"start":             launcherSession("starting", launched, launched.Add(4*time.Minute)),
+		"earlier launch":    launcherSession("stopping", launched.Add(-time.Hour), launched.Add(4*time.Minute)),
+		"past its deadline": launcherSession("stopping", launched, launched.Add(5*time.Minute-launcherStopDeadline)),
+	} {
+		h := newHarness()
+		h.ctl.Config.LauncherStateParameter = launcherStateParameter
+		h.aws.launcherParameter = record
+		if result := h.mustAction(t, "idle-started"); result.Action != "idle-started" {
+			t.Fatalf("%s: %+v", name, result)
+		}
+	}
+	h := newHarness()
+	h.aws.launcherParameter = launcherSession("stopping", launched, launched.Add(4*time.Minute))
+	h.mustAction(t, "idle-started")
+}
+
+func TestUnreadableLauncherStateFailsTheCheckWithoutDraining(t *testing.T) {
+	h := newHarness()
+	h.ctl.Config.LauncherStateParameter = launcherStateParameter
+	h.mustAction(t, "idle-started")
+	h.now = h.now.Add(time.Hour)
+	for _, broken := range []func(){
+		func() { h.aws.launcherParameter = aws.String("not json") },
+		func() { h.aws.launcherParameter = nil; h.aws.launcherErr = errors.New("access denied") },
+	} {
+		broken()
+		result, err := h.run(t)
+		if err == nil || result.Action != "error" || !strings.Contains(err.Error(), "read launcher state") {
+			t.Fatalf("result=%+v err=%v", result, err)
+		}
+		if h.state(t).IdleSince != nil {
+			t.Fatal("an unreadable launcher state must clear the idle countdown")
+		}
+	}
+	if h.aws.drains() != 0 {
+		t.Fatal("an unreadable launcher state must never drain the host")
+	}
+}
+
 func TestLoadConfig(t *testing.T) {
 	env := map[string]string{"HOST_ID": hostID, "STATE_PARAMETER": "/p", "IDLE_MINUTES": "30", "INSTANCES": "survival", "PUBLIC_HOSTNAME": "mc.example.com", "CLOUDFLARE_ZONE_ID": "0123456789abcdef0123456789abcdef", "CLOUDFLARE_TOKEN_SECRET_ARN": "arn:aws:secretsmanager:us-west-2:111122223333:secret:token-abcdef"}
 	cfg, err := loadConfig(func(key string) string { return env[key] })
 	if err != nil || cfg.IdleAfter != 30*time.Minute || len(cfg.Instances) != 1 {
 		t.Fatalf("cfg=%+v err=%v", cfg, err)
 	}
-	for key, value := range map[string]string{"IDLE_MINUTES": "5", "INSTANCES": "Survival", "HOST_ID": "", "CLOUDFLARE_TOKEN_SECRET_ARN": "", "PUBLIC_HOSTNAME": "https://mc.example.com", "CLOUDFLARE_ZONE_ID": "bad"} {
+	if cfg.LauncherStateParameter != "" {
+		t.Fatalf("an unset LAUNCHER_STATE_PARAMETER must leave the launcher unread, got %q", cfg.LauncherStateParameter)
+	}
+	withLauncher := map[string]string{}
+	for k, v := range env {
+		withLauncher[k] = v
+	}
+	withLauncher["LAUNCHER_STATE_PARAMETER"] = "/p/launcher/state"
+	if cfg, err := loadConfig(func(key string) string { return withLauncher[key] }); err != nil || cfg.LauncherStateParameter != "/p/launcher/state" {
+		t.Fatalf("cfg=%+v err=%v", cfg, err)
+	}
+	for key, value := range map[string]string{"IDLE_MINUTES": "5", "INSTANCES": "Survival", "HOST_ID": "", "CLOUDFLARE_TOKEN_SECRET_ARN": "", "PUBLIC_HOSTNAME": "https://mc.example.com", "CLOUDFLARE_ZONE_ID": "bad", "LAUNCHER_STATE_PARAMETER": "launcher state"} {
 		broken := map[string]string{}
 		for k, v := range env {
 			broken[k] = v

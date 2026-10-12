@@ -1,0 +1,104 @@
+# Controls the family server from anywhere with GitHub: status, start, stop and
+# allowlist changes, each one signed request to the launcher's Function URL.
+# Nothing runs here but that request; the launcher does the work in AWS. See
+# docs/operations/cloud-controls.md and ADR 0006.
+#
+# The minecraft-server-control role trusts this job through GitHub OIDC with
+# the subject repo:CraigDevJohnson@42454849/minecraft@1359070973:environment:server
+# and may only invoke the launcher.
+name: Server control
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do with the family server
+        type: choice
+        options: [status, start, stop, allowlist-add, allowlist-remove]
+        default: status
+      nobody_playing:
+        description: For stop, confirm nobody is playing, so the server stops even when the game still reports players or does not answer
+        type: boolean
+        default: false
+      edition:
+        description: For the allowlist actions, the player's edition
+        type: choice
+        options: [java, bedrock]
+        default: java
+      player:
+        description: For the allowlist actions, the Java account name or the Bedrock gamertag
+        type: string
+        default: ''
+
+permissions: {}
+
+# One server operation at a time; a second run waits instead of cancelling one in flight.
+concurrency:
+  group: minecraft-server
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  server:
+    name: Server ${{ inputs.action }}
+    if: >-
+      github.repository == 'CraigDevJohnson/minecraft' &&
+      github.repository_id == '1359070973' &&
+      github.repository_owner_id == '42454849' &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    # A stop waits for the drain, which may take up to the launcher's 75-minute deadline.
+    timeout-minutes: 90
+    environment: server
+    permissions:
+      contents: read
+      id-token: write # assume the server control role through GitHub OIDC
+    steps:
+      - name: Check out the approved main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Mask the account id
+        run: printf '::add-mask::%s\n' '793680745829'
+      - name: Obtain the server control role's credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_SERVER_CONTROL_ROLE_ARN }}
+          aws-region: us-west-2
+          audience: sts.amazonaws.com
+          allowed-account-ids: '793680745829'
+          role-duration-seconds: 5400
+          role-session-name: minecraft-server-${{ inputs.action }}-${{ github.run_id }}
+          unset-current-credentials: true
+          output-credentials: false
+          mask-aws-account-id: true
+          retry-max-attempts: 2
+          action-timeout-s: 60
+      - name: Send the request and follow the server
+        env:
+          ACTION: ${{ inputs.action }}
+          NOBODY_PLAYING: ${{ inputs.nobody_playing }}
+          EDITION: ${{ inputs.edition }}
+          PLAYER: ${{ inputs.player }}
+          LAUNCHER_URL: ${{ vars.MINECRAFT_LAUNCHER_URL }}
+        run: |
+          args=("$ACTION")
+          case "$ACTION" in
+          stop)
+            if [[ "$NOBODY_PLAYING" == true ]]; then
+              args+=(--force)
+            fi
+            ;;
+          allowlist-add | allowlist-remove)
+            args+=(--edition "$EDITION" --player "$PLAYER")
+            ;;
+          esac
+          {
+            printf '### Server %s\n\n```text\n' "$ACTION"
+            bash scripts/launcher_call.sh "${args[@]}"
+            printf '```\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

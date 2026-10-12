@@ -53,6 +53,11 @@ func TestLoadConfig(t *testing.T) {
 func TestWriteMetricIsEmbeddedMetricFormat(t *testing.T) {
 	var buffer bytes.Buffer
 	writeMetric(&buffer, "minecraft-test-dev-launcher", startFailureMetric, time.UnixMilli(1760198400000))
+	var stops bytes.Buffer
+	writeMetric(&stops, "minecraft-test-dev-launcher", stopFailureMetric, time.UnixMilli(1760198400000))
+	if !strings.Contains(stops.String(), `"StopFailures":1`) || !strings.Contains(stops.String(), `"Name":"StopFailures"`) {
+		t.Fatalf("%q", stops.String())
+	}
 	var line struct {
 		AWS struct {
 			Timestamp         int64

@@ -29,11 +29,16 @@ const (
 	drainDeadline = (remoteTimeoutSeconds + 60 + 240) * time.Second
 	// invisibleGrace covers Run Command's eventual consistency right after SendCommand.
 	invisibleGrace = 2 * time.Minute
+	// launcherStopDeadline is how long a stop the launcher recorded is believed; the launcher gives its own
+	// stop the same (lambda/launcher stopDeadline), after which the host is checked as if nobody were
+	// stopping it.
+	launcherStopDeadline = 75 * time.Minute
 )
 
 var (
 	instanceID      = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 	commandIdentity = regexp.MustCompile(`^[0-9a-f-]{36}$`)
+	parameterName   = regexp.MustCompile(`^/[A-Za-z0-9/_.-]{1,500}$`)
 )
 
 // EC2API is the subset of EC2 the function calls.
@@ -62,6 +67,9 @@ type Config struct {
 	PublicHostname           string
 	CloudflareZoneID         string
 	CloudflareTokenSecretARN string
+	// LauncherStateParameter names the launcher's state, when the launcher is deployed, so a stop it is
+	// running is left to it; empty, the idle stop never looks.
+	LauncherStateParameter string
 }
 
 // State persists between invocations in an SSM parameter. LaunchTime ties it to one EC2 run, so a stop and
@@ -154,6 +162,15 @@ func (c *Controller) step(ctx context.Context, state *State, publicIP string) (R
 		return c.followDrain(ctx, state)
 	}
 	now := c.Now().UTC()
+	stopping, err := c.launcherStopping(ctx, state.LaunchTime, now)
+	if err != nil {
+		state.IdleSince = nil
+		return Result{Action: "error"}, err
+	}
+	if stopping {
+		state.IdleSince = nil
+		return Result{Action: "launcher-stopping"}, nil
+	}
 	if net.ParseIP(publicIP) == nil {
 		state.IdleSince = nil
 		return Result{Action: "error"}, errors.New("running host has no valid public address")
@@ -361,6 +378,32 @@ func (c *Controller) describeHost(ctx context.Context) (host, error) {
 		return host{}, errors.New("describe host: running host has no launch time")
 	}
 	return h, nil
+}
+
+// launcherStopping reads the launcher's own progress, when it is deployed, to see a stop it is running on
+// this launch of the host: the idle stop then stands aside, so the two never drain the host at once. A
+// record older than the launcher's deadline, or from an earlier launch, is not a stop under way.
+func (c *Controller) launcherStopping(ctx context.Context, launchTime, now time.Time) (bool, error) {
+	if c.Config.LauncherStateParameter == "" {
+		return false, nil
+	}
+	output, err := c.SSM.GetParameter(ctx, &ssm.GetParameterInput{Name: aws.String(c.Config.LauncherStateParameter)})
+	var missing *ssmtypes.ParameterNotFound
+	if errors.As(err, &missing) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read launcher state: %w", err)
+	}
+	var session struct {
+		RequestedAt time.Time `json:"requested_at"`
+		LaunchTime  time.Time `json:"launch_time"`
+		Phase       string    `json:"phase"`
+	}
+	if output.Parameter == nil || json.Unmarshal([]byte(aws.ToString(output.Parameter.Value)), &session) != nil {
+		return false, errors.New("read launcher state: parameter does not hold a state object")
+	}
+	return session.Phase == "stopping" && session.LaunchTime.Equal(launchTime) && now.Sub(session.RequestedAt) < launcherStopDeadline, nil
 }
 
 func (c *Controller) loadState(ctx context.Context) (State, error) {

@@ -23,3 +23,19 @@ tasks:
   lambda:package:launcher:
     desc: Build the launcher function for ARM64 into a reproducible .build/launcher.zip
     cmd: python3 scripts/package_idle_stop.py --function launcher
+
+  server:status:
+    desc: Ask the launcher for the family server's state (LAUNCHER_URL and an AWS profile; see docs/operations/cloud-controls.md)
+    cmd: ./scripts/launcher_call.sh status
+
+  server:start:
+    desc: Start the family server through the launcher and wait until it is ready
+    cmd: ./scripts/launcher_call.sh start
+
+  server:stop:
+    desc: Stop the family server through the launcher and wait until it is off; FORCE=1 stops over players
+    cmd: ./scripts/launcher_call.sh stop {{if eq .FORCE "1"}}--force{{end}}
+
+  server:allowlist:
+    desc: Add or remove one player on the running server; OP=add|remove EDITION=java|bedrock PLAYER=<name or gamertag>
+    cmd: ./scripts/launcher_call.sh allowlist-{{.OP}} --edition "{{.EDITION}}" --player "{{.PLAYER}}"

@@ -1,0 +1,14 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CallTheLauncherThroughItsFunctionUrl",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:InvokeFunctionUrl",
+        "lambda:InvokeFunction"
+      ],
+      "Resource": "arn:aws:lambda:us-west-2:793680745829:function:minecraft-family-*-launcher"
+    }
+  ]
+}
