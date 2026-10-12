@@ -121,12 +121,21 @@ func TestTheOperatorCheckReadsTheCallerTheFunctionURLVerified(t *testing.T) {
 	}
 }
 
-func TestTheHostAdapterComesFromThePackageOnLambda(t *testing.T) {
+func TestTheHostAdapterComesFromThePackageOnLambdaOrTheCheckout(t *testing.T) {
 	lambda := func(name string) string { return map[string]string{"LAMBDA_TASK_ROOT": "/var/task"}[name] }
 	if got := adapterSource(lambda); got != "/var/task/adapter" {
 		t.Fatalf("on Lambda the adapter is read from %q", got)
 	}
-	if got := adapterSource(func(string) string { return "" }); got != filepath.Join("..", "..", "scripts") {
-		t.Fatalf("from a checkout the adapter is read from %q", got)
+	scripts, err := filepath.Abs(filepath.Join("..", "..", "scripts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Dir(scripts)
+	local := func(string) string { return "" }
+	for _, directory := range []string{filepath.Join(root, "lambda", "launcher"), root, filepath.Join(root, "docs")} {
+		t.Chdir(directory)
+		if got := adapterSource(local); got != scripts {
+			t.Fatalf("from %s the adapter is read from %q, want %q", directory, got, scripts)
+		}
 	}
 }

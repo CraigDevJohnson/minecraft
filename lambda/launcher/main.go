@@ -69,12 +69,27 @@ func loadConfig(getenv func(string) string) (Config, *DNSPointer, error) {
 }
 
 // adapterSource names the folder holding the host adapter files: the package's adapter folder on Lambda
-// (scripts/package_idle_stop.py), the repository's scripts folder anywhere else.
+// (scripts/package_idle_stop.py), anywhere else the scripts folder of the checkout that holds the working
+// directory, found by looking upward from it.
 func adapterSource(getenv func(string) string) string {
 	if root := getenv("LAMBDA_TASK_ROOT"); root != "" {
 		return filepath.Join(root, "adapter")
 	}
-	return filepath.Join("..", "..", "scripts")
+	working, err := os.Getwd()
+	if err != nil {
+		return "scripts"
+	}
+	for directory := working; ; {
+		scripts := filepath.Join(directory, "scripts")
+		if _, err := os.Stat(filepath.Join(scripts, "minecraft_crafty.py")); err == nil {
+			return scripts
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return filepath.Join(working, "scripts")
+		}
+		directory = parent
+	}
 }
 
 func main() {

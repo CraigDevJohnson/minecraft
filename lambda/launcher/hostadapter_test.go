@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -36,12 +37,12 @@ func loadAdapter(t *testing.T, fsys fstest.MapFS) *HostAdapter {
 // standard output.
 func runOnHost(t *testing.T, adapter *HostAdapter, directory string) (string, error) {
 	t.Helper()
-	for _, tool := range []string{"sh", "base64", "gzip", "sha256sum", "mktemp"} {
+	for _, tool := range []string{"sh", "base64", "gzip", "sha256sum", "mktemp", "stat"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s is not installed", tool)
 		}
 	}
-	command := exec.Command("sh", "-c", "set -eu\n"+adapter.script(directory))
+	command := exec.Command("sh", "-c", "set -eu\n"+adapter.script(directory, strconv.Itoa(os.Getuid())))
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err := command.Run()
@@ -152,6 +153,57 @@ func TestAdapterInstallLeavesAMatchingAdapterAlone(t *testing.T) {
 	}
 	if inode(t, filepath.Join(directory, "minecraft_crafty.py")) != before {
 		t.Fatal("a matching adapter must not be replaced")
+	}
+}
+
+func TestAdapterInstallReplacesMatchingFilesSomeoneElseCouldChange(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "scripts")
+	if err := os.Mkdir(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := fakeAdapterFiles("v1")
+	for name, file := range files {
+		if err := os.WriteFile(filepath.Join(directory, name), file.Data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The right bytes, but group-writable, and one of them reached through a link: root must not run either.
+	writable := filepath.Join(directory, "minecraft_crafty.py")
+	if err := os.Chmod(writable, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(directory, "minecraft_access.py")
+	elsewhere := filepath.Join(t.TempDir(), "minecraft_access.py")
+	if err := os.Rename(linked, elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, linked); err != nil {
+		t.Fatal(err)
+	}
+	if stdout, err := runOnHost(t, loadAdapter(t, files), directory); err != nil || stdout != "" {
+		t.Fatalf("stdout=%q err=%v", stdout, err)
+	}
+	for _, path := range []string{writable, linked} {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o644 {
+			t.Fatalf("%s was left as %v (%v)", path, info.Mode(), err)
+		}
+	}
+}
+
+func TestAdapterInstallRefusesAFolderSomeoneElseCouldChange(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "scripts")
+	if err := os.Mkdir(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runOnHost(t, loadAdapter(t, fakeAdapterFiles("v1")), directory); err == nil {
+		t.Fatal("a group-writable adapter folder must fail the command")
+	}
+	if entries, _ := os.ReadDir(directory); len(entries) != 0 {
+		t.Fatalf("nothing may be installed into it: %v", entries)
 	}
 }
 
