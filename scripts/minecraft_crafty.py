@@ -719,16 +719,17 @@ class Adapter:
                 staging.mkdir(mode=0o700, parents=True, exist_ok=True)
                 work = Path(tempfile.mkdtemp(dir=staging, prefix="content-"))
                 try:
+                    staged = {artifact["path"]: work / f"{index}.jar" for index, artifact in enumerate(changed)}
                     for artifact in changed:
-                        self.host.fetch(artifact["url"], artifact["sha256"], work / f"{artifact['name']}.jar")
+                        self.host.fetch(artifact["url"], artifact["sha256"], staged[artifact["path"]])
                     # Downloads take a while; never change the jars under a server someone started meanwhile.
                     if self.running(server):
                         raise CraftyError("the server started while its content was downloading; stop it, then start it again")
                     # Record every jar before any lands, so a later manifest can remove what this change leaves.
                     write_durably(self.content_path(instance), {"artifacts": pinned})
                     for artifact in changed:
-                        with open(work / f"{artifact['name']}.jar", "rb") as staged:
-                            folder.write(artifact["path"], iter(lambda: staged.read(1024 * 1024), b""), artifact["sha256"])
+                        with open(staged[artifact["path"]], "rb") as jar:
+                            folder.write(artifact["path"], iter(lambda: jar.read(1024 * 1024), b""), artifact["sha256"])
                     for item in managed:
                         folder.write(item["path"], [_managed_file_bytes(item)], item["sha256"])
                     for path in stale:
@@ -743,28 +744,29 @@ class Adapter:
         """Write the Compose file the manifest calls for and have Docker apply it, answering whether Docker ran.
         If Docker cannot bring Crafty up with a new file, the previous file goes back."""
         wanted = render_compose(self.manifest, self.root / "crafty")
-        digest = hashlib.sha256(wanted).hexdigest()
-        record = self.root / "crafty" / STATE_DIR / "compose.json"
+        record = self.root / "crafty" / STATE_DIR / "compose-applied.yaml"
         try:
-            applied = json.loads(record.read_text()).get("sha256")
-        except (OSError, ValueError, AttributeError):
+            applied = record.read_bytes()
+        except OSError:
             applied = None
         current = self.host.read_compose()
         # The file alone is no proof: a start cut off before Docker finished, or a rerun installer, leaves it unapplied.
-        if current == wanted and applied == digest:
+        if current == wanted and applied == wanted:
             return False
+        # What to put back if Docker fails: the copy of the file it last applied, else the file in place.
+        previous = applied if applied is not None else current
         if current != wanted:
             self.host.write_compose(wanted)
         try:
             self.host.compose_up()
         except CraftyError:
-            if current is None or current == wanted:
+            if previous is None or previous == wanted:
                 raise CraftyError("docker compose did not bring Crafty up; check minecraft-crafty.service") from None
-            self.host.write_compose(current)
+            self.host.write_compose(previous)
             with contextlib.suppress(CraftyError):
                 self.host.compose_up()
             raise CraftyError("Crafty did not come up with the new ports; the previous Compose file is back") from None
-        write_durably(record, {"sha256": digest})
+        write_durably(record, wanted)
         return True
 
     def apply_launch_command(self, server: dict, address: str | None) -> None:
@@ -1165,10 +1167,11 @@ def load_manifest(path: Path) -> dict:
     for artifact in manifest.get("artifacts", []):
         url = urllib.parse.urlsplit(artifact.get("url", ""))
         path = artifact.get("path", "")
-        if (artifact.get("name") in names or path in paths or not SHA256.fullmatch(artifact.get("sha256", ""))
+        if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", str(artifact.get("name", ""))) or artifact["name"] in names
+                or path in paths or not SHA256.fullmatch(artifact.get("sha256", ""))
                 or url.scheme != "https" or url.netloc not in ARTIFACT_HOSTS or url.query or "latest" in url.path.lower()
                 or not JAR_PATH.fullmatch(path)):
-            raise CraftyError("every artifact needs a unique jar path, an exact HTTPS URL and a SHA-256")
+            raise CraftyError("every artifact needs a plain unique name and jar path, an exact HTTPS URL and a SHA-256")
         names.add(artifact["name"])
         paths.add(path)
     if not {"paper", "geyser", "floodgate", "multiverse-core", "multiverse-inventories"} <= names:

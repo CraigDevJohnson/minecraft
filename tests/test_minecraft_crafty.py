@@ -799,6 +799,31 @@ class ContentTests(unittest.TestCase):
         adapter.start("family")
         self.assertEqual(self.changes(host), [("imds",), ("compose", "up")])
 
+    def test_a_retry_docker_cannot_apply_puts_back_the_file_it_last_applied(self):
+        adapter, api, host = self.adapter(manifest=self.raknet)
+        adapter.start("family")
+        api.is_running = False
+        applied = host.compose.read_bytes()
+        # A start cut off after writing the new file, before Docker applied it; then Docker fails on the retry.
+        adapter, api, host = self.adapter(api)
+        host.compose.write_bytes(crafty.render_compose(self.manifest, self.root / "crafty"))
+        host.compose_failures = 1
+        with self.assertRaisesRegex(crafty.CraftyError, "previous Compose file is back"):
+            adapter.start("family")
+        self.assertEqual(host.compose.read_bytes(), applied)
+        self.assertEqual(self.changes(host), [("imds",), ("compose", "up"), ("compose", "write"), ("compose", "up")])
+
+    def test_staged_downloads_never_take_their_names_from_the_manifest(self):
+        manifest = content_manifest()
+        geyser = manifest["artifacts"][1]
+        geyser["name"], geyser["version"] = "../../escape", geyser["version"] + "-next"
+        geyser["sha256"] = hashlib.sha256(jar(geyser)).hexdigest()
+        adapter, api, host = self.adapter(manifest=manifest)
+        adapter.start("family")
+        self.assertEqual((self.server / "plugins" / "Geyser-Spigot.jar").read_bytes(), jar(geyser))
+        self.assertFalse((self.root / "crafty" / "escape.jar").exists())
+        self.assertEqual([path.name for path in self.root.rglob("escape*")], [])
+
     def test_docker_failing_on_an_unchanged_compose_file_leaves_it_alone(self):
         adapter, api, host = self.adapter(manifest=self.raknet)
         host.compose_failures = 1
@@ -1399,6 +1424,15 @@ class ManifestTests(unittest.TestCase):
             json.dump(manifest, handle)
             handle.flush()
             with self.assertRaises(crafty.CraftyError):
+                crafty.load_manifest(Path(handle.name))
+
+    def test_an_artifact_name_that_is_not_a_plain_word_is_refused(self):
+        manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())
+        manifest["artifacts"].append(dict(manifest["artifacts"][2], name="../../servers/x", path="plugins/Extra.jar"))
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(manifest, handle)
+            handle.flush()
+            with self.assertRaisesRegex(crafty.CraftyError, "plain unique name"):
                 crafty.load_manifest(Path(handle.name))
 
     def test_unpinned_image_is_refused(self):
