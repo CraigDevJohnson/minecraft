@@ -145,7 +145,7 @@ Later changes to these roles are the same commands again: a new boundary version
 
 ## What still runs on a workstation
 
-Two rare procedures keep their runbooks and `scripts/minecraft_host.py`: restoring a world from a stop archive (`minecraft-instance restore`, [backup and recovery](backup-recovery.md)) and the Crafty console over an SSM port-forward ([crafty](crafty.md)). Neither is part of starting, stopping, allowlisting or deploying. The [host commands](host-commands.md) remain for a hands-on emergency.
+Two rare procedures keep their runbooks and `scripts/minecraft_host.py`: restoring a world from a stop archive (`minecraft-instance restore`, [crafty](crafty.md#recover-from-an-archive)) and the Crafty console over an SSM port-forward ([crafty](crafty.md)). Neither is part of starting, stopping, allowlisting or deploying. The [host commands](host-commands.md) remain for a hands-on emergency.
 
 ## Evidence limits
 

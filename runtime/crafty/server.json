@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "family-2026-10-10-crafty-multiverse",
+  "revision": "family-2026-10-16-nethernet-both",
   "crafty": {
     "image": "registry.gitlab.com/crafty-controller/crafty-4@sha256:7b6e87514259549647e15ceeaf73d238792e6d77e2c79fc744d5badc8d6e997c",
     "version": "4.11.0"
@@ -77,7 +77,12 @@
         "bedrock": {
           "address": "0.0.0.0",
           "port": 19132,
-          "clone-remote-port": false
+          "clone-remote-port": false,
+          "transport": "both",
+          "webrtc-port": 19133,
+          "signaling": {
+            "mode": "builtin"
+          }
         },
         "java": {
           "auth-type": "floodgate"
@@ -85,7 +90,7 @@
         "log-player-ip-addresses": false,
         "saved-user-logins": []
       },
-      "sha256": "a98d3442120aa0cfe4eb63e28eebb935b01e7c52b0aa1d8e55bb6d618d1c442f"
+      "sha256": "961fc91c79c38f8e09fd14d1e959b06522ec72b595b933e78fef83563e4b8e42"
     }
   ],
   "server_properties": {

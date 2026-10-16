@@ -1,6 +1,6 @@
 # ADR 0003: Operator-owned on-demand host sessions
 
-Status: Accepted design, 2026-10-03. Phase-one live acceptance completed on 2026-10-05, and #23 is closed. Phase-two migration, protection, and actual off state are verified. Cold recovery, DNS repair, and failure/resume proof remain pending.
+Status: Superseded by [ADR 0004](0004-crafty-multiverse-rebuild.md), which on 2026-10-10 kept the world on a retained disk. Accepted design, 2026-10-03. Phase-one live acceptance completed on 2026-10-05, and #23 is closed. Phase-two migration, protection, and actual off state were verified; cold recovery and failure/resume proof were abandoned, and #24 closed as superseded on 2026-10-16. Retiring its code is #70.
 
 Craig approved the two-phase on-demand design for #23/#24. In phase one, `on-demand-host` removes the replaceable host and root after a verified drain and confirmed graceful EC2 stop for safe detach, retaining the independently protected data disk. Operator start recreates the host through the existing OpenTofu root. Network, host role/profile, backups, budget and state remain outside the session lifecycle. The default `retained-host` behavior stays compatible. An absent host is a valid version-2 handoff only in the opt-in mode.
 

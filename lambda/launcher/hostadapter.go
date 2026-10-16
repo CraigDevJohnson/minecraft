@@ -18,9 +18,23 @@ import (
 const adapterDirectory = "/opt/minecraft-crafty/scripts"
 
 // adapterFiles are the files scripts/install_crafty.sh puts in adapterDirectory, in the order they are swapped
-// in: the modules the adapter imports first, the adapter itself last. scripts/package_idle_stop.py packs the
-// same list, which tests/test_launcher_package.py checks.
-var adapterFiles = []string{"minecraft_access.py", "minecraft_content.py", "minecraft_crafty.py"}
+// in: the modules the adapter imports and the pinned server content it applies on each start (ADR 0008) first, the
+// adapter itself last. scripts/package_idle_stop.py packs the same list, which tests/test_launcher_package.py checks.
+var adapterFiles = []string{"minecraft_access.py", "minecraft_content.py", "server.json", "minecraft_crafty.py"}
+
+// checkoutPaths name where a checkout keeps the adapter files that are not in its scripts folder.
+var checkoutPaths = map[string]string{"server.json": "runtime/crafty/server.json"}
+
+// checkout reads the adapter files from a checkout's root: the scripts folder, and the pinned server content
+// where checkoutPaths name it.
+type checkout struct{ root fs.FS }
+
+func (c checkout) Open(name string) (fs.File, error) {
+	if path, ok := checkoutPaths[name]; ok {
+		return c.root.Open(path)
+	}
+	return c.root.Open("scripts/" + name)
+}
 
 // HostAdapter holds the adapter files this launcher was deployed with.
 type HostAdapter struct {

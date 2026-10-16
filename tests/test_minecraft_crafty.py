@@ -1,6 +1,7 @@
 import contextlib
 import datetime
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -44,6 +45,10 @@ class FakeAPI:
         self.no_servers = False
         self.console = []
         self.on_console = None
+        self.command = "java -Xms1024M -Xmx5120M -jar paper.jar nogui"
+        self.patches = []
+        self.keeps_patches = True
+        self.log = []
 
     def request(self, method, path, body=None, text=None):
         if path.endswith("/stdin"):
@@ -73,7 +78,16 @@ class FakeAPI:
         if "/action/" in path:
             action = path.rsplit("/", 1)[-1]
             self.actions.append(action)
+            self.log.append(action)
             self.pending = (action, self.start_after if action == "start_server" else self.stop_after)
+            return {"status": "ok"}
+        if path == f"/api/v2/servers/{SERVER_ID}" and method == "GET":
+            return {"status": "ok", "data": {"server_id": SERVER_ID, "execution_command": self.command}}
+        if path == f"/api/v2/servers/{SERVER_ID}" and method == "PATCH":
+            self.patches.append(body)
+            self.log.append("patch")
+            if self.keeps_patches:
+                self.command = body["execution_command"]
             return {"status": "ok"}
         raise AssertionError(path)
 
@@ -85,6 +99,40 @@ class FakeHost:
         self.calls = []
         self.stored = {}
         self.metadata = {}
+        self.compose = None
+        self.compose_failures = 0
+        self.on_compose_up = None
+        self.address = "34.212.10.20"
+        self.artifacts = {}
+        self.failing_downloads = set()
+
+    def read_compose(self):
+        return self.compose.read_bytes() if self.compose.exists() else None
+
+    def write_compose(self, content):
+        self.calls.append(("compose", "write"))
+        self.compose.write_bytes(content)
+
+    def compose_up(self):
+        self.calls.append(("compose", "up"))
+        if self.compose_failures:
+            self.compose_failures -= 1
+            raise crafty.CraftyError("docker compose did not bring Crafty up")
+        if self.on_compose_up:
+            self.on_compose_up()
+
+    def public_ipv4(self):
+        self.calls.append(("imds",))
+        if self.address is None:
+            raise crafty.CraftyError("cannot read the host's public IPv4 for NetherNet")
+        return self.address
+
+    def fetch(self, url, sha256, target):
+        self.calls.append(("fetch", url))
+        data = self.artifacts[url]
+        if url in self.failing_downloads or hashlib.sha256(data).hexdigest() != sha256:
+            raise crafty.CraftyError("download failed")
+        target.write_bytes(data)
 
     def monotonic(self):
         return self.clock
@@ -452,6 +500,426 @@ class AdapterTests(unittest.TestCase):
 JAVA = {"uuid": "6b1f3c2e-9d4a-4f5e-8a7b-0c1d2e3f4a5b", "name": "Sample_Java"}
 BEDROCK = {"uuid": "00000000-0000-0000-0009-01eed05d1009", "name": "Sample Player"}
 RENAMED = {"uuid": "2f4e6a8c-1b3d-4e5f-9a0b-c1d2e3f4a5b6", "name": "Old_Name"}
+
+def jar(artifact: dict) -> bytes:
+    return f"{artifact['name']} {artifact['version']}".encode()
+
+
+def content_manifest(transport: str = "both") -> dict:
+    """The repository's manifest with stand-in jars, and the Geyser configuration of transport."""
+    manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())
+    for artifact in manifest["artifacts"]:
+        artifact["sha256"] = hashlib.sha256(jar(artifact)).hexdigest()
+    geyser = manifest["managed_files"][0]
+    geyser["content"] = crafty._approved_geyser(8, dual_transport=transport == "both")
+    geyser["sha256"] = hashlib.sha256(crafty._managed_file_bytes(geyser)).hexdigest()
+    return manifest
+
+
+# The Compose file scripts/install_crafty.sh wrote before NetherNet, byte for byte: a RakNet manifest leaves it alone.
+INSTALLED_COMPOSE = """services:
+  crafty:
+    image: registry.gitlab.com/crafty-controller/crafty-4@sha256:7b6e87514259549647e15ceeaf73d238792e6d77e2c79fc744d5badc8d6e997c
+    platform: linux/arm64
+    restart: unless-stopped
+    stop_grace_period: 180s
+    environment:
+      TZ: Etc/UTC
+    ports:
+      - "25565:25565/tcp"
+      - "19132:19132/udp"
+      - "127.0.0.1:8443:8443/tcp"
+    volumes:
+      - /srv/minecraft/crafty/backups:/crafty/backups
+      - /srv/minecraft/crafty/logs:/crafty/logs
+      - /srv/minecraft/crafty/servers:/crafty/servers
+      - /srv/minecraft/crafty/config:/crafty/app/config
+      - /srv/minecraft/crafty/import:/crafty/import
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+"""
+
+ADVERTISED = "java -Xms1024M -Xmx5120M -DgeyserAdvertiseAddresses=34.212.10.20 -jar paper.jar nogui"
+
+
+class ContentTests(unittest.TestCase):
+    """A start first brings the stopped server to the pinned content (ADR 0008)."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.server = self.root / "crafty" / "servers" / SERVER_ID
+        (self.server / "survival").mkdir(parents=True)
+        (self.server / "survival" / "level.dat").write_bytes(b"world")
+        self.manifest = content_manifest()
+        self.raknet = content_manifest("raknet")
+        # The server as the first import staged it: the RakNet release's jars and Geyser configuration.
+        (self.server / "plugins" / "Geyser-Spigot").mkdir(parents=True)
+        for artifact in self.raknet["artifacts"]:
+            (self.server / artifact["path"]).write_bytes(jar(artifact))
+        (self.server / crafty.GEYSER_CONFIG).write_bytes(crafty._managed_file_bytes(self.raknet["managed_files"][0]))
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def adapter(self, api=None, manifest=None):
+        api = api or FakeAPI()
+        host = FakeHost(api)
+        host.compose = self.root / "compose.yaml"
+        host.compose.write_bytes(crafty.render_compose(self.raknet, self.root / "crafty"))
+        for artifact in (manifest or self.manifest)["artifacts"]:
+            host.artifacts[artifact["url"]] = jar(artifact)
+        return crafty.Adapter(config(self.root), api, host, manifest or self.manifest), api, host
+
+    def geyser_config(self) -> bytes:
+        return (self.server / crafty.GEYSER_CONFIG).read_bytes()
+
+    def changes(self, host) -> list:
+        return [call for call in host.calls if call[0] in ("imds", "fetch", "compose")]
+
+    def test_a_nethernet_start_applies_the_config_ports_and_address_before_the_server_starts(self):
+        adapter, api, host = self.adapter()
+        result = adapter.start("family")
+        self.assertTrue(result["ready"])
+        self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.manifest["managed_files"][0]))
+        compose = host.compose.read_text()
+        for port in ('"25565:25565/tcp"', '"19132:19132/udp"', '"19132:19132/tcp"', '"19133:19133/udp"', '"127.0.0.1:8443:8443/tcp"'):
+            self.assertIn(port, compose)
+        self.assertEqual(api.command, ADVERTISED)
+        self.assertEqual(api.log, ["patch", "start_server"])
+        # The jars already match, so nothing is downloaded.
+        self.assertEqual(self.changes(host), [("imds",), ("compose", "write"), ("compose", "up")])
+        state = json.loads((self.root / "crafty" / "state" / "family-content.json").read_text())
+        self.assertEqual(state, {"artifacts": sorted(a["path"] for a in self.manifest["artifacts"]),
+                                 "revision": self.manifest["revision"]})
+
+    def test_a_start_with_the_content_in_place_changes_nothing(self):
+        adapter, api, host = self.adapter()
+        adapter.start("family")
+        api.is_running = False
+        config_inode = (self.server / crafty.GEYSER_CONFIG).stat().st_ino
+        host.calls.clear()
+        api.log.clear()
+        adapter.start("family")
+        self.assertEqual(self.changes(host), [("imds",)])
+        self.assertEqual(api.log, ["start_server"])
+        self.assertEqual((self.server / crafty.GEYSER_CONFIG).stat().st_ino, config_inode)
+
+    def test_a_new_address_replaces_the_one_crafty_launched_with(self):
+        api = FakeAPI()
+        api.command = "java -Xms1024M -Xmx5120M -DgeyserAdvertiseAddresses=34.1.2.3 -jar paper.jar nogui"
+        adapter, api, host = self.adapter(api)
+        adapter.start("family")
+        self.assertEqual(api.command, ADVERTISED)
+
+    def test_a_failed_address_lookup_refuses_the_start_and_changes_nothing(self):
+        adapter, api, host = self.adapter()
+        host.address = None
+        before = host.compose.read_bytes()
+        with self.assertRaises(crafty.CraftyError):
+            adapter.start("family")
+        self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.raknet["managed_files"][0]))
+        self.assertEqual(host.compose.read_bytes(), before)
+        self.assertEqual(api.log, [])
+
+    def test_a_raknet_manifest_needs_no_address_and_drops_it_from_the_launch(self):
+        api = FakeAPI()
+        api.command = ADVERTISED
+        adapter, api, host = self.adapter(api, self.raknet)
+        adapter.start("family")
+        self.assertEqual(api.command, "java -Xms1024M -Xmx5120M -jar paper.jar nogui")
+        # The installed Compose file is the one wanted; Docker confirms it once, and the record says so after.
+        self.assertEqual(self.changes(host), [("compose", "up")])
+        api.is_running = False
+        host.calls.clear()
+        adapter.start("family")
+        self.assertEqual(self.changes(host), [])
+
+    def test_a_new_paper_needs_the_world_archived_as_it_is(self):
+        manifest = content_manifest()
+        paper = manifest["artifacts"][0]
+        self.assertEqual(paper["name"], "paper")
+        paper["version"] = "26.2.1"
+        paper["sha256"] = hashlib.sha256(jar(paper)).hexdigest()
+        adapter, api, host = self.adapter(manifest=manifest)
+        with self.assertRaisesRegex(crafty.CraftyError, "archive"):
+            adapter.start("family")
+        self.assertEqual((self.server / "paper.jar").read_bytes(), b"paper 26.2")
+        self.assertEqual(self.changes(host), [("imds",)])
+        # Once the last archive holds the folder as it is, the new Paper goes in, before anything else.
+        adapter.record("family", backup="complete", fingerprint=crafty.fingerprint(self.server))
+        adapter.start("family")
+        self.assertEqual((self.server / "paper.jar").read_bytes(), b"paper 26.2.1")
+        self.assertEqual(api.actions, ["start_server"])
+
+    def test_jars_an_earlier_manifest_pinned_go_and_others_stay(self):
+        state = self.root / "crafty" / "state" / "family-content.json"
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"artifacts": [a["path"] for a in self.raknet["artifacts"]] + ["plugins/Old.jar"]}))
+        (self.server / "plugins" / "Old.jar").write_bytes(b"old")
+        (self.server / "plugins" / "Unmanaged.jar").write_bytes(b"kept")
+        adapter, api, host = self.adapter()
+        adapter.start("family")
+        self.assertFalse((self.server / "plugins" / "Old.jar").exists())
+        self.assertEqual((self.server / "plugins" / "Unmanaged.jar").read_bytes(), b"kept")
+        # The record keeps it, so a restored archive that still holds it loses it again on the next start.
+        self.assertIn("plugins/Old.jar", json.loads(state.read_text())["artifacts"])
+        api.is_running = False
+        (self.server / "plugins" / "Old.jar").write_bytes(b"old")
+        adapter.start("family")
+        self.assertFalse((self.server / "plugins" / "Old.jar").exists())
+        self.assertEqual((self.server / "plugins" / "Unmanaged.jar").read_bytes(), b"kept")
+
+    def test_a_start_with_nothing_to_change_still_records_the_applied_content(self):
+        state = self.root / "crafty" / "state" / "family-content.json"
+        adapter, api, host = self.adapter(manifest=self.raknet)
+        adapter.start("family")
+        self.assertEqual(json.loads(state.read_text()), {"artifacts": sorted(a["path"] for a in self.raknet["artifacts"]),
+                                                         "revision": self.raknet["revision"]})
+        # A later manifest that renames a pinned jar then removes the old name.
+        manifest = content_manifest("raknet")
+        core = next(artifact for artifact in manifest["artifacts"] if artifact["path"] == "plugins/multiverse-core-5.8.1.jar")
+        core["path"], core["version"] = "plugins/multiverse-core-5.9.0.jar", "5.9.0"
+        core["sha256"] = hashlib.sha256(jar(core)).hexdigest()
+        api.is_running = False
+        adapter, api, host = self.adapter(api, manifest)
+        adapter.start("family")
+        self.assertFalse((self.server / "plugins" / "multiverse-core-5.8.1.jar").exists())
+        self.assertEqual((self.server / "plugins" / "multiverse-core-5.9.0.jar").read_bytes(), jar(core))
+
+    def test_an_unreadable_record_of_applied_content_changes_nothing(self):
+        state = self.root / "crafty" / "state" / "family-content.json"
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"artifacts": ["../../etc/passwd"]}))
+        adapter, api, host = self.adapter()
+        with self.assertRaises(crafty.CraftyError):
+            adapter.start("family")
+        self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.raknet["managed_files"][0]))
+        self.assertEqual(api.log, [])
+
+    def test_a_failed_download_changes_nothing_in_the_server_folder(self):
+        manifest = content_manifest()
+        for artifact in manifest["artifacts"]:
+            if artifact["name"] in ("geyser", "floodgate"):
+                artifact["version"] += "-next"
+                artifact["sha256"] = hashlib.sha256(jar(artifact)).hexdigest()
+        adapter, api, host = self.adapter(manifest=manifest)
+        host.failing_downloads = {manifest["artifacts"][2]["url"]}
+        with self.assertRaises(crafty.CraftyError):
+            adapter.start("family")
+        self.assertEqual((self.server / "plugins" / "Geyser-Spigot.jar").read_bytes(), b"geyser 2.11.3")
+        self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.raknet["managed_files"][0]))
+        self.assertEqual(list((self.root / "crafty" / "staging").iterdir()), [])
+        self.assertEqual(api.log, [])
+
+    def test_a_server_started_during_the_downloads_keeps_its_jars(self):
+        manifest = content_manifest()
+        geyser = manifest["artifacts"][1]
+        geyser["version"] += "-next"
+        geyser["sha256"] = hashlib.sha256(jar(geyser)).hexdigest()
+        adapter, api, host = self.adapter(manifest=manifest)
+        fetch = host.fetch
+        host.fetch = lambda *args: (fetch(*args), setattr(api, "is_running", True))
+        with self.assertRaisesRegex(crafty.CraftyError, "while its content was downloading"):
+            adapter.start("family")
+        self.assertEqual((self.server / "plugins" / "Geyser-Spigot.jar").read_bytes(), b"geyser 2.11.3")
+        self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.raknet["managed_files"][0]))
+        self.assertEqual(api.log, [])
+
+    def test_a_cut_off_download_is_an_adapter_error(self):
+        host = crafty.Host()
+        with unittest.mock.patch.object(crafty, "download", side_effect=http.client.IncompleteRead(b"")):
+            with self.assertRaisesRegex(crafty.CraftyError, "cannot download Geyser.jar"):
+                host.fetch("https://example.invalid/geyser", "0" * 64, self.root / "Geyser.jar")
+
+    def test_downloaded_jars_keep_the_owner_and_mode_of_the_ones_they_replace(self):
+        manifest = content_manifest()
+        geyser = manifest["artifacts"][1]
+        geyser["version"] += "-next"
+        geyser["sha256"] = hashlib.sha256(jar(geyser)).hexdigest()
+        target = self.server / geyser["path"]
+        target.chmod(0o664)
+        adapter, api, host = self.adapter(manifest=manifest)
+        adapter.start("family")
+        self.assertEqual(target.read_bytes(), jar(geyser))
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o664)
+        self.assertEqual([name for name in os.listdir(self.server / "plugins") if name.startswith(".")], [])
+
+    def test_a_link_planted_for_a_pinned_file_is_replaced_never_followed(self):
+        outside = self.root / "outside"
+        outside.write_bytes(b"keep")
+        config_path = self.server / crafty.GEYSER_CONFIG
+        config_path.unlink()
+        config_path.symlink_to(outside)
+        jar_path = self.server / "plugins" / "Geyser-Spigot.jar"
+        jar_path.unlink()
+        jar_path.symlink_to(outside)
+        adapter, api, host = self.adapter()
+        adapter.start("family")
+        self.assertEqual(outside.read_bytes(), b"keep")
+        self.assertFalse(config_path.is_symlink())
+        self.assertEqual(config_path.read_bytes(), crafty._managed_file_bytes(self.manifest["managed_files"][0]))
+        self.assertFalse(jar_path.is_symlink())
+        self.assertEqual(jar_path.read_bytes(), b"geyser 2.11.3")
+
+    def test_a_folder_swapped_for_a_link_fails_the_start(self):
+        elsewhere = self.root / "elsewhere"
+        (self.server / "plugins").rename(elsewhere)
+        (self.server / "plugins").symlink_to(elsewhere)
+        adapter, api, host = self.adapter()
+        with self.assertRaises(crafty.CraftyError):
+            adapter.start("family")
+        self.assertEqual((elsewhere / "Geyser-Spigot" / "config.yml").read_bytes(),
+                         crafty._managed_file_bytes(self.raknet["managed_files"][0]))
+        self.assertEqual(api.log, [])
+
+    def test_compose_crafty_cannot_come_up_with_puts_the_previous_file_back(self):
+        adapter, api, host = self.adapter()
+        host.compose_failures = 1
+        with self.assertRaises(crafty.CraftyError):
+            adapter.start("family")
+        self.assertEqual(host.compose.read_bytes(), crafty.render_compose(self.raknet, self.root / "crafty"))
+        self.assertEqual(self.changes(host), [("imds",), ("compose", "write"), ("compose", "up"), ("compose", "write"), ("compose", "up")])
+        self.assertEqual(api.log, [])
+
+    def test_the_start_waits_until_the_recreated_crafty_lists_the_server(self):
+        adapter, api, host = self.adapter()
+        host.on_compose_up = lambda: setattr(api, "no_servers", True)
+        host.sleep = lambda seconds: (setattr(api, "no_servers", False), FakeHost.sleep(host, seconds))
+        adapter.start("family")
+        self.assertEqual(api.actions, ["start_server"])
+
+    def test_a_compose_file_docker_never_applied_is_applied_on_the_next_start(self):
+        adapter, api, host = self.adapter()
+        # A start cut off after writing the file, before Docker recreated Crafty.
+        host.compose.write_bytes(crafty.render_compose(self.manifest, self.root / "crafty"))
+        adapter.start("family")
+        self.assertEqual(self.changes(host), [("imds",), ("compose", "up")])
+
+    def test_a_retry_docker_cannot_apply_puts_back_the_file_it_last_applied(self):
+        adapter, api, host = self.adapter(manifest=self.raknet)
+        adapter.start("family")
+        api.is_running = False
+        applied = host.compose.read_bytes()
+        # A start cut off after writing the new file, before Docker applied it; then Docker fails on the retry.
+        adapter, api, host = self.adapter(api)
+        host.compose.write_bytes(crafty.render_compose(self.manifest, self.root / "crafty"))
+        host.compose_failures = 1
+        with self.assertRaisesRegex(crafty.CraftyError, "previous Compose file is back"):
+            adapter.start("family")
+        self.assertEqual(host.compose.read_bytes(), applied)
+        self.assertEqual(self.changes(host), [("imds",), ("compose", "up"), ("compose", "write"), ("compose", "up")])
+
+    def test_staged_downloads_never_take_their_names_from_the_manifest(self):
+        manifest = content_manifest()
+        geyser = manifest["artifacts"][1]
+        geyser["name"], geyser["version"] = "../../escape", geyser["version"] + "-next"
+        geyser["sha256"] = hashlib.sha256(jar(geyser)).hexdigest()
+        adapter, api, host = self.adapter(manifest=manifest)
+        adapter.start("family")
+        self.assertEqual((self.server / "plugins" / "Geyser-Spigot.jar").read_bytes(), jar(geyser))
+        self.assertFalse((self.root / "crafty" / "escape.jar").exists())
+        self.assertEqual([path.name for path in self.root.rglob("escape*")], [])
+
+    def test_docker_failing_on_an_unchanged_compose_file_leaves_it_alone(self):
+        adapter, api, host = self.adapter(manifest=self.raknet)
+        host.compose_failures = 1
+        with self.assertRaisesRegex(crafty.CraftyError, "did not bring Crafty up"):
+            adapter.start("family")
+        self.assertEqual(self.changes(host), [("compose", "up")])
+        self.assertEqual(host.compose.read_bytes(), crafty.render_compose(self.raknet, self.root / "crafty"))
+        self.assertEqual(api.log, [])
+
+    def test_a_server_started_while_crafty_restarts_fails_the_start(self):
+        adapter, api, host = self.adapter()
+        host.on_compose_up = lambda: setattr(api, "is_running", True)
+        with self.assertRaisesRegex(crafty.CraftyError, "restarted"):
+            adapter.start("family")
+        self.assertEqual(api.log, [])
+
+    def test_a_server_started_while_the_launch_command_changes_fails_the_start(self):
+        adapter, api, host = self.adapter()
+        adapter.start("family")
+        api.is_running = False
+        host.address = "34.212.10.21"
+        request = api.request
+
+        def started_meanwhile(method, path, body=None, text=None):
+            if method == "PATCH":
+                api.is_running = True
+            return request(method, path, body, text)
+
+        api.request = started_meanwhile
+        with self.assertRaisesRegex(crafty.CraftyError, "while its content was being applied"):
+            adapter.start("family")
+        self.assertEqual(api.actions, ["start_server"])
+
+    def test_crafty_must_keep_the_new_launch_command(self):
+        api = FakeAPI()
+        api.keeps_patches = False
+        adapter, api, host = self.adapter(api)
+        with self.assertRaises(crafty.CraftyError):
+            adapter.start("family")
+        self.assertEqual(api.actions, [])
+
+    def test_a_running_server_keeps_its_content(self):
+        adapter, api, host = self.adapter(FakeAPI(running=True))
+        adapter.start("family")
+        self.assertEqual(self.changes(host), [])
+        self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.raknet["managed_files"][0]))
+
+    def test_the_launch_command_carries_one_address_before_the_jar(self):
+        self.assertEqual(crafty.launch_command("java -Xmx5G -jar paper.jar nogui", "34.212.10.20"),
+                         "java -Xmx5G -DgeyserAdvertiseAddresses=34.212.10.20 -jar paper.jar nogui")
+        self.assertEqual(crafty.launch_command("java -jar paper.jar -DgeyserAdvertiseAddresses=1.1.1.1 nogui", None),
+                         "java -jar paper.jar nogui")
+        for command, address in (("java paper.jar", "34.212.10.20"), ("java -jar a.jar -jar b.jar", "34.212.10.20"),
+                                 ("java -jar paper.jar", "10.0.0.5"), ("java -jar paper.jar", "203.0.113.9"),
+                                 ("java -jar paper.jar", "34.212.10.20 -Devil=1")):
+            with self.assertRaises(crafty.CraftyError):
+                crafty.launch_command(command, address)
+
+    def test_a_raknet_compose_file_is_the_one_installed_before_nethernet(self):
+        self.assertEqual(crafty.render_compose(self.raknet, Path("/srv/minecraft/crafty")), INSTALLED_COMPOSE.encode())
+
+    def test_only_the_approved_geyser_configurations_are_accepted(self):
+        self.assertEqual(crafty.bedrock_transport(self.manifest), "both")
+        self.assertEqual(crafty.bedrock_transport(self.raknet), "raknet")
+        for change in ({"webrtc-port": 19134}, {"signaling": {"mode": "xbox"}}, {"transport": "nethernet"}):
+            manifest = content_manifest()
+            manifest["managed_files"][0]["content"]["bedrock"].update(change)
+            with self.assertRaises(crafty.CraftyError):
+                crafty.bedrock_transport(manifest)
+
+    def test_the_cli_start_applies_the_manifest_beside_the_adapter_and_fails_without_it(self):
+        path = self.root / "operator.json"
+        path.write_text(json.dumps(config(self.root)))
+        manifest = self.root / "server.json"
+        manifest.write_text(json.dumps(self.manifest))
+        _, api, host = self.adapter()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = crafty.main(["--config", str(path), "start", "family"], api=api, host=host, manifest=self.root / "missing.json")
+        self.assertEqual((code, json.loads(output.getvalue())), (1, {"error": "cannot read the pinned server content"}))
+        self.assertEqual(api.log, [])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = crafty.main(["--config", str(path), "start", "family"], api=api, host=host, manifest=manifest)
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(output.getvalue())["ready"])
+        self.assertEqual(api.log, ["patch", "start_server"])
+
+    def test_the_cli_renders_the_compose_file_the_installer_writes(self):
+        output = io.BytesIO()
+        with unittest.mock.patch.object(sys, "stdout", unittest.mock.Mock(buffer=output)):
+            code = crafty.main(["render-compose", "--manifest", str(ROOT / "runtime" / "crafty" / "server.json"),
+                                "--data-root", "/srv/minecraft"])
+        self.assertEqual(code, 0)
+        self.assertEqual(output.getvalue(), crafty.render_compose(crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json"),
+                                                                  Path("/srv/minecraft/crafty")))
 
 
 class AllowlistTests(unittest.TestCase):
@@ -945,6 +1413,9 @@ class ManifestTests(unittest.TestCase):
                          "multiverse-portals", "multiverse-netherportals"} <= names)
         self.assertTrue(manifest["server_properties"]["white-list"])
         self.assertTrue(manifest["server_properties"]["online-mode"])
+        # Craig approved both Bedrock transports with built-in signaling on 2026-10-03 (#30), activated by #26.
+        self.assertEqual(crafty.bedrock_transport(manifest), "both")
+        self.assertEqual(manifest["managed_files"][0]["sha256"], "961fc91c79c38f8e09fd14d1e959b06522ec72b595b933e78fef83563e4b8e42")
 
     def test_managed_file_outside_the_server_folder_is_refused(self):
         manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())
@@ -953,6 +1424,15 @@ class ManifestTests(unittest.TestCase):
             json.dump(manifest, handle)
             handle.flush()
             with self.assertRaises(crafty.CraftyError):
+                crafty.load_manifest(Path(handle.name))
+
+    def test_an_artifact_name_that_is_not_a_plain_word_is_refused(self):
+        manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())
+        manifest["artifacts"].append(dict(manifest["artifacts"][2], name="../../servers/x", path="plugins/Extra.jar"))
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(manifest, handle)
+            handle.flush()
+            with self.assertRaisesRegex(crafty.CraftyError, "plain unique name"):
                 crafty.load_manifest(Path(handle.name))
 
     def test_unpinned_image_is_refused(self):

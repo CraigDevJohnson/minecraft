@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install Crafty Controller and the lifecycle adapter on the prepared retained host.
-# Run as root from a reviewed checkout after the host bootstrap has mounted /srv/minecraft.
+# Run as root, after the host bootstrap has mounted /srv/minecraft, from a folder holding the reviewed commit's files in
+# their scripts/ and runtime/crafty/ layout (docs/operations/crafty.md#install-crafty-on-the-host).
 # Private files (/etc/minecraft/operator.json and the Crafty API token) are supplied separately.
 set -euo pipefail
 
@@ -39,46 +40,23 @@ findmnt --mountpoint "$data_root" >/dev/null || {
 	exit 1
 }
 
-image="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["crafty"]["image"])' "$source_dir/runtime/crafty/server.json")"
-[[ "$image" =~ ^registry\.gitlab\.com/crafty-controller/crafty-4@sha256:[0-9a-f]{64}$ ]] || {
-	printf 'The Crafty image must be pinned by digest.\n' >&2
+# The Compose file comes from the pinned server content (its Crafty image by digest and the game ports its Bedrock
+# transport needs), rendered the way each start renders it again (docs/adr/0008-the-adapter-applies-the-pinned-server-content.md).
+# Game ports are public; the Crafty web UI listens on loopback only and is reached through SSM.
+compose="$(python3 -B "$source_dir/scripts/minecraft_crafty.py" render-compose --manifest "$source_dir/runtime/crafty/server.json" --data-root "$data_root")" || {
+	printf 'The pinned server content is not valid: %s\n' "$compose" >&2
 	exit 1
 }
 
-install -d -m 0755 "$install_dir" "$install_dir/scripts" "$install_dir/runtime"
-install -m 0644 "$source_dir/scripts/minecraft_crafty.py" "$source_dir/scripts/minecraft_content.py" "$source_dir/scripts/minecraft_access.py" "$install_dir/scripts/"
-install -m 0644 "$source_dir/runtime/crafty/server.json" "$install_dir/runtime/"
+# The launcher replaces the same four files before each start (ADR 0007), so it keeps this list.
+install -d -m 0755 "$install_dir" "$install_dir/scripts"
+install -m 0644 "$source_dir/scripts/minecraft_crafty.py" "$source_dir/scripts/minecraft_content.py" "$source_dir/scripts/minecraft_access.py" "$source_dir/runtime/crafty/server.json" "$install_dir/scripts/"
 for directory in backups logs servers config import state staging; do
 	install -d -m 0770 "$crafty_root/$directory"
 done
 chmod 0700 "$crafty_root/state" "$crafty_root/staging"
 
-# Game ports are public; the Crafty web UI listens on loopback only and is reached through SSM.
-cat >"$install_dir/compose.yaml" <<COMPOSE
-services:
-  crafty:
-    image: ${image}
-    platform: linux/arm64
-    restart: unless-stopped
-    stop_grace_period: 180s
-    environment:
-      TZ: Etc/UTC
-    ports:
-      - "25565:25565/tcp"
-      - "19132:19132/udp"
-      - "127.0.0.1:8443:8443/tcp"
-    volumes:
-      - ${crafty_root}/backups:/crafty/backups
-      - ${crafty_root}/logs:/crafty/logs
-      - ${crafty_root}/servers:/crafty/servers
-      - ${crafty_root}/config:/crafty/app/config
-      - ${crafty_root}/import:/crafty/import
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
-COMPOSE
+printf '%s\n' "$compose" >"$install_dir/compose.yaml"
 chmod 0644 "$install_dir/compose.yaml"
 
 cat >/usr/local/sbin/minecraft-instance <<'LAUNCHER'
@@ -116,4 +94,4 @@ UNIT
 systemctl daemon-reload
 systemctl enable minecraft-crafty.service
 systemctl start minecraft-crafty.service
-printf 'Crafty is running. Reach it with the workstation admin tunnel, then follow docs/operations/crafty.md.\n'
+printf 'Crafty is running. Open its admin page through an SSM port forward, then follow docs/operations/crafty.md.\n'

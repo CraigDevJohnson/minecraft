@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -122,20 +125,58 @@ func TestTheOperatorCheckReadsTheCallerTheFunctionURLVerified(t *testing.T) {
 }
 
 func TestTheHostAdapterComesFromThePackageOnLambdaOrTheCheckout(t *testing.T) {
-	lambda := func(name string) string { return map[string]string{"LAMBDA_TASK_ROOT": "/var/task"}[name] }
-	if got := adapterSource(lambda); got != "/var/task/adapter" {
-		t.Fatalf("on Lambda the adapter is read from %q", got)
+	sum := func(t *testing.T, adapter *HostAdapter, name string) string {
+		t.Helper()
+		for i, held := range adapter.names {
+			if held == name {
+				return adapter.sums[i]
+			}
+		}
+		t.Fatalf("the adapter does not carry %s", name)
+		return ""
 	}
-	scripts, err := filepath.Abs(filepath.Join("..", "..", "scripts"))
+	pinned := func(t *testing.T, path string) string {
+		t.Helper()
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(content)
+		return hex.EncodeToString(digest[:])
+	}
+
+	task := t.TempDir()
+	if err := os.Mkdir(filepath.Join(task, "adapter"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range adapterFiles {
+		if err := os.WriteFile(filepath.Join(task, "adapter", name), []byte("packaged "+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lambda := func(name string) string { return map[string]string{"LAMBDA_TASK_ROOT": task}[name] }
+	adapter, err := LoadHostAdapter(adapterSource(lambda))
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Dir(scripts)
+	if got := sum(t, adapter, "server.json"); got != pinned(t, filepath.Join(task, "adapter", "server.json")) {
+		t.Fatal("on Lambda the adapter must be read from the package's adapter folder")
+	}
+
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
 	local := func(string) string { return "" }
 	for _, directory := range []string{filepath.Join(root, "lambda", "launcher"), root, filepath.Join(root, "docs")} {
 		t.Chdir(directory)
-		if got := adapterSource(local); got != scripts {
-			t.Fatalf("from %s the adapter is read from %q, want %q", directory, got, scripts)
+		adapter, err := LoadHostAdapter(adapterSource(local))
+		if err != nil {
+			t.Fatalf("from %s: %v", directory, err)
+		}
+		if sum(t, adapter, "minecraft_crafty.py") != pinned(t, filepath.Join(root, "scripts", "minecraft_crafty.py")) ||
+			sum(t, adapter, "server.json") != pinned(t, filepath.Join(root, "runtime", "crafty", "server.json")) {
+			t.Fatalf("from %s the adapter is not the checkout's scripts and pinned server content", directory)
 		}
 	}
 }

@@ -6,6 +6,7 @@ import io
 import ipaddress
 import json
 import os
+from pathlib import Path
 import queue
 import re
 import socket
@@ -22,6 +23,9 @@ AWS_TIMEOUT = 30
 NETWORK_TIMEOUT = 5
 MAX_STATUS_BYTES = 16 * 1024
 MAX_DISCOVERY_BYTES = 4096
+MAX_SIGNALING_BYTES = 16 * 1024
+# The pinned server content of the checked-out main, which says whether the server also offers NetherNet.
+MANIFEST = Path(__file__).resolve().parents[1] / "runtime" / "crafty" / "server.json"
 RAKNET_MAGIC = bytes.fromhex("00ffff00fefefefefdfdfdfd12345678")
 HOST_STATES = {"pending", "running", "stopping", "stopped", "shutting-down"}
 AWS_READS = {
@@ -195,6 +199,87 @@ def bedrock_discovery(address: str) -> dict:
         raise HealthError("bedrock_discovery_failed") from None
 
 
+def nethernet_selected() -> bool:
+    """Whether the pinned Geyser configuration adds NetherNet's built-in signaling and WebRTC to RakNet."""
+    try:
+        manifest = json.loads(MANIFEST.read_text())
+        [bedrock] = [item["content"]["bedrock"] for item in manifest["managed_files"]
+                     if item["path"] == "plugins/Geyser-Spigot/config.yml"]
+        return bedrock.get("transport") == "both"
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        raise HealthError("manifest_unreadable") from None
+
+
+def http_response(data: bytes, closed: bool) -> tuple[str, dict, bytes] | None:
+    """The status line, headers and body of one HTTP response, or None while more of it is due."""
+    head, separator, rest = data.partition(b"\r\n\r\n")
+    if not separator:
+        if closed:
+            raise ValueError
+        return None
+    status, *lines = head.decode("ascii").split("\r\n")
+    headers = {}
+    for line in lines:
+        name, colon, value = line.partition(":")
+        if not colon:
+            raise ValueError
+        headers[name.strip().lower()] = value.strip()
+    if headers.get("transfer-encoding", "").lower() == "chunked":
+        body = b""
+        while True:
+            size, separator, rest = rest.partition(b"\r\n")
+            length = int(size.split(b";")[0], 16) if separator else None
+            if length is not None and length < 0:
+                raise ValueError
+            if length is None or len(rest) < length + 2:
+                if closed:
+                    raise ValueError
+                return None
+            if rest[length:length + 2] != b"\r\n":
+                raise ValueError
+            body, rest = body + rest[:length], rest[length + 2:]
+            if length == 0:
+                return status, headers, body
+    if "content-length" in headers:
+        length = int(headers["content-length"])
+        if length < 0:
+            raise ValueError
+        if len(rest) < length:
+            if closed:
+                raise ValueError
+            return None
+        return status, headers, rest[:length]
+    return (status, headers, rest) if closed else None
+
+
+def nethernet_signaling(address: str) -> dict:
+    """Ask NetherNet's built-in signaling on TCP 19132 for its discovery answer. The GET admits no one."""
+    deadline = time.monotonic() + NETWORK_TIMEOUT
+    request = f"GET /v1/join HTTP/1.1\r\nHost: {HOSTNAME}:19132\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    try:
+        with socket.create_connection((address, 19132), timeout=NETWORK_TIMEOUT) as client:
+            client.settimeout(remaining_timeout(deadline))
+            client.sendall(request.encode("ascii"))
+            received, response = bytearray(), None
+            while response is None:
+                client.settimeout(remaining_timeout(deadline))
+                part = client.recv(MAX_SIGNALING_BYTES + 1 - len(received))
+                received.extend(part)
+                if len(received) > MAX_SIGNALING_BYTES:
+                    raise ValueError
+                response = http_response(bytes(received), closed=not part)
+        status, headers, body = response
+        if (not re.fullmatch(r"HTTP/1\.[01] 200(?: .*)?", status)
+                or headers.get("content-type", "").split(";")[0].strip().lower() != "application/json"):
+            raise ValueError
+        value = json.loads(body.decode("utf-8"))
+        if not isinstance(value, dict) or value.get("onlineAuth") is not True:
+            raise ValueError
+        return safe_status(value.get("version"), value.get("protocol"), value.get("players"), value.get("maxPlayers"))
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        raise HealthError("nethernet_signaling_failed") from None
+
+
 def observe(report: dict) -> None:
     if aws_read("identity") != ACCOUNT:
         raise HealthError("account_mismatch")
@@ -235,13 +320,18 @@ def observe(report: dict) -> None:
     report["java_status_ok"] = True
     report["bedrock_discovery_ok"] = False
     report["bedrock"] = bedrock_discovery(address)
-    report.update(bedrock_discovery_ok=True, game_ready=True, status="healthy")
+    report["bedrock_discovery_ok"] = True
+    if nethernet_selected():
+        report["nethernet_signaling_ok"] = False
+        report["nethernet"] = nethernet_signaling(address)
+        report["nethernet_signaling_ok"] = True
+    report.update(game_ready=True, status="healthy")
 
 
 def main(arguments: list[str] | None = None) -> int:
     report = {"state": "unknown", "status": "failed", "identity_verified": False,
               "ec2_checks_passed": None, "dns_matches_host": None, "java_status_ok": None,
-              "bedrock_discovery_ok": None, "game_ready": False}
+              "bedrock_discovery_ok": None, "nethernet_signaling_ok": None, "game_ready": False}
     try:
         supplied_arguments = arguments if arguments is not None else sys.argv[1:]
         if supplied_arguments:

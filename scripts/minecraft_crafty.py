@@ -5,7 +5,8 @@ Installed as /usr/local/sbin/minecraft-instance, so the launcher, the idle-stop 
 workstation's minecraft_host.py keep sending the same `start`, `host-drain`, `host-status` and
 `allowlist` requests. Crafty remains the only process manager: this adapter only asks Crafty's local
 API to start or stop the server or to run one console command, then makes a cold archive of the
-stopped server directory and stores it in S3.
+stopped server directory and stores it in S3. Before each start it brings the stopped server to the
+pinned content in server.json beside it (docs/adr/0008-the-adapter-applies-the-pinned-server-content.md).
 """
 
 from __future__ import annotations
@@ -15,10 +16,13 @@ import contextlib
 import datetime
 import fcntl
 import hashlib
+import http.client
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import socket
 import ssl
@@ -34,11 +38,18 @@ import urllib.request
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from minecraft_content import _managed_file_bytes  # noqa: E402  (canonical Geyser config bytes)
+from minecraft_content import _approved_geyser, _managed_file_bytes  # noqa: E402  (approved Geyser configs and their bytes)
 
+# The pinned server content the launcher installs beside the adapter, and the Compose file install_crafty.sh wrote.
+MANIFEST = Path(__file__).resolve().parent / "server.json"
+COMPOSE = Path("/opt/minecraft-crafty/compose.yaml")
+GEYSER_CONFIG = "plugins/Geyser-Spigot/config.yml"
+# NetherNet's WebRTC candidates carry the host's public address, which changes with every EC2 start.
+ADVERTISE = re.compile(r" -DgeyserAdvertiseAddresses=\S*")
 INSTANCE_ID = re.compile(r"[a-z][a-z0-9-]{0,31}")
 UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+JAR_PATH = re.compile(r"(?:plugins/)?[A-Za-z0-9._-]+\.jar")
 JAVA_NAME = re.compile(r"[A-Za-z0-9_]{3,16}")
 CONTAINER_SERVERS = "/crafty/servers/"
 ARTIFACT_HOSTS = {"fill-data.papermc.io", "download.geysermc.org", "github.com"}
@@ -198,6 +209,54 @@ class Host:
         if code:
             raise CraftyError("AWS download failed")
 
+    compose = COMPOSE
+
+    def read_compose(self) -> bytes | None:
+        try:
+            return self.compose.read_bytes()
+        except FileNotFoundError:
+            return None
+
+    def write_compose(self, content: bytes) -> None:
+        write_durably(self.compose, content, mode=0o644)
+
+    def compose_up(self) -> None:
+        """Have Docker bring Crafty's container in line with the Compose file and wait until it is up. Its own
+        output goes to standard error, so standard output stays the adapter's JSON answer."""
+        command = ["docker", "compose", "-f", str(self.compose), "up", "--detach", "--wait"]
+        try:
+            result = subprocess.run(command, stdout=sys.stderr, timeout=600, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CraftyError("docker compose could not run") from exc
+        if result.returncode:
+            raise CraftyError("docker compose did not bring Crafty up")
+
+    def public_ipv4(self) -> str:
+        """The host's current public IPv4 from IMDSv2: never through a proxy, and a redirect is refused."""
+        endpoint = "http://169.254.169.254/latest"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RefuseRedirects())
+        try:
+            request = urllib.request.Request(endpoint + "/api/token", method="PUT",
+                                             headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"})
+            with opener.open(request, timeout=5) as reply:
+                token = reply.read(4097).decode("ascii")
+            if not re.fullmatch(r"[\x21-\x7e]{1,4096}", token):
+                raise ValueError("invalid metadata token")
+            request = urllib.request.Request(endpoint + "/meta-data/public-ipv4", headers={"X-aws-ec2-metadata-token": token})
+            with opener.open(request, timeout=5) as reply:
+                address = ipaddress.IPv4Address(reply.read(65).decode("ascii").strip())
+            if not address.is_global or address.is_multicast:
+                raise ValueError("invalid public IPv4")
+            return str(address)
+        except (OSError, http.client.HTTPException, UnicodeError, ValueError) as exc:
+            raise CraftyError("cannot read the host's public IPv4 for NetherNet; retry once host networking is ready") from exc
+
+    def fetch(self, url: str, sha256: str, target: Path) -> None:
+        try:
+            download(url, sha256, target)
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            raise CraftyError(f"cannot download {target.name}; retry the start") from exc
+
     @contextlib.contextmanager
     def lock(self, path: Path):
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -210,6 +269,11 @@ class Host:
                 yield
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *arguments, **keywords):
+        return None
 
 
 class _Counted:
@@ -250,12 +314,14 @@ def fingerprint(source: Path) -> list:
 
 
 class Adapter:
-    def __init__(self, config: dict, api, host=None):
+    def __init__(self, config: dict, api, host=None, manifest: dict | None = None):
         self.config = config
         self.api = api
         self.host = host or Host()
         self.root = Path(config["data_root"])
         self.timeouts = {"start": 300, "stop": 300, **config.get("timeouts", {})}
+        # The pinned server content a start applies first; without it a start leaves the content as it is.
+        self.manifest = manifest
 
     # Crafty lookups -------------------------------------------------------------------------
 
@@ -382,6 +448,13 @@ class Adapter:
         except CraftyError:
             return False
 
+    def listed(self, instance: str) -> bool:
+        try:
+            self.running(self.server(instance))
+            return True
+        except CraftyError:
+            return False
+
     def start(self, instance: str) -> dict:
         with self.lifecycle():
             if self.draining():
@@ -394,6 +467,8 @@ class Adapter:
         server = self.server(instance)
         port = self.config["instances"][instance]["java_port"]
         if not self.running(server):
+            if self.manifest is not None:
+                server = self.apply_content(instance, server)
             # Mark the session first, so a crash before the next drain can never look backed up.
             self.record(instance, backup="pending", boot_id=self.host.boot_id())
             self.action(server, "start_server")
@@ -591,6 +666,124 @@ class Adapter:
             results = {name: self._stop(name) for name in sorted(self.config["instances"])}
         return {"draining": True, "instances": results}
 
+    # Pinned server content (docs/adr/0008-the-adapter-applies-the-pinned-server-content.md) ----
+
+    def apply_content(self, instance: str, server: dict) -> dict:
+        """Bring the stopped server to the manifest: its jars and managed files, Crafty's published ports, and the
+        launch command's NetherNet address. Answers the server as Crafty reports it afterwards."""
+        # A NetherNet start needs the host's address; without it nothing changes and the start fails.
+        address = self.host.public_ipv4() if bedrock_transport(self.manifest) == "both" else None
+        self.apply_files(instance, server)
+        if self.apply_compose():
+            # Docker recreated Crafty's container to publish the new ports; its API answers before it lists the server.
+            self.wait(lambda: self.listed(instance), self.timeouts["start"], "Crafty did not come back after its ports changed")
+            server = self.server(instance)
+            if self.running(server):
+                raise CraftyError("the server started while Crafty restarted; stop it, then start it again")
+        self.apply_launch_command(server, address)
+        # A server started from Crafty meanwhile runs the previous launch command, with a stale or no address.
+        if self.running(server):
+            raise CraftyError("the server started while its content was being applied; stop it, then start it again")
+        return server
+
+    def content_path(self, instance: str) -> Path:
+        return self.root / "crafty" / STATE_DIR / f"{instance}-content.json"
+
+    def apply_files(self, instance: str, server: dict) -> None:
+        """Replace each jar and managed file that differs from its pin, and remove the jars an earlier manifest
+        pinned that this one does not. Downloads finish before the server folder changes."""
+        artifacts = self.manifest["artifacts"]
+        wanted = {artifact["path"] for artifact in artifacts}
+        try:
+            recorded = json.loads(self.content_path(instance).read_text())
+            pinned = recorded["artifacts"]
+        except FileNotFoundError:
+            recorded, pinned = None, []  # a server staged from the first manifest holds only its own jars
+        except (OSError, ValueError, TypeError, KeyError):
+            pinned = None
+        if not isinstance(pinned, list) or not all(isinstance(path, str) and JAR_PATH.fullmatch(path) for path in pinned):
+            raise CraftyError("the record of the server's applied content cannot be read")
+        # Every jar a manifest has pinned, so a later one removes it, even from a restored older archive.
+        pinned = sorted(wanted | set(pinned))
+        with _ServerFolder(self.server_dir(server)) as folder:
+            # Paper first, so a later failure never leaves a new Paper for the next start to find unarchived.
+            changed = sorted((artifact for artifact in artifacts if folder.digest(artifact["path"]) != artifact["sha256"]),
+                             key=lambda artifact: artifact["name"] != "paper")
+            managed = [item for item in self.manifest.get("managed_files", []) if folder.digest(item["path"]) != item["sha256"]]
+            stale = [path for path in pinned if path not in wanted and folder.exists(path)]
+            if changed or managed or stale:
+                # A new Paper upgrades the world on its first start, so the last archive must hold the world as it is.
+                if any(artifact["name"] == "paper" for artifact in changed) and not self.unchanged(instance):
+                    raise CraftyError("a new Paper needs an archive of the world as it is; stop the server once, then start it")
+                staging = self.root / "crafty" / "staging"
+                staging.mkdir(mode=0o700, parents=True, exist_ok=True)
+                work = Path(tempfile.mkdtemp(dir=staging, prefix="content-"))
+                try:
+                    staged = {artifact["path"]: work / f"{index}.jar" for index, artifact in enumerate(changed)}
+                    for artifact in changed:
+                        self.host.fetch(artifact["url"], artifact["sha256"], staged[artifact["path"]])
+                    # Downloads take a while; never change the jars under a server someone started meanwhile.
+                    if self.running(server):
+                        raise CraftyError("the server started while its content was downloading; stop it, then start it again")
+                    # Record every jar before any lands, so a later manifest can remove what this change leaves.
+                    write_durably(self.content_path(instance), {"artifacts": pinned})
+                    for artifact in changed:
+                        with open(staged[artifact["path"]], "rb") as jar:
+                            folder.write(artifact["path"], iter(lambda: jar.read(1024 * 1024), b""), artifact["sha256"])
+                    for item in managed:
+                        folder.write(item["path"], [_managed_file_bytes(item)], item["sha256"])
+                    for path in stale:
+                        folder.remove(path)
+                finally:
+                    shutil.rmtree(work, ignore_errors=True)
+        record = {"artifacts": pinned, "revision": self.manifest.get("revision")}
+        if recorded != record:
+            write_durably(self.content_path(instance), record)
+
+    def apply_compose(self) -> bool:
+        """Write the Compose file the manifest calls for and have Docker apply it, answering whether Docker ran.
+        If Docker cannot bring Crafty up with a new file, the previous file goes back."""
+        wanted = render_compose(self.manifest, self.root / "crafty")
+        record = self.root / "crafty" / STATE_DIR / "compose-applied.yaml"
+        try:
+            applied = record.read_bytes()
+        except OSError:
+            applied = None
+        current = self.host.read_compose()
+        # The file alone is no proof: a start cut off before Docker finished, or a rerun installer, leaves it unapplied.
+        if current == wanted and applied == wanted:
+            return False
+        # What to put back if Docker fails: the copy of the file it last applied, else the file in place.
+        previous = applied if applied is not None else current
+        if current != wanted:
+            self.host.write_compose(wanted)
+        try:
+            self.host.compose_up()
+        except CraftyError:
+            if previous is None or previous == wanted:
+                raise CraftyError("docker compose did not bring Crafty up; check minecraft-crafty.service") from None
+            self.host.write_compose(previous)
+            with contextlib.suppress(CraftyError):
+                self.host.compose_up()
+            raise CraftyError("Crafty did not come up with the new ports; the previous Compose file is back") from None
+        write_durably(record, wanted)
+        return True
+
+    def apply_launch_command(self, server: dict, address: str | None) -> None:
+        """Have Crafty launch the server with the host's current NetherNet address, or with none for RakNet alone."""
+        path = f"/api/v2/servers/{server['server_id']}"
+        current = self.api.request("GET", path).get("data")
+        current = current.get("execution_command") if isinstance(current, dict) else None
+        if not isinstance(current, str):
+            raise CraftyError("Crafty did not report the server's launch command")
+        wanted = launch_command(current, address)
+        if wanted == current:
+            return
+        self.api.request("PATCH", path, {"execution_command": wanted})
+        stored = self.api.request("GET", path).get("data")
+        if not isinstance(stored, dict) or stored.get("execution_command") != wanted:
+            raise CraftyError("Crafty did not keep the server's new launch command")
+
     # Allowlist ------------------------------------------------------------------------------
 
     def console(self, server: dict, line: str) -> None:
@@ -783,6 +976,140 @@ class _Console:
             os.close(folder)
 
 
+class _ServerFolder:
+    """The stopped server's folder, reached only through descriptors that never follow a link. Crafty's own account
+    can write there, so a name it swapped for a link must never send root's reads or writes elsewhere."""
+
+    def __init__(self, path: Path):
+        try:
+            self.fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise CraftyError("the Crafty server directory is missing") from exc
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *details):
+        os.close(self.fd)
+
+    def _parent(self, path: str, create: bool = False) -> tuple[int, str]:
+        """A descriptor of the folder holding path, which the caller closes, and path's last name. A missing folder
+        raises FileNotFoundError, or with create is made as the folder above it is owned."""
+        *folders, name = path.split("/")
+        current = os.dup(self.fd)
+        try:
+            for folder in folders:
+                try:
+                    below = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    os.mkdir(folder, 0o755, dir_fd=current)
+                    below = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+                    above = os.fstat(current)
+                    os.fchown(below, above.st_uid, above.st_gid)
+                os.close(current)
+                current = below
+        except FileNotFoundError:
+            os.close(current)
+            raise
+        except OSError as exc:
+            os.close(current)
+            raise CraftyError(f"{path} in the server folder is not reached through plain folders") from exc
+        return current, name
+
+    def digest(self, path: str) -> str | None:
+        """The SHA-256 of the regular file at path, or None for anything else."""
+        try:
+            folder, name = self._parent(path)
+        except FileNotFoundError:
+            return None
+        try:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+        except OSError:
+            return None  # missing, or a link: never the pinned file, and replacing it never follows it
+        finally:
+            os.close(folder)
+        with os.fdopen(descriptor, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return None
+            digest = hashlib.sha256()
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def exists(self, path: str) -> bool:
+        try:
+            folder, name = self._parent(path)
+        except FileNotFoundError:
+            return False
+        try:
+            os.stat(name, dir_fd=folder, follow_symlinks=False)
+            return True
+        except FileNotFoundError:
+            return False
+        finally:
+            os.close(folder)
+
+    def write(self, path: str, chunks, sha256: str) -> None:
+        """Replace path with chunks' bytes, which must hash to sha256, owned as the file it replaces or else as its
+        folder, so the server's own account can still read and replace it."""
+        folder, name = self._parent(path, create=True)
+        try:
+            try:
+                current = os.stat(name, dir_fd=folder, follow_symlinks=False)
+            except FileNotFoundError:
+                current = None
+            if current is not None and stat.S_ISREG(current.st_mode):
+                owner, mode = (current.st_uid, current.st_gid), stat.S_IMODE(current.st_mode) & 0o775
+            else:
+                above = os.fstat(folder)
+                owner, mode = (above.st_uid, above.st_gid), 0o644
+            partial = f".{name}.{secrets.token_hex(8)}"
+            descriptor = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+            try:
+                with os.fdopen(descriptor, "wb") as output:
+                    os.fchown(output.fileno(), *owner)
+                    os.fchmod(output.fileno(), mode)
+                    digest = hashlib.sha256()
+                    for chunk in chunks:
+                        output.write(chunk)
+                        digest.update(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+                    written = os.fstat(output.fileno())
+                if digest.hexdigest() != sha256:
+                    raise CraftyError(f"{path} does not match its pinned SHA-256")
+                os.replace(partial, name, src_dir_fd=folder, dst_dir_fd=folder)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(partial, dir_fd=folder)
+                raise
+            landed = os.stat(name, dir_fd=folder, follow_symlinks=False)
+            if (landed.st_dev, landed.st_ino) != (written.st_dev, written.st_ino):
+                raise CraftyError(f"{path} changed while it was replaced; start the server again")
+            os.fsync(folder)
+        except OSError as exc:
+            raise CraftyError(f"{path} could not be written in the server folder") from exc
+        finally:
+            os.close(folder)
+
+    def remove(self, path: str) -> None:
+        try:
+            folder, name = self._parent(path)
+        except FileNotFoundError:
+            return
+        try:
+            os.unlink(name, dir_fd=folder)  # removes a link itself, never what it points at
+            os.fsync(folder)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise CraftyError(f"{path} could not be removed from the server folder") from exc
+        finally:
+            os.close(folder)
+
+
 def read_player_file(path: Path) -> dict:
     """Read the private identity file the launcher writes for one allowlist change: a regular file owned by
     this user with mode 0600, never a link. Its contents are never echoed."""
@@ -807,11 +1134,14 @@ def read_player_file(path: Path) -> dict:
     return value
 
 
-def write_durably(path: Path, value: dict) -> None:
-    """Replace a small JSON state file so that, once this returns, a power loss cannot undo it."""
+def write_durably(path: Path, value: dict | bytes, *, mode: int | None = None) -> None:
+    """Replace a small JSON state file, or a file holding value's bytes, so that, once this returns, a power loss
+    cannot undo it."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as output:
-        json.dump(value, output, sort_keys=True)
+    with tempfile.NamedTemporaryFile("wb", dir=path.parent, delete=False) as output:
+        output.write(value if isinstance(value, bytes) else json.dumps(value, sort_keys=True).encode())
+        if mode is not None:
+            os.fchmod(output.fileno(), mode)
         output.flush()
         os.fsync(output.fileno())
         temporary = Path(output.name)
@@ -826,18 +1156,22 @@ def write_durably(path: Path, value: dict) -> None:
 # First setup: stage the reviewed server files for Crafty's "import from folder" ------------
 
 def load_manifest(path: Path) -> dict:
-    manifest = json.loads(Path(path).read_text())
-    if manifest.get("schema_version") != 1 or not re.fullmatch(
+    try:
+        manifest = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        raise CraftyError("cannot read the pinned server content") from exc
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1 or not re.fullmatch(
             r"registry\.gitlab\.com/crafty-controller/crafty-4@sha256:[0-9a-f]{64}", manifest.get("crafty", {}).get("image", "")):
         raise CraftyError("manifest must pin the Crafty image by digest")
     names, paths = set(), set()
     for artifact in manifest.get("artifacts", []):
         url = urllib.parse.urlsplit(artifact.get("url", ""))
         path = artifact.get("path", "")
-        if (artifact.get("name") in names or path in paths or not SHA256.fullmatch(artifact.get("sha256", ""))
+        if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", str(artifact.get("name", ""))) or artifact["name"] in names
+                or path in paths or not SHA256.fullmatch(artifact.get("sha256", ""))
                 or url.scheme != "https" or url.netloc not in ARTIFACT_HOSTS or url.query or "latest" in url.path.lower()
-                or not re.fullmatch(r"(?:plugins/)?[A-Za-z0-9._-]+\.jar", path)):
-            raise CraftyError("every artifact needs a unique jar path, an exact HTTPS URL and a SHA-256")
+                or not JAR_PATH.fullmatch(path)):
+            raise CraftyError("every artifact needs a plain unique name and jar path, an exact HTTPS URL and a SHA-256")
         names.add(artifact["name"])
         paths.add(path)
     if not {"paper", "geyser", "floodgate", "multiverse-core", "multiverse-inventories"} <= names:
@@ -848,9 +1182,52 @@ def load_manifest(path: Path) -> dict:
             raise CraftyError("managed file paths must be plain relative paths")
         if hashlib.sha256(_managed_file_bytes(managed)).hexdigest() != managed.get("sha256"):
             raise CraftyError("managed configuration checksum mismatch")
-    if not isinstance(manifest.get("server_properties"), dict):
-        raise CraftyError("manifest must include server properties")
+    if not isinstance(manifest.get("server_properties"), dict) or type(manifest["server_properties"].get("server-port")) is not int:
+        raise CraftyError("manifest must include server properties with the Java port")
+    bedrock_transport(manifest)
     return manifest
+
+
+def bedrock_transport(manifest: dict) -> str:
+    """The Bedrock transport the manifest's Geyser configuration selects, which must be one Craig approved (#30):
+    RakNet alone, or both, which adds NetherNet's built-in signaling on TCP 19132 and WebRTC on UDP 19133."""
+    configs = [item.get("content") for item in manifest.get("managed_files", []) if item.get("path") == GEYSER_CONFIG]
+    if configs == [_approved_geyser(8)]:
+        return "raknet"
+    if configs == [_approved_geyser(8, dual_transport=True)]:
+        return "both"
+    raise CraftyError("the Geyser configuration must be one of the approved Bedrock transports")
+
+
+def render_compose(manifest: dict, crafty_root: Path) -> bytes:
+    """Crafty's Compose file: the pinned image, the game ports the transport needs, the web UI on loopback only (reached
+    through SSM), and Crafty's folders on the retained disk."""
+    java = manifest["server_properties"]["server-port"]
+    ports = [f"{java}:{java}/tcp", "19132:19132/udp"]
+    if bedrock_transport(manifest) == "both":
+        ports += ["19132:19132/tcp", "19133:19133/udp"]
+    lines = ["services:", "  crafty:", f"    image: {manifest['crafty']['image']}", "    platform: linux/arm64",
+             "    restart: unless-stopped", "    stop_grace_period: 180s", "    environment:", "      TZ: Etc/UTC", "    ports:"]
+    lines += [f'      - "{port}"' for port in [*ports, "127.0.0.1:8443:8443/tcp"]]
+    lines.append("    volumes:")
+    lines += [f"      - {crafty_root}/{folder}:/crafty/{inside}" for folder, inside in
+              (("backups", "backups"), ("logs", "logs"), ("servers", "servers"), ("config", "app/config"), ("import", "import"))]
+    lines += ["    logging:", "      driver: json-file", "      options:", "        max-size: 10m", '        max-file: "3"']
+    return ("\n".join(lines) + "\n").encode()
+
+
+def launch_command(current: str, address: str | None) -> str:
+    """Crafty's launch command with the NetherNet address flag for address before -jar, or with no flag for None."""
+    command = ADVERTISE.sub("", current)
+    if address is None:
+        return command
+    try:
+        public = ipaddress.IPv4Address(address).is_global
+    except ValueError:
+        public = False
+    if command.count(" -jar ") != 1 or not public:
+        raise CraftyError("the server's launch command cannot carry the NetherNet address")
+    return command.replace(" -jar ", f" -DgeyserAdvertiseAddresses={address} -jar ", 1)
 
 
 def download(url: str, sha256: str, target: Path) -> None:
@@ -934,7 +1311,7 @@ def stage_import(manifest: dict, destination: Path, *, fetch=download, archive: 
     return destination
 
 
-def main(argv=None, *, api=None, host=None) -> int:
+def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("/etc/minecraft/operator.json"))
     commands = parser.add_subparsers(dest="action", required=True)
@@ -946,6 +1323,9 @@ def main(argv=None, *, api=None, host=None) -> int:
     stage.add_argument("--manifest", type=Path, required=True)
     stage.add_argument("--destination", type=Path, required=True)
     stage.add_argument("--archive", type=Path, help="also write the .zip that Crafty 4.11 imports")
+    compose = commands.add_parser("render-compose", help="print the Compose file the pinned server content calls for")
+    compose.add_argument("--manifest", type=Path, required=True)
+    compose.add_argument("--data-root", type=Path, required=True)
     create = commands.add_parser("import-server", help="create the Crafty server from a staged archive in import/upload")
     create.add_argument("instance")
     create.add_argument("--archive-name", required=True)
@@ -964,13 +1344,17 @@ def main(argv=None, *, api=None, host=None) -> int:
             path = stage_import(load_manifest(args.manifest), args.destination, archive=args.archive)
             print(json.dumps({"staged": str(path), **({"archive": str(args.archive)} if args.archive else {})}))
             return 0
+        if args.action == "render-compose":
+            sys.stdout.buffer.write(render_compose(load_manifest(args.manifest), args.data_root / "crafty"))
+            return 0
         config = load_config(args.config)
         if getattr(args, "instance", None) is not None and args.instance not in config["instances"]:
             raise CraftyError("instance is not configured")
         if api is None:
             token = Path(config["token_file"]).read_text().strip()
             api = CraftyAPI(config["crafty_url"], token)
-        adapter = Adapter(config, api, host)
+        # A start applies the pinned content the launcher installed beside the adapter, and fails without it.
+        adapter = Adapter(config, api, host, load_manifest(manifest) if args.action == "start" else None)
         handlers = {"start": adapter.start, "stop": adapter.stop, "status": adapter.status}
         if args.action in handlers:
             output = handlers[args.action](args.instance)

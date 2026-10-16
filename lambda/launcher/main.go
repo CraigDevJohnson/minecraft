@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -68,25 +69,29 @@ func loadConfig(getenv func(string) string) (Config, *DNSPointer, error) {
 	return cfg, dns, nil
 }
 
-// adapterSource names the folder holding the host adapter files: the package's adapter folder on Lambda
-// (scripts/package_idle_stop.py), anywhere else the scripts folder of the checkout that holds the working
-// directory, found by looking upward from it.
-func adapterSource(getenv func(string) string) string {
+// adapterSource answers the host adapter files: the package's adapter folder on Lambda
+// (scripts/package_idle_stop.py), anywhere else the checkout that holds the working directory, found by looking
+// upward from it.
+func adapterSource(getenv func(string) string) fs.FS {
 	if root := getenv("LAMBDA_TASK_ROOT"); root != "" {
-		return filepath.Join(root, "adapter")
+		return os.DirFS(filepath.Join(root, "adapter"))
 	}
+	return checkout{os.DirFS(checkoutRoot())}
+}
+
+// checkoutRoot answers the checkout that holds the working directory, or the working directory itself.
+func checkoutRoot() string {
 	working, err := os.Getwd()
 	if err != nil {
-		return "scripts"
+		return "."
 	}
 	for directory := working; ; {
-		scripts := filepath.Join(directory, "scripts")
-		if _, err := os.Stat(filepath.Join(scripts, "minecraft_crafty.py")); err == nil {
-			return scripts
+		if _, err := os.Stat(filepath.Join(directory, "scripts", "minecraft_crafty.py")); err == nil {
+			return directory
 		}
 		parent := filepath.Dir(directory)
 		if parent == directory {
-			return filepath.Join(working, "scripts")
+			return working
 		}
 		directory = parent
 	}
@@ -104,7 +109,7 @@ func main() {
 		log.Error("load AWS configuration", "err", err)
 		os.Exit(1)
 	}
-	adapter, err := LoadHostAdapter(os.DirFS(adapterSource(os.Getenv)))
+	adapter, err := LoadHostAdapter(adapterSource(os.Getenv))
 	if err != nil {
 		log.Error("host adapter", "err", err)
 		os.Exit(1)
