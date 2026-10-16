@@ -681,6 +681,9 @@ class Adapter:
             if self.running(server):
                 raise CraftyError("the server started while Crafty restarted; stop it, then start it again")
         self.apply_launch_command(server, address)
+        # A server started from Crafty meanwhile runs the previous launch command, with a stale or no address.
+        if self.running(server):
+            raise CraftyError("the server started while its content was being applied; stop it, then start it again")
         return server
 
     def content_path(self, instance: str) -> Path:

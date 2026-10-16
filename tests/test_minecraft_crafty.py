@@ -815,6 +815,23 @@ class ContentTests(unittest.TestCase):
             adapter.start("family")
         self.assertEqual(api.log, [])
 
+    def test_a_server_started_while_the_launch_command_changes_fails_the_start(self):
+        adapter, api, host = self.adapter()
+        adapter.start("family")
+        api.is_running = False
+        host.address = "34.212.10.21"
+        request = api.request
+
+        def started_meanwhile(method, path, body=None, text=None):
+            if method == "PATCH":
+                api.is_running = True
+            return request(method, path, body, text)
+
+        api.request = started_meanwhile
+        with self.assertRaisesRegex(crafty.CraftyError, "while its content was being applied"):
+            adapter.start("family")
+        self.assertEqual(api.actions, ["start_server"])
+
     def test_crafty_must_keep_the_new_launch_command(self):
         api = FakeAPI()
         api.keeps_patches = False
