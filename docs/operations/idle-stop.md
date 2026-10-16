@@ -52,7 +52,7 @@ idle_stop = {
 
 Have an administrator create the token secret in the deployment account and region before enabling the function. Store a plain SecretString API token using the default AWS-managed encryption key; a custom key needs separately reviewed decrypt permissions that this role does not grant. Never put the token in deployment inputs, environment variables, source, or user data.
 
-Plan and apply through the [Deploy workflow](cloud-controls.md#deploys). Expect creates only: the function and its role and inline policy, the state parameter, the log group, the schedule rule, its target and permission, the SNS topic and email subscription, and the alarm. Any change to the host, data volume, buckets, or network is a stop condition. After the approved apply, confirm the SNS subscription email so the alarm can reach you.
+Plan and apply through the [Deploy workflow](cloud-controls.md#deploys). Expect creates for the function and its role and inline policy, the state parameter, the log group, the schedule rule, its target and permission, the SNS topic and email subscription, and the alarm. Each launcher also changes in place: its inline policy gains `ReadIdleStopProgress` and its `IDLE_STOP_STATE_PARAMETER` setting names the state parameter. Any other change, and any change to the host, data volume, buckets, or network, is a stop condition. After the approved apply, confirm the SNS subscription email so the alarm can reach you.
 
 ## Permissions
 

@@ -109,7 +109,7 @@ A start starts EC2, installs the adapter and `server.json` the launcher carries,
 - **Bedrock on a phone, tablet or PC** (iPhone, iPad, Windows): Play, Servers, Add Server, `mc.craigdevjohnson.com` with port `19132`, the same entry as before NetherNet. A client that still speaks RakNet joins over UDP 19132. A client that speaks NetherNet asks Geyser's built-in signaling on TCP 19132 and is then asked, once, whether to trust this server; the player accepts. Bedrock 26.60 clients join only this way. The prompt has not yet been seen on the family's devices.
 - **Consoles** (PlayStation, Switch, Xbox) cannot add a server. BedrockConnect is the optional route ([family device validation](family-device-validation.md)); it is untested, and #9 waived those tests.
 
-Geyser keeps the server's NetherNet identity in `plugins/Geyser-Spigot/nethernet/` in the server folder, so every archive holds it and a restore brings it back. Deleting that folder makes every player confirm the server again.
+Geyser keeps the server's NetherNet identity in `plugins/Geyser-Spigot/nethernet/` in the server folder. It creates it at the first start with both transports, so every archive stored after that start holds it and a restore brings it back. Restoring an archive from before that start, or deleting that folder, makes every NetherNet player confirm the server again.
 
 ## Recover from an archive
 
@@ -123,7 +123,7 @@ The command streams the archive from S3, checks it against its recorded SHA-256,
 
 The two archives from 2026-10-11 at 05:59Z have no `.sha256` beside them. The adapter that stored them (#53) put the SHA-256 in the object's `sha256` metadata instead, and `restore` falls back to that metadata; neither object has been read to confirm it. Retention does not count them, so they go once 14 newer archives with a `.sha256` exist.
 
-After losing the data disk, first rebuild the host through this runbook up to and including [Create the server](#create-the-server), which gives Crafty an empty `family` server, then run the same `restore`. Crafty's own login, API key and settings live on the data disk and are not in the archive, so they are set up again.
+After losing the data disk, first rebuild the host through this runbook up to and including [Create the server](#create-the-server), which gives Crafty an empty `family` server, then run the same `restore`. Crafty's own login, API key and settings live on the data disk and are not in the archive, so they are set up again. So does the record of which jars earlier manifests pinned: if the archive is older than a change that renamed or dropped a jar in `server.json`, delete that old jar from `plugins/` before the first start.
 
 ## Acceptance
 
