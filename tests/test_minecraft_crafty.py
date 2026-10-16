@@ -1,6 +1,7 @@
 import contextlib
 import datetime
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -630,6 +631,11 @@ class ContentTests(unittest.TestCase):
         adapter, api, host = self.adapter(api, self.raknet)
         adapter.start("family")
         self.assertEqual(api.command, "java -Xms1024M -Xmx5120M -jar paper.jar nogui")
+        # The installed Compose file is the one wanted; Docker confirms it once, and the record says so after.
+        self.assertEqual(self.changes(host), [("compose", "up")])
+        api.is_running = False
+        host.calls.clear()
+        adapter.start("family")
         self.assertEqual(self.changes(host), [])
 
     def test_a_new_paper_needs_the_world_archived_as_it_is(self):
@@ -659,7 +665,30 @@ class ContentTests(unittest.TestCase):
         adapter.start("family")
         self.assertFalse((self.server / "plugins" / "Old.jar").exists())
         self.assertEqual((self.server / "plugins" / "Unmanaged.jar").read_bytes(), b"kept")
-        self.assertNotIn("plugins/Old.jar", json.loads(state.read_text())["artifacts"])
+        # The record keeps it, so a restored archive that still holds it loses it again on the next start.
+        self.assertIn("plugins/Old.jar", json.loads(state.read_text())["artifacts"])
+        api.is_running = False
+        (self.server / "plugins" / "Old.jar").write_bytes(b"old")
+        adapter.start("family")
+        self.assertFalse((self.server / "plugins" / "Old.jar").exists())
+        self.assertEqual((self.server / "plugins" / "Unmanaged.jar").read_bytes(), b"kept")
+
+    def test_a_start_with_nothing_to_change_still_records_the_applied_content(self):
+        state = self.root / "crafty" / "state" / "family-content.json"
+        adapter, api, host = self.adapter(manifest=self.raknet)
+        adapter.start("family")
+        self.assertEqual(json.loads(state.read_text()), {"artifacts": sorted(a["path"] for a in self.raknet["artifacts"]),
+                                                         "revision": self.raknet["revision"]})
+        # A later manifest that renames a pinned jar then removes the old name.
+        manifest = content_manifest("raknet")
+        core = next(artifact for artifact in manifest["artifacts"] if artifact["path"] == "plugins/multiverse-core-5.8.1.jar")
+        core["path"], core["version"] = "plugins/multiverse-core-5.9.0.jar", "5.9.0"
+        core["sha256"] = hashlib.sha256(jar(core)).hexdigest()
+        api.is_running = False
+        adapter, api, host = self.adapter(api, manifest)
+        adapter.start("family")
+        self.assertFalse((self.server / "plugins" / "multiverse-core-5.8.1.jar").exists())
+        self.assertEqual((self.server / "plugins" / "multiverse-core-5.9.0.jar").read_bytes(), jar(core))
 
     def test_an_unreadable_record_of_applied_content_changes_nothing(self):
         state = self.root / "crafty" / "state" / "family-content.json"
@@ -685,6 +714,26 @@ class ContentTests(unittest.TestCase):
         self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.raknet["managed_files"][0]))
         self.assertEqual(list((self.root / "crafty" / "staging").iterdir()), [])
         self.assertEqual(api.log, [])
+
+    def test_a_server_started_during_the_downloads_keeps_its_jars(self):
+        manifest = content_manifest()
+        geyser = manifest["artifacts"][1]
+        geyser["version"] += "-next"
+        geyser["sha256"] = hashlib.sha256(jar(geyser)).hexdigest()
+        adapter, api, host = self.adapter(manifest=manifest)
+        fetch = host.fetch
+        host.fetch = lambda *args: (fetch(*args), setattr(api, "is_running", True))
+        with self.assertRaisesRegex(crafty.CraftyError, "while its content was downloading"):
+            adapter.start("family")
+        self.assertEqual((self.server / "plugins" / "Geyser-Spigot.jar").read_bytes(), b"geyser 2.11.3")
+        self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.raknet["managed_files"][0]))
+        self.assertEqual(api.log, [])
+
+    def test_a_cut_off_download_is_an_adapter_error(self):
+        host = crafty.Host()
+        with unittest.mock.patch.object(crafty, "download", side_effect=http.client.IncompleteRead(b"")):
+            with self.assertRaisesRegex(crafty.CraftyError, "cannot download Geyser.jar"):
+                host.fetch("https://example.invalid/geyser", "0" * 64, self.root / "Geyser.jar")
 
     def test_downloaded_jars_keep_the_owner_and_mode_of_the_ones_they_replace(self):
         manifest = content_manifest()
@@ -734,6 +783,29 @@ class ContentTests(unittest.TestCase):
             adapter.start("family")
         self.assertEqual(host.compose.read_bytes(), crafty.render_compose(self.raknet, self.root / "crafty"))
         self.assertEqual(self.changes(host), [("imds",), ("compose", "write"), ("compose", "up"), ("compose", "write"), ("compose", "up")])
+        self.assertEqual(api.log, [])
+
+    def test_the_start_waits_until_the_recreated_crafty_lists_the_server(self):
+        adapter, api, host = self.adapter()
+        host.on_compose_up = lambda: setattr(api, "no_servers", True)
+        host.sleep = lambda seconds: (setattr(api, "no_servers", False), FakeHost.sleep(host, seconds))
+        adapter.start("family")
+        self.assertEqual(api.actions, ["start_server"])
+
+    def test_a_compose_file_docker_never_applied_is_applied_on_the_next_start(self):
+        adapter, api, host = self.adapter()
+        # A start cut off after writing the file, before Docker recreated Crafty.
+        host.compose.write_bytes(crafty.render_compose(self.manifest, self.root / "crafty"))
+        adapter.start("family")
+        self.assertEqual(self.changes(host), [("imds",), ("compose", "up")])
+
+    def test_docker_failing_on_an_unchanged_compose_file_leaves_it_alone(self):
+        adapter, api, host = self.adapter(manifest=self.raknet)
+        host.compose_failures = 1
+        with self.assertRaisesRegex(crafty.CraftyError, "did not bring Crafty up"):
+            adapter.start("family")
+        self.assertEqual(self.changes(host), [("compose", "up")])
+        self.assertEqual(host.compose.read_bytes(), crafty.render_compose(self.raknet, self.root / "crafty"))
         self.assertEqual(api.log, [])
 
     def test_a_server_started_while_crafty_restarts_fails_the_start(self):

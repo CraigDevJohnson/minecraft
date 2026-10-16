@@ -252,7 +252,10 @@ class Host:
             raise CraftyError("cannot read the host's public IPv4 for NetherNet; retry once host networking is ready") from exc
 
     def fetch(self, url: str, sha256: str, target: Path) -> None:
-        download(url, sha256, target)
+        try:
+            download(url, sha256, target)
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            raise CraftyError(f"cannot download {target.name}; retry the start") from exc
 
     @contextlib.contextmanager
     def lock(self, path: Path):
@@ -441,6 +444,13 @@ class Adapter:
     def api_ready(self) -> bool:
         try:
             self.api.request("GET", "/api/v2/servers")
+            return True
+        except CraftyError:
+            return False
+
+    def listed(self, instance: str) -> bool:
+        try:
+            self.running(self.server(instance))
             return True
         except CraftyError:
             return False
@@ -665,8 +675,8 @@ class Adapter:
         address = self.host.public_ipv4() if bedrock_transport(self.manifest) == "both" else None
         self.apply_files(instance, server)
         if self.apply_compose():
-            # Docker recreated Crafty's container to publish the new ports.
-            self.wait(self.api_ready, self.timeouts["start"], "Crafty's API did not come back after its ports changed")
+            # Docker recreated Crafty's container to publish the new ports; its API answers before it lists the server.
+            self.wait(lambda: self.listed(instance), self.timeouts["start"], "Crafty did not come back after its ports changed")
             server = self.server(instance)
             if self.running(server):
                 raise CraftyError("the server started while Crafty restarted; stop it, then start it again")
@@ -682,59 +692,76 @@ class Adapter:
         artifacts = self.manifest["artifacts"]
         wanted = {artifact["path"] for artifact in artifacts}
         try:
-            applied = json.loads(self.content_path(instance).read_text())["artifacts"]
+            recorded = json.loads(self.content_path(instance).read_text())
+            pinned = recorded["artifacts"]
         except FileNotFoundError:
-            applied = []  # a server staged from the first manifest holds only its own jars
+            recorded, pinned = None, []  # a server staged from the first manifest holds only its own jars
         except (OSError, ValueError, TypeError, KeyError):
-            applied = None
-        if not isinstance(applied, list) or not all(isinstance(path, str) and JAR_PATH.fullmatch(path) for path in applied):
+            pinned = None
+        if not isinstance(pinned, list) or not all(isinstance(path, str) and JAR_PATH.fullmatch(path) for path in pinned):
             raise CraftyError("the record of the server's applied content cannot be read")
+        # Every jar a manifest has pinned, so a later one removes it, even from a restored older archive.
+        pinned = sorted(wanted | set(pinned))
         with _ServerFolder(self.server_dir(server)) as folder:
             # Paper first, so a later failure never leaves a new Paper for the next start to find unarchived.
             changed = sorted((artifact for artifact in artifacts if folder.digest(artifact["path"]) != artifact["sha256"]),
                              key=lambda artifact: artifact["name"] != "paper")
             managed = [item for item in self.manifest.get("managed_files", []) if folder.digest(item["path"]) != item["sha256"]]
-            stale = [path for path in applied if path not in wanted and folder.exists(path)]
-            if not (changed or managed or stale):
-                return
-            # A new Paper upgrades the world on its first start, so the last archive must hold the world as it is.
-            if any(artifact["name"] == "paper" for artifact in changed) and not self.unchanged(instance):
-                raise CraftyError("a new Paper needs an archive of the world as it is; stop the server once, then start it")
-            staging = self.root / "crafty" / "staging"
-            staging.mkdir(mode=0o700, parents=True, exist_ok=True)
-            work = Path(tempfile.mkdtemp(dir=staging, prefix="content-"))
-            try:
-                for artifact in changed:
-                    self.host.fetch(artifact["url"], artifact["sha256"], work / f"{artifact['name']}.jar")
-                # Record every jar this change may leave behind before any lands, so a later manifest can remove it.
-                write_durably(self.content_path(instance), {"artifacts": sorted(wanted | set(applied))})
-                for artifact in changed:
-                    with open(work / f"{artifact['name']}.jar", "rb") as staged:
-                        folder.write(artifact["path"], iter(lambda: staged.read(1024 * 1024), b""), artifact["sha256"])
-                for item in managed:
-                    folder.write(item["path"], [_managed_file_bytes(item)], item["sha256"])
-                for path in stale:
-                    folder.remove(path)
-            finally:
-                shutil.rmtree(work, ignore_errors=True)
-        write_durably(self.content_path(instance), {"artifacts": sorted(wanted), "revision": self.manifest.get("revision")})
+            stale = [path for path in pinned if path not in wanted and folder.exists(path)]
+            if changed or managed or stale:
+                # A new Paper upgrades the world on its first start, so the last archive must hold the world as it is.
+                if any(artifact["name"] == "paper" for artifact in changed) and not self.unchanged(instance):
+                    raise CraftyError("a new Paper needs an archive of the world as it is; stop the server once, then start it")
+                staging = self.root / "crafty" / "staging"
+                staging.mkdir(mode=0o700, parents=True, exist_ok=True)
+                work = Path(tempfile.mkdtemp(dir=staging, prefix="content-"))
+                try:
+                    for artifact in changed:
+                        self.host.fetch(artifact["url"], artifact["sha256"], work / f"{artifact['name']}.jar")
+                    # Downloads take a while; never change the jars under a server someone started meanwhile.
+                    if self.running(server):
+                        raise CraftyError("the server started while its content was downloading; stop it, then start it again")
+                    # Record every jar before any lands, so a later manifest can remove what this change leaves.
+                    write_durably(self.content_path(instance), {"artifacts": pinned})
+                    for artifact in changed:
+                        with open(work / f"{artifact['name']}.jar", "rb") as staged:
+                            folder.write(artifact["path"], iter(lambda: staged.read(1024 * 1024), b""), artifact["sha256"])
+                    for item in managed:
+                        folder.write(item["path"], [_managed_file_bytes(item)], item["sha256"])
+                    for path in stale:
+                        folder.remove(path)
+                finally:
+                    shutil.rmtree(work, ignore_errors=True)
+        record = {"artifacts": pinned, "revision": self.manifest.get("revision")}
+        if recorded != record:
+            write_durably(self.content_path(instance), record)
 
     def apply_compose(self) -> bool:
-        """Write the Compose file the manifest calls for and have Docker apply it, answering whether it changed.
-        If Docker cannot bring Crafty up with it, the previous file goes back."""
+        """Write the Compose file the manifest calls for and have Docker apply it, answering whether Docker ran.
+        If Docker cannot bring Crafty up with a new file, the previous file goes back."""
         wanted = render_compose(self.manifest, self.root / "crafty")
+        digest = hashlib.sha256(wanted).hexdigest()
+        record = self.root / "crafty" / STATE_DIR / "compose.json"
+        try:
+            applied = json.loads(record.read_text()).get("sha256")
+        except (OSError, ValueError, AttributeError):
+            applied = None
         current = self.host.read_compose()
-        if current == wanted:
+        # The file alone is no proof: a start cut off before Docker finished, or a rerun installer, leaves it unapplied.
+        if current == wanted and applied == digest:
             return False
-        self.host.write_compose(wanted)
+        if current != wanted:
+            self.host.write_compose(wanted)
         try:
             self.host.compose_up()
         except CraftyError:
-            if current is not None:
-                self.host.write_compose(current)
-                with contextlib.suppress(CraftyError):
-                    self.host.compose_up()
+            if current is None or current == wanted:
+                raise CraftyError("docker compose did not bring Crafty up; check minecraft-crafty.service") from None
+            self.host.write_compose(current)
+            with contextlib.suppress(CraftyError):
+                self.host.compose_up()
             raise CraftyError("Crafty did not come up with the new ports; the previous Compose file is back") from None
+        write_durably(record, {"sha256": digest})
         return True
 
     def apply_launch_command(self, server: dict, address: str | None) -> None:
