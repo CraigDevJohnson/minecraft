@@ -19,13 +19,16 @@ class LauncherPackageTests(unittest.TestCase):
     def test_the_adapter_lists_agree(self):
         installed = re.search(r'^install -m 0644 (.*) "\$install_dir/scripts/"$', (ROOT / "scripts" / "install_crafty.sh").read_text(), re.MULTILINE)
         self.assertIsNotNone(installed)
-        self.assertEqual(set(re.findall(r'"\$source_dir/scripts/([a-z_]+\.py)"', installed.group(1))), set(package.ADAPTER_FILES))
+        self.assertEqual(set(re.findall(r'"\$source_dir/(?:scripts|runtime/crafty)/([a-z_]+\.(?:py|json))"', installed.group(1))),
+                         set(package.ADAPTER_FILES))
+        self.assertEqual({name: package.source(name) for name in package.ADAPTER_FILES if name.endswith(".json")},
+                         {"server.json": ROOT / "runtime" / "crafty" / "server.json"})
         go = re.search(r"var adapterFiles = \[\]string\{([^}]*)\}", (ROOT / "lambda" / "launcher" / "hostadapter.go").read_text())
         self.assertIsNotNone(go)
         self.assertEqual(tuple(re.findall(r'"([^"]+)"', go.group(1))), package.ADAPTER_FILES)
 
     def test_the_adapter_carries_every_module_it_imports_from_scripts(self):
-        for name in package.ADAPTER_FILES:
+        for name in (name for name in package.ADAPTER_FILES if name.endswith(".py")):
             tree = ast.parse((ROOT / "scripts" / name).read_text())
             for node in ast.walk(tree):
                 modules = [alias.name for alias in node.names] if isinstance(node, ast.Import) else [node.module] if isinstance(node, ast.ImportFrom) else []
@@ -37,7 +40,7 @@ class LauncherPackageTests(unittest.TestCase):
         self.assertEqual(package.bundled(package.FUNCTIONS["idle-stop"]), [])
         self.assertEqual(
             package.bundled(package.FUNCTIONS["launcher"]),
-            [(f"adapter/{name}", ROOT / "scripts" / name) for name in package.ADAPTER_FILES],
+            [(f"adapter/{name}", package.source(name)) for name in package.ADAPTER_FILES],
         )
 
     def test_the_archive_is_reproducible_and_keeps_the_binary_executable(self):
@@ -56,7 +59,8 @@ class LauncherPackageTests(unittest.TestCase):
                     self.assertEqual(info.external_attr >> 16, 0o100755 if info.filename == "bootstrap" else 0o100644)
                 self.assertEqual(archive.read("bootstrap"), binary.read_bytes())
                 for name in package.ADAPTER_FILES:
-                    self.assertEqual(archive.read(f"adapter/{name}"), (ROOT / "scripts" / name).read_bytes())
+                    self.assertEqual(archive.read(f"adapter/{name}"), package.source(name).read_bytes())
+                self.assertEqual(archive.read("adapter/server.json"), (ROOT / "runtime" / "crafty" / "server.json").read_bytes())
 
 
 if __name__ == "__main__":

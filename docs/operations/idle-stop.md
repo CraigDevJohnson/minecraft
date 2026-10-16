@@ -39,19 +39,12 @@ aws events enable-rule --name "<resource_prefix>-idle-stop"
 
 An apply restores the rule's configured `ENABLED` state.
 
-## Build and enable
+## Enable
 
-Go is required (see [development](../development.md)). From the repository root:
-
-```sh
-.tools/bin/task lambda:package
-```
-
-This writes `.build/idle-stop.zip`, a reproducible ARM64 `bootstrap` for the `provided.al2023` runtime, and prints its SHA-256. Rebuilding the same source with the same Go toolchain produces identical bytes. A different toolchain can change the code hash. Add to the private deployment tfvars:
+The Deploy workflow builds `idle-stop.zip` itself (`scripts/package_idle_stop.py`, reproducible with the pinned Go toolchain) and names it through `package_dir`, so the private inputs carry no `package_path`. Add to the private `deployment.tfvars` the Deploy workflow reads from its `DEPLOYMENT_TFVARS` secret:
 
 ```hcl
 idle_stop = {
-  package_path = "/absolute/path/to/minecraft/.build/idle-stop.zip"
   idle_minutes = 30
   cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef"
 }
@@ -59,7 +52,7 @@ idle_stop = {
 
 Have an administrator create the token secret in the deployment account and region before enabling the function. Store a plain SecretString API token using the default AWS-managed encryption key; a custom key needs separately reviewed decrypt permissions that this role does not grant. Never put the token in deployment inputs, environment variables, source, or user data.
 
-Plan as described in [infrastructure](infrastructure.md). Expect creates only: the function and its role and inline policy, the state parameter, the log group, the schedule rule, its target and permission, the SNS topic and email subscription, and the alarm. Any change to the host, data volume, buckets, or network is a stop condition. After the approved apply, confirm the SNS subscription email so the alarm can reach you.
+Plan and apply through the [Deploy workflow](cloud-controls.md#deploys). Expect creates only: the function and its role and inline policy, the state parameter, the log group, the schedule rule, its target and permission, the SNS topic and email subscription, and the alarm. Any change to the host, data volume, buckets, or network is a stop condition. After the approved apply, confirm the SNS subscription email so the alarm can reach you.
 
 ## Permissions
 

@@ -1,6 +1,6 @@
 # ADR 0004: Rebuild on Crafty Controller and Multiverse
 
-Status: Accepted direction, 2026-10-10. Supersedes ADR 0001's Compose runtime and independent-instance layout. Implemented in the repository; live deployment pending. See the [Crafty runbook](../operations/crafty.md).
+Status: Accepted direction, 2026-10-10. Supersedes ADR 0001's Compose runtime and independent-instance layout, and ADR 0003's host sessions. Live since 2026-10-10 (#53, #55). See the [Crafty runbook](../operations/crafty.md).
 
 On October 10, 2026, Craig chose to rebuild around Crafty Controller and Multiverse instead of keeping the Compose stack with independent `survival` and `creative` instances. He also chose to keep the world on a disk while the server is off, rather than only in S3, and said the existing worlds were test worlds that do not need to be kept. See the [finalized build plan](../superpowers/plans/2026-10-10-finalized-build-plan.md).
 
@@ -9,7 +9,7 @@ On October 10, 2026, Craig chose to rebuild around Crafty Controller and Multive
 - **Runtime manager:** Crafty Controller 4 runs in Docker on the host, pinned by image digest, with its configuration, database, servers and backups on the retained data disk. Crafty is the only process manager for the Minecraft server; nothing else starts or stops the Java process.
 - **Server:** one Paper server managed by Crafty, with Geyser and Floodgate for Bedrock players and the Multiverse plugins (Core, Inventories, Portals, NetherPortals) for worlds. Every plugin is pinned by version and SHA-256, as today.
 - **Worlds:** fresh worlds, not migrated. `survival` is the default world with its Nether and End, and `creative` is a creative-mode world with its own inventory group. Players travel by portal from spawn. An adventure or lobby world can be added later through Multiverse without new ports or infrastructure.
-- **Ports:** one address for everyone. Java on TCP 25565 and Bedrock on UDP 19132, plus #26's NetherNet ports when that activates. The `creative` ports 25566 and 19134 are removed.
+- **Ports:** one address for everyone. Java on TCP 25565 and Bedrock on UDP 19132, plus NetherNet's signaling on TCP 19132 and WebRTC on UDP 19133 since #26 ([ADR 0008](0008-the-adapter-applies-the-pinned-server-content.md)). The `creative` ports 25566 and 19134 are removed.
 - **Lifecycle adapter:** `scripts/minecraft_crafty.py` is installed as the host's `minecraft-instance` command and answers the same `start`, `host-drain` and `host-status` requests through Crafty's loopback API, so the workstation `minecraft_host.py` and the idle-stop Lambda need no changes.
 - **Admin access:** the Crafty web UI (HTTPS 8443) is not exposed publicly. Craig reaches it through an SSM port-forwarding session from his workstation. Public access for the craigdevjohnson.com dashboard is a separate later decision.
 - **Backups:** every stop asks Crafty to stop the server, then archives the stopped server folder to the existing versioned S3 bucket with the host role, verifies the stored size and SHA-256, and keeps the newest 14 archives. EC2 is stopped only after that succeeds. Crafty's own scheduled backups can be added in its UI for mid-session snapshots on the data disk.

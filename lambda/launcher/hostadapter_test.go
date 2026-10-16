@@ -71,13 +71,17 @@ func inode(t *testing.T, path string) uint64 {
 }
 
 func TestTheRepositoryAdapterLoadsAndFitsOneCommand(t *testing.T) {
-	adapter, err := LoadHostAdapter(os.DirFS(filepath.Join("..", "..", "scripts")))
+	adapter, err := LoadHostAdapter(checkout{os.DirFS(filepath.Join("..", ".."))})
 	if err != nil {
 		t.Fatal(err)
 	}
 	script := adapter.Script()
 	for _, name := range adapterFiles {
-		content, err := os.ReadFile(filepath.Join("..", "..", "scripts", name))
+		path := filepath.Join("..", "..", "scripts", name)
+		if name == "server.json" {
+			path = filepath.Join("..", "..", "runtime", "crafty", name)
+		}
+		content, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}

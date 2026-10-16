@@ -2,7 +2,8 @@
 """Build a Lambda function (the idle stop or the launcher) for ARM64 and write a reproducible deployment zip.
 
 The launcher's zip also carries the host adapter it installs on the host before each start or allowlist change
-(docs/adr/0007-the-launcher-carries-the-host-adapter.md), in its adapter folder.
+(docs/adr/0007-the-launcher-carries-the-host-adapter.md), with the pinned server content the adapter applies, in its
+adapter folder.
 """
 from __future__ import annotations
 
@@ -21,16 +22,24 @@ FUNCTIONS = {
     "launcher": ROOT / "lambda" / "launcher",
 }
 # The files scripts/install_crafty.sh installs as the host adapter, the same list as adapterFiles in
-# lambda/launcher/hostadapter.go; tests/test_launcher_package.py keeps the three in step.
-ADAPTER_FILES = ("minecraft_access.py", "minecraft_content.py", "minecraft_crafty.py")
+# lambda/launcher/hostadapter.go; tests/test_launcher_package.py keeps the three in step. server.json is the pinned
+# server content each start applies (docs/adr/0008-the-adapter-applies-the-pinned-server-content.md).
+ADAPTER_FILES = ("minecraft_access.py", "minecraft_content.py", "server.json", "minecraft_crafty.py")
+# Where the checkout keeps the adapter files that are not in its scripts folder.
+ADAPTER_SOURCES = {"server.json": ROOT / "runtime" / "crafty" / "server.json"}
 # A fixed timestamp and mode keep the archive bytes, and so the Lambda code hash, stable across rebuilds.
 ZIP_TIME = (2026, 1, 1, 0, 0, 0)
 
 
-def bundled(source: Path) -> list[tuple[str, Path]]:
+def source(name: str) -> Path:
+    """Answer where the checkout keeps the adapter file name."""
+    return ADAPTER_SOURCES.get(name, ROOT / "scripts" / name)
+
+
+def bundled(function: Path) -> list[tuple[str, Path]]:
     """Answer the files a function's zip carries beside its binary, as (name in the zip, file) pairs."""
-    if source == FUNCTIONS["launcher"]:
-        return [(f"adapter/{name}", ROOT / "scripts" / name) for name in ADAPTER_FILES]
+    if function == FUNCTIONS["launcher"]:
+        return [(f"adapter/{name}", source(name)) for name in ADAPTER_FILES]
     return []
 
 
@@ -46,18 +55,18 @@ def write_archive(output: Path, binary: Path, files: list[tuple[str, Path]]) -> 
     partial.replace(output)
 
 
-def build(output: Path, source: Path = FUNCTIONS["idle-stop"]) -> str:
+def build(output: Path, function: Path = FUNCTIONS["idle-stop"]) -> str:
     with tempfile.TemporaryDirectory(prefix="lambda-") as directory:
         binary = Path(directory) / "bootstrap"
         environment = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64", "GOFLAGS": "-mod=readonly"}
         subprocess.run(
             ["go", "build", "-trimpath", "-buildvcs=false", "-tags", "lambda.norpc", "-ldflags", "-s -w -buildid=", "-o", str(binary), "."],
-            cwd=source,
+            cwd=function,
             env=environment,
             check=True,
             timeout=600,
         )
-        write_archive(output, binary, bundled(source))
+        write_archive(output, binary, bundled(function))
     return hashlib.sha256(output.read_bytes()).hexdigest()
 
 
