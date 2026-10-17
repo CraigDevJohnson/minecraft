@@ -166,6 +166,22 @@ class Host:
     def boot_id(self) -> str:
         return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
+    def works_in(self, folder: Path) -> bool:
+        """Whether any process on the host has folder as its working directory, wherever the folder has moved since,
+        as Crafty's game has its server folder. Root sees the processes in Crafty's container too."""
+        wanted = os.stat(folder, follow_symlinks=False)
+        with os.scandir("/proc") as entries:
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    cwd = os.stat(f"/proc/{entry.name}/cwd")
+                except OSError:
+                    continue  # exited meanwhile, or a kernel thread
+                if (cwd.st_dev, cwd.st_ino) == (wanted.st_dev, wanted.st_ino):
+                    return True
+        return False
+
     def storage(self, root: str) -> dict:
         stats = os.statvfs(root)
         size, free, available = stats.f_blocks * stats.f_frsize, stats.f_bfree * stats.f_frsize, stats.f_bavail * stats.f_frsize
@@ -500,7 +516,7 @@ class Adapter:
             # A run cut off after storing this same login has only the removal below left to do, once that copy is on
             # disk: a run killed before its fsync can leave it written only in memory.
             if read_regular(admin_file, PLAYER_FILE_LIMIT) != data:
-                raise CraftyError(f"{admin_file} holds a login other than the one in {creds.name}; move it away, then run "
+                raise CraftyError(f"{admin_file} is not a plain copy of the login in {creds.name}; move it away, then run "
                                   "setup-api-key again") from None
             descriptor = os.open(admin_file, os.O_RDONLY | os.O_NOFOLLOW)
             try:
@@ -690,8 +706,9 @@ class Adapter:
                 # the adapter's first start leaves none.
                 archived = self.backup_state(instance) == "complete" and self.unchanged(instance)
                 # Crafty's own UI could have started the server while the archive unpacked, or while the check above
-                # read the world, so this is the last look before the swap.
-                if self.running(server):
+                # read the world, so this is the last look before the swap. Crafty reports a start only once it has
+                # sampled the game's CPU for half a second, so the host is asked too: a game works in its folder.
+                if self.running(server) or (target.exists() and self.host.works_in(target)):
                     raise CraftyError("the server was started during the restore; stop it and restore again")
                 replaced = None
                 if target.exists():
@@ -705,14 +722,20 @@ class Adapter:
                         replaced.rename(target)  # never leave the server without a folder
                     raise
                 # Crafty has no lock this adapter can hold, so a start from its UI in the instant between that look
-                # and the swap is caught here instead. Its game may be playing the folder just moved aside, so no
-                # later restore may remove that folder, and the restore fails for the operator to check.
-                if self.running(server):
-                    if replaced is not None and kept == "archived":
-                        replaced = replaced.rename(replaced.with_name("un" + replaced.name))
-                    held = f"; the folder it replaced is kept as staging/{replaced.name}" if replaced is not None else ""
-                    raise CraftyError(f"the server was started as the restore swapped its folder{held}; stop the server, "
-                                      "check which world it played, and restore again")
+                # and the swap is caught here instead: its game works in the folder just moved aside, which may then
+                # hold the only copy of its play. No later restore may remove that folder, and the restore fails for
+                # the operator. A look that cannot be answered counts as such a start. The message fits the
+                # launcher's 200 bytes with the longest instance name.
+                if replaced is not None:
+                    try:
+                        started = self.host.works_in(replaced) or self.running(server)
+                    except (CraftyError, OSError):
+                        started = True
+                    if started:
+                        if kept == "archived":
+                            replaced = replaced.rename(replaced.with_name("un" + replaced.name))
+                        raise CraftyError(f"the server started as the restore swapped folders; kept staging/{replaced.name}; "
+                                          "stop it, check which world it played, restore again")
                 self.record(instance, backup="complete", key=key, sha256=digest, boot_id=self.host.boot_id(),
                             fingerprint=fingerprint(target))
             finally:

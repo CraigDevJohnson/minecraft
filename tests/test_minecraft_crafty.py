@@ -115,6 +115,13 @@ class FakeHost:
         self.address = "34.212.10.20"
         self.artifacts = {}
         self.failing_downloads = set()
+        self.working = set()  # (st_dev, st_ino) of the folders a game works in
+
+    def works_in(self, folder):
+        if self.working is None:
+            raise OSError("the process table could not be read")
+        info = os.stat(folder, follow_symlinks=False)
+        return (info.st_dev, info.st_ino) in self.working
 
     def read_compose(self):
         return self.compose.read_bytes() if self.compose.exists() else None
@@ -533,32 +540,80 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual((staging / "unarchived-family-20261011T080000Z" / "level.dat").read_bytes(), b"played during the download")
 
     def test_restore_keeps_the_folder_it_moved_aside_when_crafty_starts_the_server_at_the_swap(self):
-        folder = self.played_server()
-        api = FakeAPI(running=True)
-        adapter, host = self.adapter(api)
-        self.archived(adapter, host)
-        staging = self.root / "crafty" / "staging"
+        # Started from Crafty's page just after the restore's last look. Crafty reports it at once, or only after its
+        # half-second CPU sample, when only the host sees the game in its folder; or the look cannot be answered.
+        for case in ("Crafty reports it", "only the host sees it", "the look fails", "no archive held the world"):
+            with self.subTest(case=case):
+                self.tearDown()
+                self.setUp()
+                folder = self.played_server()
+                api = FakeAPI(running=True)
+                adapter, host = self.adapter(api)
+                self.archived(adapter, host)
+                if case == "no archive held the world":
+                    (folder / "level.dat").write_bytes(b"played since")
+                staging = self.root / "crafty" / "staging"
 
-        def started_at_the_swap():
-            # Started from Crafty's page just after the restore's last look: its game may play the folder moved aside.
-            api.is_running = True
-            return datetime.datetime(2026, 10, 11, 8, 0, tzinfo=datetime.timezone.utc)
+                def started_at_the_swap():
+                    if case == "Crafty reports it":
+                        api.is_running = True
+                    elif case == "the look fails":
+                        host.working = None
+                    else:
+                        info = folder.stat()
+                        host.working.add((info.st_dev, info.st_ino))
+                    return datetime.datetime(2026, 10, 11, 8, 0, tzinfo=datetime.timezone.utc)
 
-        host.now = started_at_the_swap
-        with self.assertRaises(crafty.CraftyError) as caught:
-            adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
-        self.assertEqual(str(caught.exception), "the server was started as the restore swapped its folder; the folder it "
-                         "replaced is kept as staging/unarchived-family-20261011T080000Z; stop the server, check which "
-                         "world it played, and restore again")
-        kept = staging / "unarchived-family-20261011T080000Z"
-        self.assertEqual(sorted(path.name for path in staging.iterdir()), [kept.name])
-        self.assertEqual((kept / "level.dat").read_bytes(), b"first session")
-        self.assertTrue((folder / "level.dat").exists())
-        # Stopped and restored again, that folder stays.
-        api.is_running = False
-        host.now = lambda: datetime.datetime(2026, 10, 11, 9, 0, tzinfo=datetime.timezone.utc)
-        adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
-        self.assertEqual((kept / "level.dat").read_bytes(), b"first session")
+                host.now = started_at_the_swap
+                with self.assertRaises(crafty.CraftyError) as caught:
+                    adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+                self.assertEqual(str(caught.exception), "the server started as the restore swapped folders; kept "
+                                 "staging/unarchived-family-20261011T080000Z; stop it, check which world it played, restore again")
+                kept = staging / "unarchived-family-20261011T080000Z"
+                self.assertEqual(sorted(path.name for path in staging.iterdir()), [kept.name])
+                played = b"played since" if case == "no archive held the world" else b"first session"
+                self.assertEqual((kept / "level.dat").read_bytes(), played)
+                self.assertTrue((folder / "level.dat").exists())
+                # Stopped and restored again, that folder stays.
+                api.is_running, host.working = False, set()
+                host.now = lambda: datetime.datetime(2026, 10, 11, 9, 0, tzinfo=datetime.timezone.utc)
+                adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+                self.assertEqual((kept / "level.dat").read_bytes(), played)
+
+    def test_restore_refuses_a_game_crafty_has_not_reported_yet(self):
+        # Started from Crafty's page within its half-second CPU sample of the last look, or while the restore read
+        # the world: refused before the swap, with the world left in place.
+        for case in ("only the host sees it", "Crafty reports it while the world is read"):
+            with self.subTest(case=case):
+                self.tearDown()
+                self.setUp()
+                folder = self.played_server()
+                api = FakeAPI(running=True)
+                adapter, host = self.adapter(api)
+                self.archived(adapter, host)
+                if case == "only the host sees it":
+                    info = folder.stat()
+                    host.working.add((info.st_dev, info.st_ino))
+                else:
+                    unchanged = adapter.unchanged
+
+                    def started_meanwhile(instance):
+                        api.is_running = True
+                        return unchanged(instance)
+
+                    adapter.unchanged = started_meanwhile
+                with self.assertRaises(crafty.CraftyError) as caught:
+                    adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+                self.assertEqual(str(caught.exception), "the server was started during the restore; stop it and restore again")
+                self.assertEqual((folder / "level.dat").read_bytes(), b"first session")
+                self.assertEqual(list((self.root / "crafty" / "staging").iterdir()), [])
+
+    def test_the_swap_failure_names_its_folder_within_the_launcher_s_limit(self):
+        # The launcher drops an adapter reason over 200 bytes; instance names have at most 32 characters.
+        name = "unarchived-" + "x" * 32 + "-20261011T080000Z"
+        reason = f"the server started as the restore swapped folders; kept staging/{name}; stop it, check which world it played, restore again"
+        self.assertLessEqual(len(json.dumps(reason)) - 2, 200)
+        self.assertTrue(crafty.INSTANCE_ID.fullmatch("x" * 32))
 
     def test_restore_keeps_a_world_played_before_the_adapter_recorded_anything(self):
         # A fresh disk whose server was played from Crafty's own UI before the adapter's first start: no state
@@ -1744,8 +1799,17 @@ class SetupAPIKeyTests(unittest.TestCase):
                 if copied:
                     self.admin_file.write_text(self.login)
                     self.admin_file.chmod(0o600)
-                code, output = self.setup_api_key()
+                synced, fsync = [], os.fsync
+
+                def recorded(descriptor):
+                    synced.append((os.readlink(f"/proc/self/fd/{descriptor}"), os.path.lexists(self.creds)))
+                    fsync(descriptor)
+
+                with unittest.mock.patch.object(crafty.os, "fsync", recorded):
+                    code, output = self.setup_api_key()
                 self.assertEqual((code, json.loads(output)), (0, {"token_file": str(self.token_file), "admin_file": str(self.admin_file)}))
+                # The copy, written now or by the cut-off run, is on disk before the login it copies is removed.
+                self.assertIn((os.path.realpath(self.admin_file), True), synced)
                 self.assertNotIn(FIRST_ADMIN_PHRASE, output)
                 self.assertEqual(self.api.sent, checked)  # only the stored key's check, no new key
                 self.assertEqual(self.token_file.read_text(), FakeFreshCrafty.KEY + "\n")
@@ -1789,7 +1853,7 @@ class SetupAPIKeyTests(unittest.TestCase):
         self.token_file.write_text(FakeFreshCrafty.KEY)
         self.admin_file.write_text("earlier")
         code, output = self.setup_api_key()
-        refusal = f"{self.admin_file} holds a login other than the one in default-creds.txt; move it away, then run setup-api-key again"
+        refusal = f"{self.admin_file} is not a plain copy of the login in default-creds.txt; move it away, then run setup-api-key again"
         self.assertEqual((code, json.loads(output)), (1, {"error": refusal}))
         self.assertEqual(self.admin_file.read_text(), "earlier")
         self.assertEqual(self.creds.read_text(), self.login)
@@ -1906,6 +1970,23 @@ class CraftyAPITests(unittest.TestCase):
 
 
 class HostTests(unittest.TestCase):
+    def test_works_in_finds_a_process_in_its_folder_wherever_the_folder_moved(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            folder, moved, other = Path(scratch) / "server", Path(scratch) / "moved", Path(scratch) / "other"
+            folder.mkdir()
+            other.mkdir()
+            game = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=folder)
+            try:
+                host = crafty.Host()
+                self.assertTrue(host.works_in(folder))
+                folder.rename(moved)
+                self.assertTrue(host.works_in(moved))
+                self.assertFalse(host.works_in(other))
+            finally:
+                game.kill()
+                game.wait()
+            self.assertFalse(host.works_in(moved))
+
     def test_lifecycle_lock_refuses_a_second_command(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state" / "lifecycle.lock"

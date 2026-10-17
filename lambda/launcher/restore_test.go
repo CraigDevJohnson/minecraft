@@ -550,6 +550,24 @@ func TestFinishRestoreTiesItsFailureToTheRunItReached(t *testing.T) {
 	}
 }
 
+func TestFinishRestoreNeverTiesItsFailureToAnotherRun(t *testing.T) {
+	// The restore was recorded on an earlier run, and the host was stopped and started again before its follow-up
+	// looked: its failure keeps the earlier run, so a game started from the workstation on this one reads ready.
+	r := restoreRig(t)
+	earlier := now.Add(-20 * time.Minute)
+	r.setSession(t, Session{RequestedAt: now.Add(-time.Minute), LaunchTime: earlier, Phase: Restoring, RestoreKey: archiveKey})
+	if err := r.launcher.FinishStart(context.Background()); err == nil {
+		t.Fatal("a restore of another run must fail")
+	}
+	if session := r.session(t); session.Phase != Failed || !session.LaunchTime.Equal(earlier) || len(r.ssm.commands) != 0 {
+		t.Fatalf("session %+v commands=%v", session, r.ssm.commands)
+	}
+	r.gameUp = true
+	if status, err := r.launcher.Status(context.Background()); err != nil || status.State != Ready {
+		t.Fatalf("state=%s err=%v", status.State, err)
+	}
+}
+
 func TestFinishRestoreSendsOnlyAnArchiveOfThisServer(t *testing.T) {
 	for _, key := range []string{
 		"",
