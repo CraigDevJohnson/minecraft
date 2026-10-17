@@ -166,6 +166,10 @@ class Host:
     def boot_id(self) -> str:
         return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
+    def flush(self) -> None:
+        """Write every file and folder change on the host's disks through to them."""
+        os.sync()
+
     # The adapter's own mount namespace. A process in it, such as an operator's shell left in the server folder, is
     # not Crafty's game, which runs in Crafty's container.
     own_namespace = "/proc/self/ns/mnt"
@@ -743,6 +747,9 @@ class Adapter:
                             replaced = replaced.rename(replaced.with_name("un" + replaced.name))
                         raise CraftyError(f"the server started as the restore swapped folders; kept staging/{replaced.name}; "
                                           "stop it, check which world it played, restore again")
+                # The unpacked files and both renames reach the disk before the record says the archive is in place,
+                # so a power loss never leaves a record of a restore whose world the next boot does not have.
+                self.host.flush()
                 self.record(instance, backup="complete", key=key, sha256=digest, boot_id=self.host.boot_id(),
                             fingerprint=fingerprint(target))
             finally:

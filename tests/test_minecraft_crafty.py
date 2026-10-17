@@ -116,6 +116,7 @@ class FakeHost:
         self.artifacts = {}
         self.failing_downloads = set()
         self.working = set()  # (st_dev, st_ino) of the folders a game works in
+        self.on_flush = None
 
     def works_in(self, folder):
         if self.working is None:
@@ -167,6 +168,11 @@ class FakeHost:
 
     def boot_id(self):
         return self.boot
+
+    def flush(self):
+        self.calls.append(("flush",))
+        if self.on_flush:
+            self.on_flush()
 
     def lock(self, path):
         return contextlib.nullcontext()
@@ -579,6 +585,19 @@ class AdapterTests(unittest.TestCase):
                 host.now = lambda: datetime.datetime(2026, 10, 11, 9, 0, tzinfo=datetime.timezone.utc)
                 adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
                 self.assertEqual((kept / "level.dat").read_bytes(), played)
+
+    def test_restore_flushes_the_world_to_disk_before_recording_it(self):
+        folder = self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        self.archived(adapter, host)
+        state = adapter.state_path("family")
+        before, seen = state.read_bytes(), []
+        # At the flush the archive is in place, but the record still describes the world from before.
+        host.on_flush = lambda: seen.append((state.read_bytes() == before, (folder / "level.dat").read_bytes()))
+        adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+        self.assertEqual(seen, [(True, b"first session")])
+        self.assertNotEqual(state.read_bytes(), before)
 
     def test_restore_refuses_a_game_crafty_has_not_reported_yet(self):
         # Started from Crafty's page within its half-second CPU sample of the last look, or while the restore read
