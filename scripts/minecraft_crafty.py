@@ -166,18 +166,25 @@ class Host:
     def boot_id(self) -> str:
         return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
+    # The adapter's own mount namespace. A process in it, such as an operator's shell left in the server folder, is
+    # not Crafty's game, which runs in Crafty's container.
+    own_namespace = "/proc/self/ns/mnt"
+
     def works_in(self, folder: Path) -> bool:
-        """Whether any process on the host has folder as its working directory, wherever the folder has moved since,
-        as Crafty's game has its server folder. Root sees the processes in Crafty's container too."""
-        wanted = os.stat(folder, follow_symlinks=False)
+        """Whether a process in another mount namespace, as Crafty's game in its container, has folder as its working
+        directory, wherever the folder has moved since. Root sees the processes in Crafty's container too."""
+        wanted, own = os.stat(folder, follow_symlinks=False), os.stat(self.own_namespace)
         with os.scandir("/proc") as entries:
             for entry in entries:
                 if not entry.name.isdigit():
                     continue
                 try:
+                    namespace = os.stat(f"/proc/{entry.name}/ns/mnt")
+                    if (namespace.st_dev, namespace.st_ino) == (own.st_dev, own.st_ino):
+                        continue
                     cwd = os.stat(f"/proc/{entry.name}/cwd")
                 except OSError:
-                    continue  # exited meanwhile, or a kernel thread
+                    continue  # exited meanwhile, a kernel thread, or one this user may not read
                 if (cwd.st_dev, cwd.st_ino) == (wanted.st_dev, wanted.st_ino):
                     return True
         return False

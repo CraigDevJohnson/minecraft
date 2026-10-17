@@ -1802,14 +1802,16 @@ class SetupAPIKeyTests(unittest.TestCase):
                 synced, fsync = [], os.fsync
 
                 def recorded(descriptor):
-                    synced.append((os.readlink(f"/proc/self/fd/{descriptor}"), os.path.lexists(self.creds)))
+                    info = os.fstat(descriptor)
+                    synced.append(((info.st_dev, info.st_ino), os.path.lexists(self.creds)))
                     fsync(descriptor)
 
                 with unittest.mock.patch.object(crafty.os, "fsync", recorded):
                     code, output = self.setup_api_key()
                 self.assertEqual((code, json.loads(output)), (0, {"token_file": str(self.token_file), "admin_file": str(self.admin_file)}))
                 # The copy, written now or by the cut-off run, is on disk before the login it copies is removed.
-                self.assertIn((os.path.realpath(self.admin_file), True), synced)
+                info = self.admin_file.stat()
+                self.assertIn(((info.st_dev, info.st_ino), True), synced)
                 self.assertNotIn(FIRST_ADMIN_PHRASE, output)
                 self.assertEqual(self.api.sent, checked)  # only the stored key's check, no new key
                 self.assertEqual(self.token_file.read_text(), FakeFreshCrafty.KEY + "\n")
@@ -1970,14 +1972,21 @@ class CraftyAPITests(unittest.TestCase):
 
 
 class HostTests(unittest.TestCase):
+    @unittest.skipUnless(Path("/proc/self/ns/mnt").exists(), "needs Linux /proc")
     def test_works_in_finds_a_process_in_its_folder_wherever_the_folder_moved(self):
         with tempfile.TemporaryDirectory() as scratch:
             folder, moved, other = Path(scratch) / "server", Path(scratch) / "moved", Path(scratch) / "other"
             folder.mkdir()
             other.mkdir()
+            elsewhere = Path(scratch) / "namespace"
+            elsewhere.write_bytes(b"")
             game = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=folder)
             try:
                 host = crafty.Host()
+                # A process in the adapter's own namespace, such as an operator's shell, is not the game.
+                self.assertFalse(host.works_in(folder))
+                # Seen from another namespace, as Crafty's container is from the host, it is.
+                host.own_namespace = str(elsewhere)
                 self.assertTrue(host.works_in(folder))
                 folder.rename(moved)
                 self.assertTrue(host.works_in(moved))
