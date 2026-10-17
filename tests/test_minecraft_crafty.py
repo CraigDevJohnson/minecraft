@@ -532,6 +532,34 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(first["replaced"], str(staging / "unarchived-family-20261011T080000Z"))
         self.assertEqual((staging / "unarchived-family-20261011T080000Z" / "level.dat").read_bytes(), b"played during the download")
 
+    def test_restore_keeps_the_folder_it_moved_aside_when_crafty_starts_the_server_at_the_swap(self):
+        folder = self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        self.archived(adapter, host)
+        staging = self.root / "crafty" / "staging"
+
+        def started_at_the_swap():
+            # Started from Crafty's page just after the restore's last look: its game may play the folder moved aside.
+            api.is_running = True
+            return datetime.datetime(2026, 10, 11, 8, 0, tzinfo=datetime.timezone.utc)
+
+        host.now = started_at_the_swap
+        with self.assertRaises(crafty.CraftyError) as caught:
+            adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+        self.assertEqual(str(caught.exception), "the server was started as the restore swapped its folder; the folder it "
+                         "replaced is kept as staging/unarchived-family-20261011T080000Z; stop the server, check which "
+                         "world it played, and restore again")
+        kept = staging / "unarchived-family-20261011T080000Z"
+        self.assertEqual(sorted(path.name for path in staging.iterdir()), [kept.name])
+        self.assertEqual((kept / "level.dat").read_bytes(), b"first session")
+        self.assertTrue((folder / "level.dat").exists())
+        # Stopped and restored again, that folder stays.
+        api.is_running = False
+        host.now = lambda: datetime.datetime(2026, 10, 11, 9, 0, tzinfo=datetime.timezone.utc)
+        adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+        self.assertEqual((kept / "level.dat").read_bytes(), b"first session")
+
     def test_restore_keeps_a_world_played_before_the_adapter_recorded_anything(self):
         # A fresh disk whose server was played from Crafty's own UI before the adapter's first start: no state
         # proves that play is in S3.

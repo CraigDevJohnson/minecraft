@@ -704,6 +704,15 @@ class Adapter:
                     if replaced is not None:
                         replaced.rename(target)  # never leave the server without a folder
                     raise
+                # Crafty has no lock this adapter can hold, so a start from its UI in the instant between that look
+                # and the swap is caught here instead. Its game may be playing the folder just moved aside, so no
+                # later restore may remove that folder, and the restore fails for the operator to check.
+                if self.running(server):
+                    if replaced is not None and kept == "archived":
+                        replaced = replaced.rename(replaced.with_name("un" + replaced.name))
+                    held = f"; the folder it replaced is kept as staging/{replaced.name}" if replaced is not None else ""
+                    raise CraftyError(f"the server was started as the restore swapped its folder{held}; stop the server, "
+                                      "check which world it played, and restore again")
                 self.record(instance, backup="complete", key=key, sha256=digest, boot_id=self.host.boot_id(),
                             fingerprint=fingerprint(target))
             finally:
