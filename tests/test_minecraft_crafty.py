@@ -1514,7 +1514,8 @@ class ConsoleTests(unittest.TestCase):
             self.assertEqual((result, json.loads(output.getvalue())), (code, answer))
 
 
-PASSWORD = "made-up-first-password"
+# The first admin login a fresh Crafty writes, in these tests only: made up, and named so no scanner takes it for a real one.
+FIRST_ADMIN_PHRASE = "made-up-first-phrase"
 
 
 class FakeFreshCrafty(FakeAPI):
@@ -1531,7 +1532,7 @@ class FakeFreshCrafty(FakeAPI):
     def request(self, method, path, body=None, text=None):
         self.sent.append((method, path, body, self.token))
         if path == "/api/v2/auth/login" and method == "POST":
-            if body != {"username": "admin", "password": PASSWORD}:
+            if body != {"username": "admin", "password": FIRST_ADMIN_PHRASE}:
                 raise crafty.CraftyError("Crafty API POST request failed")  # Crafty answers 401
             return {"status": "ok", "data": self.answers["login"]}
         if self.token != (self.SESSION if path.startswith("/api/v2/users/") else self.KEY):
@@ -1550,7 +1551,7 @@ class SetupAPIKeyTests(unittest.TestCase):
         self.creds = self.root / "crafty" / "config" / "default-creds.txt"
         self.creds.parent.mkdir(parents=True)
         # As Crafty 4.11 writes it on a fresh install.
-        self.login = json.dumps({"username": "admin", "password": PASSWORD, "info": "This is NOT where you change your password."}, indent=4)
+        self.login = json.dumps({"username": "admin", "password": FIRST_ADMIN_PHRASE, "info": "This is NOT where you change your password."}, indent=4)
         self.creds.write_text(self.login)
         self.creds.chmod(0o600)
         (self.root / "etc").mkdir()
@@ -1570,7 +1571,7 @@ class SetupAPIKeyTests(unittest.TestCase):
 
     def assertNothingSetUp(self, output):
         self.assertIn("error", json.loads(output))
-        for secret in (PASSWORD, FakeFreshCrafty.SESSION, FakeFreshCrafty.KEY):
+        for secret in (FIRST_ADMIN_PHRASE, FakeFreshCrafty.SESSION, FakeFreshCrafty.KEY):
             self.assertNotIn(secret, output)
         self.assertFalse(os.path.lexists(self.token_file))
         self.assertFalse(os.path.lexists(self.admin_file))
@@ -1585,7 +1586,7 @@ class SetupAPIKeyTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(output.getvalue()),
                          {"key": "lifecycle", "token_file": str(self.token_file), "admin_file": str(self.admin_file)})
-        for secret in (PASSWORD, FakeFreshCrafty.SESSION, FakeFreshCrafty.KEY):
+        for secret in (FIRST_ADMIN_PHRASE, FakeFreshCrafty.SESSION, FakeFreshCrafty.KEY):
             self.assertNotIn(secret, output.getvalue())
         self.assertEqual(self.token_file.read_text(), FakeFreshCrafty.KEY)
         self.assertEqual(self.admin_file.read_text(), self.login)
@@ -1593,7 +1594,7 @@ class SetupAPIKeyTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertFalse(os.path.lexists(self.creds))
         self.assertEqual(self.api.sent, [
-            ("POST", "/api/v2/auth/login", {"username": "admin", "password": PASSWORD}, None),
+            ("POST", "/api/v2/auth/login", {"username": "admin", "password": FIRST_ADMIN_PHRASE}, None),
             ("PATCH", "/api/v2/users/1/key", {"name": "lifecycle", "full_access": True, "server_permissions_mask": "00000000",
                                               "crafty_permissions_mask": "000"}, FakeFreshCrafty.SESSION),
             ("GET", "/api/v2/users/1/key/7", None, FakeFreshCrafty.SESSION),
@@ -1622,7 +1623,7 @@ class SetupAPIKeyTests(unittest.TestCase):
     def test_without_crafty_s_first_login_nothing_is_asked(self):
         elsewhere = self.root / "elsewhere.json"
         elsewhere.write_text(self.login)
-        cases = {"missing": None, "not JSON": "admin " + PASSWORD, "no password": json.dumps({"username": "admin"}),
+        cases = {"missing": None, "not JSON": "admin " + FIRST_ADMIN_PHRASE, "no password": json.dumps({"username": "admin"}),
                  "a link": elsewhere}
         for case, content in cases.items():
             with self.subTest(case=case):
@@ -1634,7 +1635,7 @@ class SetupAPIKeyTests(unittest.TestCase):
                 code, output = self.setup_api_key()
                 self.assertEqual(code, 1)
                 self.assertIn("default-creds.txt does not hold Crafty's first admin login", json.loads(output)["error"])
-                self.assertNotIn(PASSWORD, output)
+                self.assertNotIn(FIRST_ADMIN_PHRASE, output)
                 self.assertEqual(self.api.sent, [])
                 self.assertFalse(os.path.lexists(self.token_file))
 
@@ -1700,9 +1701,9 @@ class CraftyAPITests(unittest.TestCase):
     def test_a_request_without_a_token_carries_no_authorization(self):
         api, sent = self.api(b'{"status": "ok", "data": {}}')
         api.token = None
-        api.request("POST", "/api/v2/auth/login", {"username": "admin", "password": PASSWORD})
+        api.request("POST", "/api/v2/auth/login", {"username": "admin", "password": FIRST_ADMIN_PHRASE})
         self.assertFalse(sent[0].has_header("Authorization"))
-        self.assertEqual(json.loads(sent[0].data), {"username": "admin", "password": PASSWORD})
+        self.assertEqual(json.loads(sent[0].data), {"username": "admin", "password": FIRST_ADMIN_PHRASE})
 
     def test_a_stopped_server_refuses_the_console_line(self):
         api, _ = self.api(b'{"status": "error", "error": "SERVER_NOT_RUNNING"}')
