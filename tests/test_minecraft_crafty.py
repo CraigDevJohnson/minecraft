@@ -758,9 +758,16 @@ class AdapterTests(unittest.TestCase):
 
         process.kill.side_effect = kill
         process.wait.return_value = -9
+        # Should the download's own limit not end the read, this does, so the test fails instead of hanging.
+        backstop = threading.Timer(5, kill)
+        backstop.daemon = True
+        backstop.start()
+        self.addCleanup(backstop.cancel)
         output = io.StringIO()
+        started = time.monotonic()
         with unittest.mock.patch.object(crafty.subprocess, "Popen", return_value=process), contextlib.redirect_stdout(output):
             code = crafty.main(arguments, api=api, host=host)
+        self.assertLess(time.monotonic() - started, 4)
         self.assertEqual((code, json.loads(output.getvalue())), (1, {"error": "AWS download did not finish"}))
         process.kill.assert_called_with()
 
@@ -2075,6 +2082,40 @@ class HostTests(unittest.TestCase):
                     with self.assertRaisesRegex(crafty.CraftyError, "^AWS download did not finish$"):
                         host.download("us-west-2", "bucket", "a/b.tar.gz", lambda source: source.read())
                 self.assertLess(time.monotonic() - started, 10)
+
+    def test_a_download_aws_gives_up_on_is_reported_as_aws_s_failure(self):
+        # A short stream fails the archive's read too, but the archive is not at fault.
+        def unpack(source):
+            with tarfile.open(fileobj=source, mode="r|gz") as archive:
+                archive.getmembers()
+
+        for fails in ("exit 1", "printf partial; exit 1"):
+            with self.subTest(fails=fails), tempfile.TemporaryDirectory() as directory:
+                fake = Path(directory) / "aws"
+                fake.write_text(f"#!/bin/sh\n{fails}\n")
+                fake.chmod(0o755)
+                with unittest.mock.patch.dict(os.environ, {"PATH": f"{directory}:{os.environ['PATH']}"}):
+                    with self.assertRaisesRegex(crafty.CraftyError, "^AWS download failed$"):
+                        crafty.Host().download("us-west-2", "bucket", "a/b.tar.gz", unpack)
+
+    def test_a_read_that_fails_on_its_own_keeps_its_reason(self):
+        # A bad archive or a full disk, whether aws has finished or is still sending, even when it would fail on the
+        # closed stream.
+        for raised in (tarfile.ReadError("bad"), OSError(errno.ENOSPC, "full")):
+            for sends in ("printf hello", "trap '' PIPE; while printf 0123456789abcdef; do :; done; exit 1"):
+                with self.subTest(raised=type(raised).__name__, sends=sends), tempfile.TemporaryDirectory() as directory:
+                    fake = Path(directory) / "aws"
+                    fake.write_text(f"#!/bin/sh\n{sends}\n")
+                    fake.chmod(0o755)
+
+                    def read(source):
+                        source.read(5)
+                        raise raised
+
+                    with unittest.mock.patch.dict(os.environ, {"PATH": f"{directory}:{os.environ['PATH']}"}):
+                        with self.assertRaises(type(raised)) as caught:
+                            crafty.Host().download("us-west-2", "bucket", "a/b.tar.gz", read)
+                    self.assertIs(caught.exception, raised)
 
 
 class ConfigTests(unittest.TestCase):

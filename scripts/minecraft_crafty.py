@@ -252,14 +252,19 @@ class Host:
         timer.daemon = True
         timer.start()
         try:
-            with process.stdout:
-                read(process.stdout)
+            read(process.stdout)
+            process.stdout.close()
             code = process.wait()
-        except BaseException:
-            process.kill()
-            process.wait()
+        except BaseException as exc:
+            process.kill()  # before its stream closes, so aws cannot fail on a broken pipe and look like the cause
+            code = process.wait()
+            process.stdout.close()
             if expired.is_set():
                 raise CraftyError("AWS download did not finish") from None  # still one JSON answer, never a traceback
+            if code > 0 and isinstance(exc, Exception):
+                # aws failed on its own and cut the stream short, so the archive is not why the read failed. The
+                # kill alone leaves a negative code.
+                raise CraftyError("AWS download failed") from None
             raise
         finally:
             timer.cancel()
