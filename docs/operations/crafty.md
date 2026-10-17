@@ -28,31 +28,24 @@ sudo bash scripts/install_aws_cli.sh
 sudo bash scripts/install_crafty.sh
 ```
 
-The installer writes `/opt/minecraft-crafty/compose.yaml` from the pinned server content, stores Crafty's configuration, servers and backups under `/srv/minecraft/crafty/`, installs the lifecycle adapter as `/usr/local/sbin/minecraft-instance` (its files and `server.json` in `/opt/minecraft-crafty/scripts`, which the launcher keeps up to date from then on, [ADR 0007](../adr/0007-the-launcher-carries-the-host-adapter.md)), and enables `minecraft-crafty.service`. Crafty's web UI listens on `127.0.0.1:8443` only. Each start renders `compose.yaml` again, so only a change to `minecraft-crafty.service` or the `minecraft-instance` wrapper needs the installer run again this way.
+The installer writes `/opt/minecraft-crafty/compose.yaml` from the pinned server content, stores Crafty's configuration, servers and backups under `/srv/minecraft/crafty/`, installs the lifecycle adapter as `/usr/local/sbin/minecraft-instance` (its files and `server.json` in `/opt/minecraft-crafty/scripts`, which the launcher keeps up to date from then on, [ADR 0007](../adr/0007-the-launcher-carries-the-host-adapter.md)), and enables `minecraft-crafty.service`. Crafty's web UI and API listen on `127.0.0.1:8443` only, and nothing forwards that port: everything below reaches Crafty through the adapter, on the host. Each start renders `compose.yaml` again, so only a change to `minecraft-crafty.service` or the `minecraft-instance` wrapper needs the installer run again this way.
 
-## Open the Crafty admin page
+## Open a shell on the host
 
-The tunnel needs the Session Manager plugin on the workstation (`brew install --cask session-manager-plugin`). Forward the loopback port through SSM and leave the command running. A plain `start-session` shell does not forward the port:
+Every hands-on step on the host runs in a Session Manager shell opened in the browser, so nothing is installed or forwarded on a workstation ([ADR 0006](../adr/0006-cloud-controls.md)). The host must be running.
 
-```sh
-aws ssm start-session --target "$HOST_ID" \
-  --document-name AWS-StartPortForwardingSession \
-  --parameters portNumber=8443,localPortNumber=8443
-```
+1. Sign in to the AWS console with the `WorkloadsAdmin` role and switch to US West (Oregon).
+2. Open EC2, Instances, and select `minecraft-family-host`.
+3. Choose **Connect**, the **Session Manager** tab, then **Connect**.
 
-Then open `https://localhost:8443` and accept Crafty's self-signed certificate. On first start Crafty writes its initial admin login to `/srv/minecraft/crafty/config/default-creds.txt`; sign in, change the password at once, and delete that file.
+The shell opens as `ssm-user` in `sh`; the commands below start with `sudo`, which that user may use. Session Manager closes a shell left idle for 20 minutes.
 
 ## Create the API key and operator configuration
 
-In Crafty, open `https://localhost:8443/panel/edit_user_apikeys?id=1`, create a key named `lifecycle` with **Full Access**, and use its token button to show the token. In an SSM shell on the host, store it without echoing it. The command prompts for the paste:
+On a freshly installed Crafty, write `/etc/minecraft/operator.json` (root-owned, mode 0600), with the real backup bucket in place of `the-private-backup-bucket`:
 
 ```sh
-sudo bash -c 'read -rsp "Paste the Crafty token, then press Enter: " t; umask 077; printf %s "$t" > /etc/minecraft/crafty-api.token; echo'
-```
-
-Write `/etc/minecraft/operator.json` (root-owned, mode 0600):
-
-```json
+sudo sh -c 'umask 077; cat > /etc/minecraft/operator.json' <<'JSON'
 {
   "schema_version": 1,
   "runtime": "crafty",
@@ -62,7 +55,24 @@ Write `/etc/minecraft/operator.json` (root-owned, mode 0600):
   "instances": {"family": {"server_name": "family", "java_port": 25565}},
   "backup": {"bucket": "the-private-backup-bucket", "region": "us-west-2"}
 }
+JSON
 ```
+
+Then let the adapter create its API key:
+
+```sh
+sudo /usr/local/sbin/minecraft-instance setup-api-key
+```
+
+On its first start Crafty writes its initial admin login to `/srv/minecraft/crafty/config/default-creds.txt`. `setup-api-key` signs in with that login through Crafty's API, creates a key named `lifecycle` with full access, checks that Crafty accepts it, and stores its token in `/etc/minecraft/crafty-api.token`. It then moves the login to `/etc/minecraft/crafty-admin.json`, outside the folder Crafty's container shares, and deletes `default-creds.txt`. Both files are root's alone (mode 0600), and neither secret is printed. It prints:
+
+```json
+{"admin_file": "/etc/minecraft/crafty-admin.json", "key": "lifecycle", "token_file": "/etc/minecraft/crafty-api.token"}
+```
+
+If it is cut off after storing the token, such as by a power loss, run it again once Crafty has started: when Crafty accepts the stored key, it finishes moving the login and prints only the two files. If Crafty still refuses that key, it leaves the login in place; remove the token file and run it again. If the admin user then has two `lifecycle` keys in Crafty's panel, delete the older one, which the cut-off run had created. If it says `crafty-admin.json` is not a plain copy of the login in `default-creds.txt`, or holds an earlier Crafty login, that file is incomplete from a cut-off run, a link, or another Crafty's login: move it away and run it again.
+
+It refuses to run again once the token file exists and `default-creds.txt` is gone, and it refuses while Crafty is still starting; run it again a minute later.
 
 ## Create the server
 
@@ -79,23 +89,33 @@ sudo rm -rf /srv/minecraft/crafty/import/family /srv/minecraft/crafty/import/upl
 
 `import-server` returns only after Crafty has finished unpacking the archive in the background, so the cleanup on the last line cannot remove it too early. The imported server runs `paper.jar` on the container's default Java 25 with auto-start off, because the launcher's start starts the server. The staged `eula.txt` has no trailing newline on purpose: Crafty 4.11 compares its first line exactly and otherwise refuses every start without logging an error.
 
-## Set up the worlds
+## Send a console command
 
-Start the server once: in the same SSM shell, run `sudo /usr/local/sbin/minecraft-instance start family`. Then run these in the Crafty console:
+The adapter's `console` action sends one line to the running server's console through Crafty's loopback API and prints what the server logged in the next 3 seconds (at most 200 lines):
 
-```text
-mv create creative normal
-mv modify creative set gamemode creative
-mvinv list
+```sh
+sudo /usr/local/sbin/minecraft-instance console family 'list'
 ```
 
-Multiverse-Inventories keeps a world that is not in any group on its own inventory, so `creative` must not appear in the `default` group in `mvinv list`. If it does, run `mvinv remove-worlds default creative`.
+It prints one line of JSON, such as `{"instance": "family", "log": ["[12:00:00] [Server thread/INFO]: There are 0 of a max of 20 players online: "], "sent": "list"}`. Put the command in single quotes, without the leading `/`. The server must be running: start it with the [Server control workflow](cloud-controls.md#the-server-control-workflow) first. The action refuses while the host drains for a stop.
 
-Portals are made in game by an operator (`op <JavaName>` from the console first). Build a frame at the `survival` spawn and run `/mvp wand`, which gives a wooden pickaxe. Left-click one corner block of the frame's opening and right-click the opposite corner, then run `/mvp create to-creative w:creative`. Make the return portal in `creative` the same way with `/mvp create to-survival w:survival`.
+## Set up the worlds
+
+Start the server once: in the same shell, run `sudo /usr/local/sbin/minecraft-instance start family`. Then send these console commands:
+
+```sh
+sudo /usr/local/sbin/minecraft-instance console family 'mv create creative normal'
+sudo /usr/local/sbin/minecraft-instance console family 'mv modify creative set gamemode creative'
+sudo /usr/local/sbin/minecraft-instance console family 'mvinv list'
+```
+
+Multiverse-Inventories keeps a world that is not in any group on its own inventory, so `creative` must not appear in the `default` group in `mvinv list`. If it does, send `mvinv remove-worlds default creative`. Creating a world can take longer than the 3 seconds the action waits; send `mv list` to see it once it is done.
+
+Portals are made in game by an operator: send `op Steve` first, with the Java account's name in place of Steve. Build a frame at the `survival` spawn and run `/mvp wand`, which gives a wooden pickaxe. Left-click one corner block of the frame's opening and right-click the opposite corner, then run `/mvp create to-creative w:creative`. Make the return portal in `creative` the same way with `/mvp create to-survival w:survival`.
 
 Multiverse-Portals lets only players with `multiverse.portal.access.<portal>` use a portal, and this server installs no permissions plugin, so by default only operators get through. With the server stopped, set `enforce-portal-access: false` under `portal-usage` in `plugins/Multiverse-Portals/config.yml` in the server folder (`/srv/minecraft/crafty/servers/<server id>/`). Multiverse-Core's `enforce-access` is already `false`, so entering `creative` needs no further permission.
 
-Add each family player to the allowlist with the [Server control workflow](cloud-controls.md#the-server-control-workflow)'s `allowlist-add`, which looks the account up and confirms the change in `whitelist.json` ([allowlist](allowlist.md)). In a hands-on emergency the console takes `whitelist add <JavaName>` for Java accounts and `fwhitelist add <Gamertag>` for Bedrock accounts.
+Add each family player to the allowlist with the [Server control workflow](cloud-controls.md#the-server-control-workflow)'s `allowlist-add`, which looks the account up and confirms the change in `whitelist.json` ([allowlist](allowlist.md)). In a hands-on emergency, send `whitelist add` with a Java account's name, or `fwhitelist add` with a Bedrock gamertag, through the `console` action.
 
 ## Everyday start and stop
 
@@ -113,17 +133,27 @@ Geyser keeps the server's NetherNet identity in `plugins/Geyser-Spigot/nethernet
 
 ## Recover from an archive
 
-Every archive is the whole server folder: worlds, player data, plugin settings and the allowlist. To put one back, stop the server, pick a key from `aws s3 ls s3://<bucket>/instances/family/crafty/`, and on the host run:
+Every archive is the whole server folder: worlds, player data, plugin settings and the allowlist. The launcher puts one back from the cloud ([ADR 0006](../adr/0006-cloud-controls.md)):
 
-```sh
-sudo /usr/local/sbin/minecraft-instance restore family --key instances/family/crafty/<UTC time>.tar.gz
-```
+1. **Find the archive's name.** In the AWS console, open S3, the backup bucket, then `instances/family/crafty/`. Each archive is named for the UTC time it was made, such as `20261016T031500Z.tar.gz`, with its `.sha256` beside it.
+2. **Stop the server** with the [Server control workflow](cloud-controls.md#the-server-control-workflow)'s `stop`, if it is running. A restore runs only on a stopped server, or on a running host whose last start or restore failed.
+3. **Restore it.** Run the Server control workflow with `action` set to `restore` and `archive` set to that name, or from a terminal run `task server:restore ARCHIVE=20261016T031500Z.tar.gz`. The S3 URI or key the console copies works too.
 
-The command streams the archive from S3, checks it against its recorded SHA-256, and only then swaps it in. It unpacks beside the current folder, so the data disk needs free space for one more copy of the server; [grow the disk](data-disk-capacity.md#grow-the-disk) first if `status` shows less than that. The folder it replaces is kept as `/srv/minecraft/crafty/staging/replaced-family-<UTC time>`; delete it once the restored server has been checked. If the command is cut off partway, such as by a power loss, and the server folder is missing afterwards, move that kept folder back to `/srv/minecraft/crafty/servers/<server id>` and run `restore` again. Then start the server as usual.
+The launcher starts the host, points the hostname at it, and has the adapter stream the archive from S3, check it against its recorded SHA-256, and only then swap it in. Then it starts the game the way every start does. The run follows the server through `starting` to `ready`, for up to an hour; the `/minecraft` page shows `starting` the whole time, and the [idle stop](idle-stop.md) leaves the host alone.
+
+A restore that fails reads `failed`, the alarm emails you, and the launcher's log holds the adapter's reason. Until its swap, the world in place is the one from before; a Member's **Start** then starts whatever world is in place, and a new `restore` tries again on the same run of the host, unless someone started the game by hand meanwhile: stop it first. Its reasons include a full data disk and an archive that does not match its SHA-256. A restore unpacks beside the current folder, so the data disk needs free space for one more copy of the server; one that runs out fails with "the data disk filled up while unpacking the archive" and leaves the old world in place, so [grow the disk](data-disk-capacity.md#grow-the-disk) and restore again.
+
+The folder a restore replaces stays in `/srv/minecraft/crafty/staging/`. When its world is in S3 (the last stop archived it, or it was itself restored from an archive, and nobody played since), it is named `archived-family-<UTC time>`, and the next restore removes it, with any folder a restore cut off partway left behind. Otherwise, such as after the host went down without its drain, or on a disk the adapter holds no backup record for yet, it is named `unarchived-family-<UTC time>` and kept until you delete it in a [shell on the host](#open-a-shell-on-the-host), because it may hold the only copy of that play. A restore refuses a server started from Crafty's page while it ran ("the server was started during the restore"); it asks the host whether a process in Crafty's container works in the server folder as well as asking Crafty, which reports a start at least half a second later. A shell of yours in that folder does not count. A start in the instant of the swap makes it fail after the swap instead, naming the folder it moved aside, which is then kept as `unarchived-family-<UTC time>` too, because the game may work in that folder and hold what is played there. To keep that play, stop the server from Crafty's page, which leaves the host running, and move that folder back in place of the server folder in a shell on the host. Otherwise stop it with a forced stop (Server control's `stop` with `nobody_playing` ticked) and restore again. A `replaced-family-<UTC time>` folder is from a restore by an earlier adapter, which never checked its world; it too stays until you delete it. If a restore is cut off partway, such as by a power loss, run it again once the server reads `failed` or `stopped`: it puts the archive in place whether or not the old folder is still there.
 
 The two archives from 2026-10-11 at 05:59Z have no `.sha256` beside them. The adapter that stored them (#53) put the SHA-256 in the object's `sha256` metadata instead, and `restore` falls back to that metadata; neither object has been read to confirm it. Retention does not count them, so they go once 14 newer archives with a `.sha256` exist.
 
-After losing the data disk, first rebuild the host through this runbook up to and including [Create the server](#create-the-server), which gives Crafty an empty `family` server, then run the same `restore`. Crafty's own login, API key and settings live on the data disk and are not in the archive, so they are set up again. So does the record of which jars earlier manifests pinned: if the archive is older than a change that renamed or dropped a jar in `server.json`, delete that old jar from `plugins/` before the first start.
+After losing the data disk, first rebuild the host through this runbook up to and including [Create the server](#create-the-server), which gives Crafty an empty `family` server. The host is running then, so restore by hand in the same shell, with the archive's key:
+
+```sh
+sudo /usr/local/sbin/minecraft-instance restore family --key instances/family/crafty/20261016T031500Z.tar.gz
+```
+
+The empty server it replaces is kept as `unarchived-family-<UTC time>`, since no backup record exists yet; it holds no play, so delete it. Crafty's own login, API key and settings live on the data disk and are not in the archive, so they are set up again. So does the record of which jars earlier manifests pinned: if the archive is older than a change that renamed or dropped a jar in `server.json`, delete that old jar from `plugins/` in `/srv/minecraft/crafty/servers/<server id>/` now, in the same shell, because the next start would keep it. Then stop the host with the Server control workflow's `stop` with `nobody_playing` ticked, which archives the restored server again, and start it as usual.
 
 ## Acceptance
 

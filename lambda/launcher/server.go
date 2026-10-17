@@ -17,21 +17,23 @@ import (
 const MemberHeader = "X-Lobby-Member"
 
 // Server is the web side the site and the operator's workflow call: GET /server, POST /server/start,
-// POST /server/stop and POST /server/allowlist.
+// POST /server/stop, POST /server/allowlist and POST /server/restore.
 type Server struct {
 	Launcher interface {
 		Status(context.Context) (Status, error)
 		Start(context.Context) (Status, bool, error)
 		Stop(ctx context.Context, force bool) (Status, bool, error)
 		Allowlist(context.Context, AllowlistRequest) (AllowlistResult, error)
+		Restore(ctx context.Context, archive string) (Status, bool, error)
 	}
 	Log *slog.Logger
 	// StartFailed and StopFailed count a request that failed or could not hand off its follow-up, for the
-	// alarm. The request still answers the caller normally, so Lambda's own error count never sees it.
+	// alarm; a restore counts as a start. The request still answers the caller normally, so Lambda's own error
+	// count never sees it.
 	StartFailed func()
 	StopFailed  func()
 	// Operator reports whether the request came from an operator rather than a Lobby site: only an operator
-	// may change the allowlist or force a stop. Nil admits nobody.
+	// may change the allowlist, restore an archive or force a stop. Nil admits nobody.
 	Operator func(*http.Request) bool
 
 	mu        sync.Mutex
@@ -76,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /server/start", s.start)
 	mux.HandleFunc("POST /server/stop", s.stop)
 	mux.HandleFunc("POST /server/allowlist", s.allowlist)
+	mux.HandleFunc("POST /server/restore", s.restore)
 	return mux
 }
 
@@ -204,6 +207,48 @@ func (s *Server) allowlist(w http.ResponseWriter, r *http.Request) {
 	default:
 		s.Log.Info("allowlist", "member", member, "edition", result.Edition, "operation", result.Operation, "result", result.Allowlist)
 		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+// restore puts back the archive an operator names, never a site, in place of the stopped server's world, then
+// starts the game. The body is {"archive": "20261016T031500Z.tar.gz"}, the archive's name in S3, which is not
+// private and is logged.
+func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
+	member := r.Header.Get(MemberHeader)
+	if !s.operator(r) {
+		s.Log.Info("restore refused", "member", member, "reason", "not_an_operator")
+		writeJSON(w, http.StatusForbidden, map[string]string{"code": "forbidden"})
+		return
+	}
+	var request struct {
+		Archive string `json:"archive"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<10))
+	if json.Unmarshal(body, &request) != nil || !archiveName.MatchString(request.Archive) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "bad_request"})
+		return
+	}
+	status, started, err := s.Launcher.Restore(r.Context(), request.Archive)
+	switch {
+	case errors.Is(err, ErrNoServer):
+		writeJSON(w, http.StatusNotFound, map[string]string{"code": "no_server"})
+	case errors.Is(err, ErrBadRestoreRequest):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "bad_request"})
+	case started:
+		s.Log.Info("restore", "member", member, "archive", request.Archive)
+		if err != nil {
+			s.Log.Error("restore follow-up", "member", member, "archive", request.Archive, "err", err)
+			s.countFailure()
+		}
+		writeJSON(w, http.StatusAccepted, s.remember(status))
+	case err != nil:
+		s.Log.Error("restore", "member", member, "archive", request.Archive, "err", err)
+		s.countFailure()
+		writeJSON(w, http.StatusBadGateway, map[string]string{"code": "restore_unconfirmed"})
+	default:
+		// Only a stopped server, or one whose start or restore failed, is restored: anything else is stopped first.
+		s.Log.Info("restore refused", "member", member, "archive", request.Archive, "reason", "not_stopped", "state", status.State)
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "not_stopped", "state": status.State})
 	}
 }
 

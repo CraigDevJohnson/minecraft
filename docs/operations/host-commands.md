@@ -1,6 +1,6 @@
 # Host and session commands
 
-Everyday operation no longer uses these commands: the launcher starts, stops and allowlists the server from AWS, asked from the `/minecraft` page, the Server control workflow or `task server:*` ([cloud controls](cloud-controls.md), [ADR 0006](../adr/0006-cloud-controls.md)). The commands below remain for restoring an archive, the Crafty console over a port-forward, and a hands-on emergency.
+Everyday operation no longer uses these commands: the launcher starts, stops, restores and allowlists the server from AWS, asked from the `/minecraft` page, the Server control workflow or `task server:*` ([cloud controls](cloud-controls.md), [ADR 0006](../adr/0006-cloud-controls.md)). The Crafty console runs in a Session Manager shell opened from the AWS console ([crafty](crafty.md#send-a-console-command)). The commands below remain only for a hands-on emergency the launcher cannot reach.
 
 Run `scripts/minecraft_host.py` on the operator computer with Python 3.11+ and AWS CLI v2 installed. AWS CLI was available during implementation; the repository does not install it. Use the existing operator AWS profile/session. The game host's IAM role receives no EC2 start/stop permissions.
 

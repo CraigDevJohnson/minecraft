@@ -23,6 +23,7 @@ type fakeLauncher struct {
 	forced      bool
 	allowlist   AllowlistResult
 	allowlisted []AllowlistRequest
+	restored    []string
 }
 
 func (f *fakeLauncher) Status(context.Context) (Status, error) { return f.status, f.err }
@@ -41,6 +42,11 @@ func (f *fakeLauncher) Stop(_ context.Context, force bool) (Status, bool, error)
 func (f *fakeLauncher) Allowlist(_ context.Context, request AllowlistRequest) (AllowlistResult, error) {
 	f.allowlisted = append(f.allowlisted, request)
 	return f.allowlist, f.err
+}
+
+func (f *fakeLauncher) Restore(_ context.Context, archive string) (Status, bool, error) {
+	f.restored = append(f.restored, archive)
+	return f.status, f.started, f.err
 }
 
 func serve(t *testing.T, server *Server, method, path string) (int, map[string]any) {
@@ -82,12 +88,12 @@ func TestGetServer(t *testing.T) {
 func TestNoServerIs404(t *testing.T) {
 	log, _ := quiet()
 	server := &Server{Launcher: &fakeLauncher{err: ErrNoServer}, Log: log, Operator: anyone}
-	for _, method := range []string{"GET /server", "POST /server/start", "POST /server/stop", "POST /server/allowlist"} {
+	for _, method := range []string{"GET /server", "POST /server/start", "POST /server/stop", "POST /server/allowlist", "POST /server/restore"} {
 		parts := strings.Fields(method)
-		body := ""
-		if parts[1] == "/server/allowlist" {
-			body = `{"operation":"add","edition":"java","name":"Steve"}`
-		}
+		body := map[string]string{
+			"/server/allowlist": `{"operation":"add","edition":"java","name":"Steve"}`,
+			"/server/restore":   `{"archive":"20261016T031500Z.tar.gz"}`,
+		}[parts[1]]
 		if code, body := serveBody(t, server, parts[0], parts[1], body); code != 404 || body["code"] != "no_server" {
 			t.Fatalf("%s: %d %v", method, code, body)
 		}
@@ -146,7 +152,7 @@ func TestStartAnswers(t *testing.T) {
 func TestOnlyTheContractRoutes(t *testing.T) {
 	log, _ := quiet()
 	server := &Server{Launcher: &fakeLauncher{}, Log: log}
-	for _, route := range [][2]string{{"POST", "/server"}, {"GET", "/server/start"}, {"GET", "/server/stop"}, {"GET", "/server/allowlist"}, {"GET", "/"}, {"DELETE", "/server"}} {
+	for _, route := range [][2]string{{"POST", "/server"}, {"GET", "/server/start"}, {"GET", "/server/stop"}, {"GET", "/server/allowlist"}, {"GET", "/server/restore"}, {"GET", "/"}, {"DELETE", "/server"}} {
 		recorder := httptest.NewRecorder()
 		server.Handler().ServeHTTP(recorder, httptest.NewRequest(route[0], route[1], io.NopCloser(strings.NewReader(""))))
 		if recorder.Code != http.StatusNotFound && recorder.Code != http.StatusMethodNotAllowed {
@@ -254,6 +260,74 @@ func TestAllowlistPassesTheRequestThrough(t *testing.T) {
 	}
 	if want := (AllowlistRequest{Operation: "remove", Edition: "bedrock", Name: "Sample Player"}); len(launcher.allowlisted) != 1 || launcher.allowlisted[0] != want {
 		t.Fatalf("sent %+v", launcher.allowlisted)
+	}
+}
+
+func TestRestoreAnswers(t *testing.T) {
+	request := `{"archive":"20261016T031500Z.tar.gz"}`
+	for _, tc := range []struct {
+		name     string
+		launcher *fakeLauncher
+		body     string
+		code     int
+		answer   string
+		sent     int
+		lost     int
+	}{
+		{"accepted", &fakeLauncher{status: Status{State: Starting}, started: true}, request, 202, "starting", 1, 0},
+		{"accepted without its follow-up", &fakeLauncher{status: Status{State: Starting}, started: true, err: errors.New("throttled")}, request, 202, "starting", 1, 1},
+		{"ready", &fakeLauncher{status: Status{State: Ready}}, request, 409, "not_stopped", 1, 0},
+		{"a restore under way", &fakeLauncher{status: Status{State: Starting}}, request, 409, "not_stopped", 1, 0},
+		{"unconfirmed", &fakeLauncher{status: Status{State: Unknown}, err: errors.New("EC2 refused")}, request, 502, "restore_unconfirmed", 1, 1},
+		{"refused by the launcher's own check", &fakeLauncher{err: ErrBadRestoreRequest}, request, 400, "bad_request", 1, 0},
+		{"no body", &fakeLauncher{}, "", 400, "bad_request", 0, 0},
+		{"not JSON", &fakeLauncher{}, "20261016T031500Z.tar.gz", 400, "bad_request", 0, 0},
+		{"no archive", &fakeLauncher{}, `{"key":"instances/family/crafty/20261016T031500Z.tar.gz"}`, 400, "bad_request", 0, 0},
+		{"an S3 key", &fakeLauncher{}, `{"archive":"instances/family/crafty/20261016T031500Z.tar.gz"}`, 400, "bad_request", 0, 0},
+		{"a path out", &fakeLauncher{}, `{"archive":"../other/crafty/20261016T031500Z.tar.gz"}`, 400, "bad_request", 0, 0},
+		{"shell text", &fakeLauncher{}, `{"archive":"20261016T031500Z.tar.gz'; reboot; '"}`, 400, "bad_request", 0, 0},
+		{"a trailing newline", &fakeLauncher{}, `{"archive":"20261016T031500Z.tar.gz\n"}`, 400, "bad_request", 0, 0},
+		{"its checksum", &fakeLauncher{}, `{"archive":"20261016T031500Z.tar.gz.sha256"}`, 400, "bad_request", 0, 0},
+		{"no time zone", &fakeLauncher{}, `{"archive":"20261016T031500.tar.gz"}`, 400, "bad_request", 0, 0},
+		{"over 1 KiB", &fakeLauncher{}, `{"archive":"20261016T031500Z.tar.gz","padding":"` + strings.Repeat("x", 1<<10) + `"}`, 400, "bad_request", 0, 0},
+	} {
+		log, logged := quiet()
+		lost := 0
+		code, body := serveBody(t, &Server{Launcher: tc.launcher, Log: log, StartFailed: func() { lost++ }, Operator: anyone}, "POST", "/server/restore", tc.body)
+		if code != tc.code || len(tc.launcher.restored) != tc.sent || lost != tc.lost {
+			t.Fatalf("%s: %d %v (sent %d, counted %d failures)", tc.name, code, body, len(tc.launcher.restored), lost)
+		}
+		if got := map[bool]any{true: body["state"], false: body["code"]}[code == 202]; got != tc.answer {
+			t.Fatalf("%s: %v", tc.name, body)
+		}
+		if tc.answer == "not_stopped" && body["state"] != tc.launcher.status.State {
+			t.Fatalf("%s: a refusal names the state, got %v", tc.name, body)
+		}
+		if tc.sent == 1 && tc.launcher.restored[0] != "20261016T031500Z.tar.gz" {
+			t.Fatalf("%s: sent %v", tc.name, tc.launcher.restored)
+		}
+		if tc.code != 400 {
+			if !strings.Contains(logged.String(), "member@example.com") || !strings.Contains(logged.String(), "20261016T031500Z.tar.gz") {
+				t.Fatalf("%s: the Member who asked and the archive were not logged: %s", tc.name, logged.String())
+			}
+		}
+	}
+}
+
+func TestOnlyAnOperatorMayRestore(t *testing.T) {
+	for name, operator := range map[string]func(*http.Request) bool{
+		"a site's role":   func(*http.Request) bool { return false },
+		"no caller check": nil,
+	} {
+		log, _ := quiet()
+		launcher := &fakeLauncher{status: Status{State: Starting}, started: true}
+		server := &Server{Launcher: launcher, Log: log, Operator: operator}
+		// The caller is checked before the body is read: a site learns nothing about what a body must hold.
+		for _, body := range []string{`{"archive":"20261016T031500Z.tar.gz"}`, "not json"} {
+			if code, answer := serveBody(t, server, "POST", "/server/restore", body); code != 403 || answer["code"] != "forbidden" || len(launcher.restored) != 0 {
+				t.Fatalf("%s: restore answered %d %v (sent %d)", name, code, answer, len(launcher.restored))
+			}
+		}
 	}
 }
 

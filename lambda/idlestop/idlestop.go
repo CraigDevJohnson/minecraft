@@ -33,6 +33,10 @@ const (
 	// stop the same (lambda/launcher stopDeadline), after which the host is checked as if nobody were
 	// stopping it.
 	launcherStopDeadline = 75 * time.Minute
+	// launcherRestoreDeadline is how long a restore the launcher recorded is believed; the launcher gives its
+	// own restore the same (lambda/launcher restoreDeadline), after which the host is checked as if nobody
+	// were restoring it.
+	launcherRestoreDeadline = 45 * time.Minute
 )
 
 var (
@@ -67,8 +71,8 @@ type Config struct {
 	PublicHostname           string
 	CloudflareZoneID         string
 	CloudflareTokenSecretARN string
-	// LauncherStateParameter names the launcher's state, when the launcher is deployed, so a stop it is
-	// running is left to it; empty, the idle stop never looks.
+	// LauncherStateParameter names the launcher's state, when the launcher is deployed, so a stop or restore
+	// it is running is left to it; empty, the idle stop never looks.
 	LauncherStateParameter string
 }
 
@@ -162,14 +166,14 @@ func (c *Controller) step(ctx context.Context, state *State, publicIP string) (R
 		return c.followDrain(ctx, state)
 	}
 	now := c.Now().UTC()
-	stopping, err := c.launcherStopping(ctx, state.LaunchTime, now)
+	busy, err := c.launcherBusy(ctx, state.LaunchTime, now)
 	if err != nil {
 		state.IdleSince = nil
 		return Result{Action: "error"}, err
 	}
-	if stopping {
+	if busy != "" {
 		state.IdleSince = nil
-		return Result{Action: "launcher-stopping"}, nil
+		return Result{Action: busy}, nil
 	}
 	if net.ParseIP(publicIP) == nil {
 		state.IdleSince = nil
@@ -380,20 +384,22 @@ func (c *Controller) describeHost(ctx context.Context) (host, error) {
 	return h, nil
 }
 
-// launcherStopping reads the launcher's own progress, when it is deployed, to see a stop it is running on
-// this launch of the host: the idle stop then stands aside, so the two never drain the host at once. A
-// record older than the launcher's deadline, or from an earlier launch, is not a stop under way.
-func (c *Controller) launcherStopping(ctx context.Context, launchTime, now time.Time) (bool, error) {
+// launcherBusy reads the launcher's own progress, when it is deployed, to see a stop or restore it is running
+// on this launch of the host, and answers the action to record while the idle stop stands aside, or nothing.
+// A stop drains the host itself, so the two never drain it at once; a restore keeps the game down while the
+// archive goes in place, which is no idle server to stop. A record older than the launcher's deadline for it,
+// or from an earlier launch, is not under way.
+func (c *Controller) launcherBusy(ctx context.Context, launchTime, now time.Time) (string, error) {
 	if c.Config.LauncherStateParameter == "" {
-		return false, nil
+		return "", nil
 	}
 	output, err := c.SSM.GetParameter(ctx, &ssm.GetParameterInput{Name: aws.String(c.Config.LauncherStateParameter)})
 	var missing *ssmtypes.ParameterNotFound
 	if errors.As(err, &missing) {
-		return false, nil
+		return "", nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read launcher state: %w", err)
+		return "", fmt.Errorf("read launcher state: %w", err)
 	}
 	var session struct {
 		RequestedAt time.Time `json:"requested_at"`
@@ -401,9 +407,16 @@ func (c *Controller) launcherStopping(ctx context.Context, launchTime, now time.
 		Phase       string    `json:"phase"`
 	}
 	if output.Parameter == nil || json.Unmarshal([]byte(aws.ToString(output.Parameter.Value)), &session) != nil {
-		return false, errors.New("read launcher state: parameter does not hold a state object")
+		return "", errors.New("read launcher state: parameter does not hold a state object")
 	}
-	return session.Phase == "stopping" && session.LaunchTime.Equal(launchTime) && now.Sub(session.RequestedAt) < launcherStopDeadline, nil
+	switch {
+	case session.Phase == "stopping" && session.LaunchTime.Equal(launchTime) && now.Sub(session.RequestedAt) < launcherStopDeadline:
+		return "launcher-stopping", nil
+	case session.Phase == "restoring" && (session.LaunchTime.IsZero() || session.LaunchTime.Equal(launchTime)) && now.Sub(session.RequestedAt) < launcherRestoreDeadline:
+		// A restore of a stopped host ties itself to the launch only once its follow-up sees the host running.
+		return "launcher-restoring", nil
+	}
+	return "", nil
 }
 
 func (c *Controller) loadState(ctx context.Context) (State, error) {
