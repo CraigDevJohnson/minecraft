@@ -10,6 +10,7 @@ import socket
 import stat
 import subprocess
 import threading
+import time
 from pathlib import Path
 import sys
 import tarfile
@@ -742,15 +743,26 @@ class AdapterTests(unittest.TestCase):
             code = crafty.main(arguments, api=api, host=host)
         self.assertEqual((code, json.loads(output.getvalue())), (0, {
             "instance": "family", "restored": key, "replaced": str(self.root / "crafty" / "staging" / "archived-family-20261010T180000Z")}))
-        # An AWS CLI that never exits is killed, and the answer is still one JSON object.
+        # An AWS CLI that stalls with its stream open is killed, and the answer is still one JSON object.
         host.download = lambda *arguments: crafty.Host.download(host, *arguments)
-        process = unittest.mock.Mock(stdout=io.BytesIO(host.stored[key]))
-        process.wait.side_effect = [subprocess.TimeoutExpired("aws", 1800), 0]
+        host.download_seconds = 0.2
+        reader, writer = os.pipe()
+        os.write(writer, host.stored[key][:100])
+        process = unittest.mock.Mock(stdout=os.fdopen(reader, "rb"))
+        killed = []
+
+        def kill() -> None:
+            if not killed:
+                killed.append(True)
+                os.close(writer)
+
+        process.kill.side_effect = kill
+        process.wait.return_value = -9
         output = io.StringIO()
         with unittest.mock.patch.object(crafty.subprocess, "Popen", return_value=process), contextlib.redirect_stdout(output):
             code = crafty.main(arguments, api=api, host=host)
         self.assertEqual((code, json.loads(output.getvalue())), (1, {"error": "AWS download did not finish"}))
-        process.kill.assert_called_once_with()
+        process.kill.assert_called_with()
 
     def test_a_server_started_during_the_archive_fails_the_stop(self):
         self.played_server()
@@ -2050,12 +2062,19 @@ class HostTests(unittest.TestCase):
             self.assertIn("s3 cp s3://bucket/a/b.tar.gz -", (Path(directory) / "args").read_text())
 
     def test_a_download_that_never_finishes_is_killed_and_reported(self):
-        process = unittest.mock.Mock(stdout=io.BytesIO(b""))
-        process.wait.side_effect = [subprocess.TimeoutExpired("aws", 1800), 0]
-        with unittest.mock.patch.object(crafty.subprocess, "Popen", return_value=process):
-            with self.assertRaisesRegex(crafty.CraftyError, "^AWS download did not finish$"):
-                crafty.Host().download("us-west-2", "bucket", "a/b.tar.gz", lambda source: source.read())
-        process.kill.assert_called_once_with()
+        # Stalled with its stream open, after some bytes or after all of them: the read never ends on its own.
+        for stall in ("printf partial; exec sleep 60", "printf hello; exec 1>&-; exec sleep 60"):
+            with self.subTest(stall=stall), tempfile.TemporaryDirectory() as directory:
+                fake = Path(directory) / "aws"
+                fake.write_text(f"#!/bin/sh\n{stall}\n")
+                fake.chmod(0o755)
+                host = crafty.Host()
+                host.download_seconds = 0.5
+                started = time.monotonic()
+                with unittest.mock.patch.dict(os.environ, {"PATH": f"{directory}:{os.environ['PATH']}"}):
+                    with self.assertRaisesRegex(crafty.CraftyError, "^AWS download did not finish$"):
+                        host.download("us-west-2", "bucket", "a/b.tar.gz", lambda source: source.read())
+                self.assertLess(time.monotonic() - started, 10)
 
 
 class ConfigTests(unittest.TestCase):

@@ -34,6 +34,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -229,6 +230,10 @@ class Host:
         if code:
             raise CraftyError("AWS upload failed")
 
+    # How long a download may take, read included. With Crafty's 5 minutes to come up, a restore still answers
+    # inside the launcher's 30-minute command limit with its own reason.
+    download_seconds = 1200
+
     def download(self, region: str, bucket: str, key: str, read) -> None:
         """Stream an object from S3 into `read`, so a restore needs no second copy on the data disk."""
         command = ["aws", "--region", region, "--no-cli-pager", "s3", "cp", f"s3://{bucket}/{key}", "-", "--only-show-errors"]
@@ -236,16 +241,30 @@ class Host:
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         except OSError as exc:
             raise CraftyError("AWS download could not run") from exc
+        expired = threading.Event()
+
+        def expire() -> None:
+            # A download that stalls with its stream open would block the read forever; ending it ends the read.
+            expired.set()
+            process.kill()
+
+        timer = threading.Timer(self.download_seconds, expire)
+        timer.daemon = True
+        timer.start()
         try:
             with process.stdout:
                 read(process.stdout)
-            code = process.wait(timeout=1800)
-        except BaseException as exc:
+            code = process.wait()
+        except BaseException:
             process.kill()
             process.wait()
-            if isinstance(exc, subprocess.TimeoutExpired):
-                raise CraftyError("AWS download did not finish") from exc  # still one JSON answer, never a traceback
+            if expired.is_set():
+                raise CraftyError("AWS download did not finish") from None  # still one JSON answer, never a traceback
             raise
+        finally:
+            timer.cancel()
+        if expired.is_set():
+            raise CraftyError("AWS download did not finish")
         if code:
             raise CraftyError("AWS download failed")
 
