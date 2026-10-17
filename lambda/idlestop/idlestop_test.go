@@ -451,13 +451,17 @@ func TestLauncherStopStandsTheIdleStopAside(t *testing.T) {
 	}
 }
 
-func TestOnlyACurrentLauncherStopStandsTheIdleStopAside(t *testing.T) {
+func TestOnlyACurrentLauncherStopOrRestoreStandsTheIdleStopAside(t *testing.T) {
 	for name, record := range map[string]*string{
-		"missing":           nil,
-		"finished stop":     launcherSession("stopped", launched, launched.Add(4*time.Minute)),
-		"start":             launcherSession("starting", launched, launched.Add(4*time.Minute)),
-		"earlier launch":    launcherSession("stopping", launched.Add(-time.Hour), launched.Add(4*time.Minute)),
-		"past its deadline": launcherSession("stopping", launched, launched.Add(5*time.Minute-launcherStopDeadline)),
+		"missing":                          nil,
+		"finished stop":                    launcherSession("stopped", launched, launched.Add(4*time.Minute)),
+		"start":                            launcherSession("starting", launched, launched.Add(4*time.Minute)),
+		"earlier launch":                   launcherSession("stopping", launched.Add(-time.Hour), launched.Add(4*time.Minute)),
+		"past its deadline":                launcherSession("stopping", launched, launched.Add(5*time.Minute-launcherStopDeadline)),
+		"failed restore":                   launcherSession("failed", launched, launched.Add(-time.Minute)),
+		"restore of an earlier launch":     launcherSession("restoring", launched.Add(-time.Hour), launched.Add(-time.Minute)),
+		"restore past its deadline":        launcherSession("restoring", launched, launched.Add(5*time.Minute-launcherRestoreDeadline)),
+		"untied restore past its deadline": launcherSession("restoring", time.Time{}, launched.Add(5*time.Minute-launcherRestoreDeadline)),
 	} {
 		h := newHarness()
 		h.ctl.Config.LauncherStateParameter = launcherStateParameter
@@ -469,6 +473,34 @@ func TestOnlyACurrentLauncherStopStandsTheIdleStopAside(t *testing.T) {
 	h := newHarness()
 	h.aws.launcherParameter = launcherSession("stopping", launched, launched.Add(4*time.Minute))
 	h.mustAction(t, "idle-started")
+}
+
+func TestLauncherRestoreStandsTheIdleStopAside(t *testing.T) {
+	// The restore's follow-up ties the record to the launch once it sees the host running; before that the
+	// record has no launch time.
+	for name, launchTime := range map[string]time.Time{"not yet tied to the launch": {}, "tied to this launch": launched} {
+		h := newHarness()
+		h.ctl.Config.LauncherStateParameter = launcherStateParameter
+		h.mustAction(t, "idle-started")
+		h.now = h.now.Add(10 * time.Minute)
+		h.aws.launcherParameter = launcherSession("restoring", launchTime, launched.Add(-time.Minute))
+		h.mustAction(t, "launcher-restoring")
+		if h.state(t).IdleSince != nil {
+			t.Fatalf("%s: the idle countdown must clear while the launcher restores the server", name)
+		}
+		// The archive takes as long as it takes, past the idle threshold, with no game to answer a ping.
+		h.now = launched.Add(40 * time.Minute)
+		h.pingErr = errors.New("no answer")
+		h.mustAction(t, "launcher-restoring")
+		if h.aws.drains() != 0 || h.aws.stopped != 0 || len(h.addresses) != 1 {
+			t.Fatalf("%s: drains=%d stops=%d pings=%d; the idle stop must neither ping nor drain during a restore", name, h.aws.drains(), h.aws.stopped, len(h.addresses))
+		}
+		// Past the launcher's restore deadline the host is checked again.
+		h.now = launched.Add(-time.Minute).Add(launcherRestoreDeadline)
+		if result, err := h.run(t); err == nil || result.Action != "error" {
+			t.Fatalf("%s: result=%+v err=%v", name, result, err)
+		}
+	}
 }
 
 func TestUnreadableLauncherStateFailsTheCheckWithoutDraining(t *testing.T) {

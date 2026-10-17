@@ -36,6 +36,10 @@ tasks:
     desc: Stop the family server through the launcher and wait until it is off; FORCE=1 stops over players
     cmd: ./scripts/launcher_call.sh stop {{if eq .FORCE "1"}}--force{{end}}
 
+  server:restore:
+    desc: Restore an archive into the stopped family server, then start it; ARCHIVE=<name such as 20261016T031500Z.tar.gz>
+    cmd: ./scripts/launcher_call.sh restore --archive "{{.ARCHIVE}}"
+
   server:allowlist:
     desc: Add or remove one player on the running server; OP=add|remove EDITION=java|bedrock PLAYER=<name or gamertag>
     cmd: ./scripts/launcher_call.sh allowlist-{{.OP}} --edition "{{.EDITION}}" --player "{{.PLAYER}}"

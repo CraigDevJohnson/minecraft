@@ -1,14 +1,14 @@
-# Cloud controls: stop, start, allowlist and deploy from anywhere
+# Cloud controls: stop, start, restore, allowlist and deploy from anywhere
 
-Nothing about operating the family server runs on a workstation ([ADR 0006](../adr/0006-cloud-controls.md)). The [launcher](launcher.md) function in AWS starts, stops and allowlists the server; everything below only asks it, and the repository deploys itself from GitHub Actions. This runbook covers the three entry points, the Deploy workflow, and the one-time setup an administrator does once.
+Nothing about operating the family server runs on a workstation ([ADR 0006](../adr/0006-cloud-controls.md)). The [launcher](launcher.md) function in AWS starts, stops, restores and allowlists the server; everything below only asks it, and the repository deploys itself from GitHub Actions. This runbook covers the three entry points, the Deploy workflow, and the one-time setup an administrator does once.
 
 | Entry point | What it does | Who |
 | --- | --- | --- |
 | The `/minecraft` page in The Lobby | status, Start server, Stop server | Members with the `minecraft` grant |
-| The **Server control** workflow (GitHub Actions) | status, start, stop (forced if asked), allowlist add or remove | Craig: the job runs only for runs his own account started, through the `server` environment |
-| `task server:status`, `server:start`, `server:stop`, `server:allowlist` | The same requests from any terminal | Anyone with an AWS profile that may invoke the launcher (`workloads-admin` may) |
+| The **Server control** workflow (GitHub Actions) | status, start, stop (forced if asked), restore an archive, allowlist add or remove | Craig: the job runs only for runs his own account started, through the `server` environment |
+| `task server:status`, `server:start`, `server:stop`, `server:restore`, `server:allowlist` | The same requests from any terminal | Anyone with an AWS profile that may invoke the launcher (`workloads-admin` may) |
 
-Every one of them sends one SigV4-signed request to the launcher's Function URL. The launcher does the work in AWS with the same host adapter actions the workstation runbook used. It reads who signed each request: a site's role may only read the status, start and stop without force, and the allowlist and a forced stop answer it `403` with `forbidden`.
+Every one of them sends one SigV4-signed request to the launcher's Function URL. The launcher does the work in AWS with the same host adapter actions the workstation runbook used. It reads who signed each request: a site's role may only read the status, start and stop without force, and the allowlist, a restore and a forced stop answer it `403` with `forbidden`.
 
 ## The Server control workflow
 
@@ -16,11 +16,12 @@ Open the repository's **Actions** tab (or the GitHub mobile app), choose **Serve
 
 | Input | Values |
 | --- | --- |
-| `action` | `status`, `start`, `stop`, `allowlist-add`, `allowlist-remove` |
+| `action` | `status`, `start`, `stop`, `restore`, `allowlist-add`, `allowlist-remove` |
 | `nobody_playing` | For `stop`. Unticked, the stop is refused while anyone is online or while the game does not answer and the count is unknown. Ticked, the stop goes ahead (the launcher's `force`). |
+| `archive` | For `restore`: the archive's name in S3, such as `20261016T031500Z.tar.gz` ([crafty](crafty.md#recover-from-an-archive)). An S3 URI or key that ends in it works too. |
 | `edition`, `player` | For the allowlist actions: `java` with the account name, or `bedrock` with the gamertag |
 
-The run prints the launcher's answer in its summary. For `start` and `stop` it then polls the launcher every ten seconds and ends green when the server reads `ready` or `stopped`, red when it settles anywhere else (`failed`, `maintenance`, or a stop refused with `players_online`, `players_unknown` or `starting`). When the launcher changed nothing because someone else's start or stop is already under way, the run follows that one to the same end; when it changed nothing because the server is already there, the run is green at once; any other unchanged answer is red. A start takes about a minute; a stop takes the drain's own time, about ten minutes for the usual archive, and the run allows the launcher's 75-minute deadline. A second run waits for the first to finish rather than running beside it.
+The run prints the launcher's answer in its summary. For `start` and `stop` it then polls the launcher every ten seconds and ends green when the server reads `ready` or `stopped`, red when it settles anywhere else (`failed`, `maintenance`, or a stop refused with `players_online`, `players_unknown` or `starting`). When the launcher changed nothing because someone else's start or stop is already under way, the run follows that one to the same end; when it changed nothing because the server is already there, the run is green at once; any other unchanged answer is red. A `restore` is followed the same way, through `starting` until the server reads `ready`, for up to an hour; it is red when the launcher refuses it (`not_stopped` with the server's state, when the server is not stopped) or the restore fails. A start takes about a minute; a stop takes the drain's own time, about ten minutes for the usual archive, and the run allows the launcher's 75-minute deadline. A second run waits for the first to finish rather than running beside it.
 
 The run assumes `minecraft-server-control`, a role that can do nothing but invoke the launcher. Its trust policy accepts only a job of this repository (by repository and owner id) in the `server` environment, and the environment allows only `main`.
 
@@ -34,11 +35,12 @@ export AWS_PROFILE=workloads-admin                                # after aws ss
 task server:status
 task server:start
 task server:stop                      # FORCE=1 task server:stop stops over players or an unanswering game
+task server:restore ARCHIVE=20261016T031500Z.tar.gz
 task server:allowlist OP=add EDITION=java PLAYER=Steve
 task server:allowlist OP=remove EDITION=bedrock PLAYER="Sample Player"
 ```
 
-They run [`scripts/launcher_call.sh`](../../scripts/launcher_call.sh), which the workflow runs too. The credentials reach curl through a private file, never its arguments. `server:status` prints the launcher's answer; `server:start` and `server:stop` follow the server the way the workflow does and exit non-zero when it settles elsewhere; `server:allowlist` prints the adapter's result, `updated` or `unchanged`.
+They run [`scripts/launcher_call.sh`](../../scripts/launcher_call.sh), which the workflow runs too. The credentials reach curl through a private file, never its arguments. `server:status` prints the launcher's answer; `server:start`, `server:stop` and `server:restore` follow the server the way the workflow does and exit non-zero when it settles elsewhere; `server:allowlist` prints the adapter's result, `updated` or `unchanged`.
 
 ## Deploys
 
@@ -143,10 +145,10 @@ After these, merge the change, then start the Deploy workflow by hand (Actions, 
 
 Later changes to these roles are the same commands again: a new boundary version, `update-assume-role-policy`, or `put-role-policy` with the updated committed JSON.
 
-## What still runs on a workstation
+## Hands-on work on the host
 
-Two rare procedures keep their runbooks and `scripts/minecraft_host.py`: restoring a world from a stop archive (`minecraft-instance restore`, [crafty](crafty.md#recover-from-an-archive)) and the Crafty console over an SSM port-forward ([crafty](crafty.md)). Neither is part of starting, stopping, allowlisting or deploying. The [host commands](host-commands.md) remain for a hands-on emergency.
+Nothing runs on a workstation, and nothing forwards a port to it. Restoring a world from an archive is the workflow's `restore` ([crafty](crafty.md#recover-from-an-archive)). The Crafty console, setting up Crafty on a rebuilt host, and a hands-on emergency use a Session Manager shell opened from the AWS console in a browser ([crafty](crafty.md#open-a-shell-on-the-host)): the adapter's `console` action sends a console command through Crafty's loopback API, and `setup-api-key` creates the adapter's API key. The [host commands](host-commands.md) and `scripts/minecraft_host.py` remain only for an emergency the launcher cannot reach.
 
 ## Evidence limits
 
-`task check` covers the launcher's stop and allowlist with unit tests against fake AWS and identity services, the idle stop's stand-aside, the policy documents, the workflow guards and the mocked plan's new statements. None of it calls AWS or GitHub. Before relying on it, a live check must show one Deploy run approved and applied from GitHub, and a start and a stop from the Server control workflow reaching `ready` and `stopped`, with the stop's archive in S3 and the hostname parked.
+`task check` covers the launcher's stop, restore and allowlist with unit tests against fake AWS and identity services, the adapter's restore, console and key setup against a fake Crafty, the idle stop's stand-asides, the policy documents, the workflow guards and the mocked plan's new statements. None of it calls AWS or GitHub. Before relying on it, a live check must show one Deploy run approved and applied from GitHub, and a start and a stop from the Server control workflow reaching `ready` and `stopped`, with the stop's archive in S3 and the hostname parked, and a `restore` of the newest archive reaching `ready` with the same worlds.

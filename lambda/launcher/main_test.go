@@ -57,6 +57,17 @@ func TestLoadConfig(t *testing.T) {
 			t.Fatalf("%s=%q must be refused", key, value)
 		}
 	}
+	// The instance goes unquoted into the commands run on the host: only the adapter's own names pass.
+	for _, instance := range []string{"Family", "family server", "family;reboot", "-family", "1family", "family'", strings.Repeat("a", 33)} {
+		if _, _, err := loadConfig(environment(map[string]string{"INSTANCE": instance})); err == nil {
+			t.Fatalf("INSTANCE=%q must be refused", instance)
+		}
+	}
+	for _, instance := range []string{"family", "survival-2", strings.Repeat("a", 32)} {
+		if cfg, _, err := loadConfig(environment(map[string]string{"INSTANCE": instance})); err != nil || cfg.Instance != instance {
+			t.Fatalf("INSTANCE=%q: cfg=%+v err=%v", instance, cfg, err)
+		}
+	}
 }
 
 func TestWriteMetricIsEmbeddedMetricFormat(t *testing.T) {

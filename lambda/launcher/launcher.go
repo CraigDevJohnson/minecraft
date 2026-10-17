@@ -83,15 +83,17 @@ type Config struct {
 	IdleStopStateParameter string
 }
 
-// Session is this function's record of the last start or stop it began, kept in an SSM parameter. LaunchTime
-// ties it to one EC2 run once the host is running, so a later run never inherits an old request's outcome.
+// Session is this function's record of the last start, stop or restore it began, kept in an SSM parameter.
+// LaunchTime ties it to one EC2 run once the host is running, so a later run never inherits an old request's
+// outcome.
 type Session struct {
 	RequestedAt time.Time `json:"requested_at,omitzero"`
 	LaunchTime  time.Time `json:"launch_time,omitzero"`
-	// Phase is starting, ready or failed for a start; stopping, stopped or stop-failed for a stop.
+	// Phase is starting, ready or failed for a start; stopping, stopped or stop-failed for a stop; restoring
+	// or failed for a restore, which a fresh start's record replaces once the archive is in place.
 	Phase string `json:"phase,omitempty"`
-	// DNS is current or failed once a start or stop has pointed or parked the hostname, and pending while a
-	// stop owes its parking.
+	// DNS is current or failed once a start, restore or stop has pointed or parked the hostname, and pending
+	// while a stop owes its parking.
 	DNS    string `json:"dns,omitempty"`
 	Detail string `json:"detail,omitempty"`
 	// Force marks a stop asked with the force flag. One without it asks the game again, just before the
@@ -100,9 +102,14 @@ type Session struct {
 	// A stop's drain command on the host, once sent, so a fresh run can follow it where the last one ended.
 	DrainCommandID string    `json:"drain_command_id,omitempty"`
 	DrainSentAt    time.Time `json:"drain_sent_at,omitzero"`
+	// RestoreKey is the S3 key of the archive a restore puts in place of the world.
+	RestoreKey string `json:"restore_key,omitempty"`
+	// A restore's command on the host, once sent, so a fresh run can follow it where the last one ended.
+	RestoreCommandID string    `json:"restore_command_id,omitempty"`
+	RestoreSentAt    time.Time `json:"restore_sent_at,omitzero"`
 }
 
-// Status is the answer to GET /server, POST /server/start and POST /server/stop.
+// Status is the answer to GET /server, POST /server/start, POST /server/stop and POST /server/restore.
 type Status struct {
 	Name       string     `json:"name"`
 	State      string     `json:"state"`
@@ -120,8 +127,8 @@ type Endpoint struct {
 	Port    int    `json:"port,omitempty"`
 }
 
-// Launcher answers the site and the operator's workflow, and starts, stops and allowlists the server the way
-// the workstation commands do.
+// Launcher answers the site and the operator's workflow, and starts, stops, restores and allowlists the server
+// the way the workstation and host commands do.
 type Launcher struct {
 	Config Config
 	EC2    EC2API
@@ -130,7 +137,8 @@ type Launcher struct {
 	Ping func(ctx context.Context, address string) (int, error)
 	// PointDNS points the players' hostname at the running host's address.
 	PointDNS func(ctx context.Context, address string) error
-	// FollowUp runs FinishStart outside the request, so the page gets its answer at once.
+	// FollowUp runs FinishStart outside the request, so the page gets its answer at once, and again when a
+	// restore's run ends before the restore does.
 	FollowUp func(ctx context.Context) error
 	// FollowUpStop runs FinishStop outside the request, and again when a run ends before the stop does.
 	FollowUpStop func(ctx context.Context) error
@@ -188,23 +196,17 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 	now := l.Now().UTC()
 	switch h.state {
 	case ec2types.InstanceStateNameStopped:
+		if session.Phase == Restoring && now.Sub(session.RequestedAt) < stoppedGrace {
+			// A restore of ours was just recorded and EC2's description still lags its start. A start recorded
+			// now would replace it, and the game would come up without the archive.
+			return l.answer(Starting, session), false, nil
+		}
 		// Record the start before EC2 sees it, so every status read from here on knows a start is under way.
 		session = Session{RequestedAt: now, Phase: Starting}
 		if err := l.saveSession(ctx, session); err != nil {
 			return l.answer(Unknown, Session{}), false, err
 		}
-		_, startErr := l.EC2.StartInstances(ctx, &ec2.StartInstancesInput{InstanceIds: []string{l.Config.HostID}})
-		// No error here fails the start. IncorrectInstanceState means another Member's start moved the host on
-		// first, an error without EC2's answer may hide an accepted start, and a refusal such as throttling can
-		// meet another Member's accepted start that a fresh description does not show yet. The start stands and
-		// its follow-up decides: it repeats harmlessly, or records the failure once the host has stayed stopped.
-		var refused smithy.APIError
-		if errors.As(startErr, &refused) && refused.ErrorCode() != "IncorrectInstanceState" {
-			startErr = fmt.Errorf("start host: %w", startErr)
-		} else {
-			startErr = nil
-		}
-		return l.answer(Starting, session), true, errors.Join(startErr, l.followUp(ctx))
+		return l.answer(Starting, session), true, errors.Join(l.startHost(ctx), l.followUp(ctx))
 	case ec2types.InstanceStateNameRunning, ec2types.InstanceStateNamePending:
 		state, err := l.decide(ctx, h, session)
 		if err != nil {
@@ -227,6 +229,20 @@ func (l *Launcher) Start(ctx context.Context) (Status, bool, error) {
 		}
 		return l.answer(state, l.current(h, session)), false, nil
 	}
+}
+
+// startHost asks EC2 to start the stopped host for a request already recorded, and answers only a refusal
+// worth counting. No error here fails the request. IncorrectInstanceState means another Member's start moved
+// the host on first, an error without EC2's answer may hide an accepted start, and a refusal such as throttling
+// can meet another Member's accepted start that a fresh description does not show yet. The request stands and
+// its follow-up decides: it repeats harmlessly, or records the failure once the host has stayed stopped.
+func (l *Launcher) startHost(ctx context.Context) error {
+	_, err := l.EC2.StartInstances(ctx, &ec2.StartInstancesInput{InstanceIds: []string{l.Config.HostID}})
+	var refused smithy.APIError
+	if errors.As(err, &refused) && refused.ErrorCode() != "IncorrectInstanceState" {
+		return fmt.Errorf("start host: %w", err)
+	}
+	return nil
 }
 
 // unknown answers when the host cannot be read. A saved DNS failure still hides the address: it may be this run's.
@@ -260,9 +276,8 @@ func (l *Launcher) decide(ctx context.Context, h host, session Session) (string,
 func (l *Launcher) classify(ctx context.Context, h host, session Session) (string, int, error) {
 	switch h.state {
 	case ec2types.InstanceStateNamePending:
-		// A start of ours that failed or ran out of time stays failed even while EC2 is stuck pending.
-		if session, ok := l.sessionFor(h, session); ok && (session.Phase == Failed ||
-			session.Phase == Starting && l.Now().UTC().Sub(session.RequestedAt) >= startDeadline) {
+		// A start or restore of ours that failed or ran out of time stays failed even while EC2 is stuck pending.
+		if session, ok := l.sessionFor(h, session); ok && (session.Phase == Failed || overdue(session, l.Now().UTC())) {
 			return Failed, 0, nil
 		}
 		return Starting, 0, nil
@@ -293,8 +308,9 @@ func (l *Launcher) classify(ctx context.Context, h host, session Session) (strin
 		switch session.Phase {
 		case Failed:
 			return Failed, 0, nil
-		case Starting:
-			if now.Sub(session.RequestedAt) < startDeadline {
+		case Starting, Restoring:
+			// A restore reads as starting: the page knows only the states above, and the game is on its way.
+			if !overdue(session, now) {
 				return Starting, 0, nil
 			}
 			return Failed, 0, nil
@@ -308,6 +324,17 @@ func (l *Launcher) classify(ctx context.Context, h host, session Session) (strin
 		return Starting, 0, nil
 	}
 	return Maintenance, 0, nil
+}
+
+// overdue reports whether a start or restore of ours has run past its deadline, and is then reported failed.
+func overdue(session Session, now time.Time) bool {
+	switch session.Phase {
+	case Starting:
+		return now.Sub(session.RequestedAt) >= startDeadline
+	case Restoring:
+		return now.Sub(session.RequestedAt) >= restoreDeadline
+	}
+	return false
 }
 
 // gameAnswers reports whether the game answers a status ping, and how many players it has online when it does.
@@ -392,11 +419,15 @@ func (l *Launcher) idleStopDraining(ctx context.Context, h host) (bool, error) {
 }
 
 // FinishStart does the rest of a start once EC2 has accepted it: the same steps as `minecraft_host.py start`.
-// It waits for the host, points DNS at it, waits for SSM, and asks the host's adapter to start the game.
+// It waits for the host, points DNS at it, waits for SSM, and asks the host's adapter to start the game. A
+// restore's record is finished by finishRestore instead.
 func (l *Launcher) FinishStart(ctx context.Context) error {
 	requested, err := l.loadSession(ctx)
 	if err != nil {
 		return err
+	}
+	if requested.Phase == Restoring {
+		return l.finishRestore(ctx, requested)
 	}
 	if requested.Phase == Starting {
 		// A follow-up that waited in Lambda's queue still ends inside its start's deadline, so it never
@@ -457,11 +488,17 @@ func (l *Launcher) FinishStart(ctx context.Context) error {
 // saveOwned saves a follow-up's progress only while its request still owns the record, so a sibling
 // follow-up of an older request never overwrites a retry a Member began since.
 func (l *Launcher) saveOwned(ctx context.Context, session Session) error {
+	return l.replaceOwned(ctx, session.RequestedAt, session)
+}
+
+// replaceOwned saves session in place of the record of the request made at requestedAt, only while that
+// request still owns the record and has not finished.
+func (l *Launcher) replaceOwned(ctx context.Context, requestedAt time.Time, session Session) error {
 	saved, err := l.loadSession(ctx)
 	if err != nil {
 		return err
 	}
-	if !saved.RequestedAt.Equal(session.RequestedAt) {
+	if !saved.RequestedAt.Equal(requestedAt) {
 		return errors.New("a later request owns the record")
 	}
 	if finished(saved) {
@@ -477,7 +514,7 @@ func finished(session Session) bool {
 	return session.Phase == Ready || session.Phase == Stopped
 }
 
-// fail records a start as failed. A deadline that ended the start must not also lose its record.
+// fail records a start or restore as failed. A deadline that ended it must not also lose its record.
 func (l *Launcher) fail(ctx context.Context, session Session, cause error) error {
 	return l.failWith(ctx, session, cause, Failed)
 }

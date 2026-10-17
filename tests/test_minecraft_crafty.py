@@ -1,5 +1,6 @@
 import contextlib
 import datetime
+import errno
 import hashlib
 import http.client
 import io
@@ -7,6 +8,7 @@ import json
 import os
 import socket
 import stat
+import subprocess
 import threading
 from pathlib import Path
 import sys
@@ -90,6 +92,14 @@ class FakeAPI:
                 self.command = body["execution_command"]
             return {"status": "ok"}
         raise AssertionError(path)
+
+
+def member(name: str, kind=tarfile.REGTYPE, data: bytes = b"", linkname: str = "") -> tuple:
+    """One archive member and its content, for archives a stop would never write."""
+    info = tarfile.TarInfo(name)
+    info.type, info.linkname, info.mode = kind, linkname, 0o755 if kind == tarfile.DIRTYPE else 0o644
+    info.size = len(data) if kind == tarfile.REGTYPE else 0
+    return info, data if kind == tarfile.REGTYPE else None
 
 
 class FakeHost:
@@ -287,6 +297,11 @@ class AdapterTests(unittest.TestCase):
         (folder / "level.dat").write_bytes(b"first session")
         return folder
 
+    def archived(self, adapter, host):
+        """Stop the running server, storing its archive, then start the host again, as before a launcher restore."""
+        adapter.host_drain()
+        host.boot = "boot-2"
+
     def test_shutdown_drain_archives_again_after_play_from_the_crafty_ui(self):
         folder = self.played_server()
         api = FakeAPI(running=True)
@@ -302,7 +317,7 @@ class AdapterTests(unittest.TestCase):
         folder = self.played_server()
         api = FakeAPI(running=True)
         adapter, host = self.adapter(api)
-        adapter.host_drain()
+        self.archived(adapter, host)
         key = "instances/family/crafty/20261010T180000Z.tar.gz"
         (folder / "level.dat").write_bytes(b"corrupted")
         (folder / "stray.txt").write_bytes(b"x")
@@ -316,7 +331,7 @@ class AdapterTests(unittest.TestCase):
         folder = self.played_server()
         api = FakeAPI(running=True)
         adapter, host = self.adapter(api)
-        adapter.host_drain()
+        self.archived(adapter, host)
         key = "instances/family/crafty/20261010T180000Z.tar.gz"
         host.metadata[key] = {"sha256": host.stored.pop(key + ".sha256").split()[0].decode()}
         (folder / "level.dat").write_bytes(b"corrupted")
@@ -328,14 +343,14 @@ class AdapterTests(unittest.TestCase):
         api = FakeAPI(running=True)
         adapter, host = self.adapter(api)
         key = "instances/family/crafty/20261010T180000Z.tar.gz"
-        with self.assertRaises(crafty.CraftyError):
+        with self.assertRaisesRegex(crafty.CraftyError, "stop the server"):
             adapter.restore("family", key)  # still running
-        adapter.host_drain()
+        self.archived(adapter, host)
         (folder / "level.dat").write_bytes(b"current")
-        with self.assertRaises(crafty.CraftyError):
+        with self.assertRaisesRegex(crafty.CraftyError, "this instance's archives"):
             adapter.restore("family", "instances/other/crafty/20261010T180000Z.tar.gz")
         host.stored[key + ".sha256"] = b"0" * 64 + b"  x\n"
-        with self.assertRaises(crafty.CraftyError):
+        with self.assertRaisesRegex(crafty.CraftyError, "does not match its recorded SHA-256"):
             adapter.restore("family", key)
         self.assertEqual((folder / "level.dat").read_bytes(), b"current")
         self.assertEqual(list((self.root / "crafty" / "staging").glob("restore-*")), [])
@@ -383,7 +398,7 @@ class AdapterTests(unittest.TestCase):
         folder = self.played_server()
         api = FakeAPI(running=True)
         adapter, host = self.adapter(api)
-        adapter.host_drain()
+        self.archived(adapter, host)
         (folder / "level.dat").write_bytes(b"current")
         download = host.download
 
@@ -392,7 +407,7 @@ class AdapterTests(unittest.TestCase):
             api.is_running = True
 
         host.download = download_then_started
-        with self.assertRaises(crafty.CraftyError):
+        with self.assertRaisesRegex(crafty.CraftyError, "started during the restore"):
             adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
         self.assertEqual((folder / "level.dat").read_bytes(), b"current")
 
@@ -400,7 +415,7 @@ class AdapterTests(unittest.TestCase):
         folder = self.played_server()
         api = FakeAPI(running=True)
         adapter, host = self.adapter(api)
-        adapter.host_drain()
+        self.archived(adapter, host)
         (folder / "level.dat").write_bytes(b"current")
         real, failed = Path.rename, []
 
@@ -414,6 +429,148 @@ class AdapterTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
         self.assertEqual((folder / "level.dat").read_bytes(), b"current")
+
+    def test_restore_waits_for_crafty_to_boot(self):
+        folder = self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        self.archived(adapter, host)
+        (folder / "level.dat").write_bytes(b"corrupted")
+        original, attempts = api.request, []
+
+        def request(method, path, *rest):
+            attempts.append(path)
+            if len(attempts) < 3:
+                raise crafty.CraftyError("Crafty API GET request failed")
+            return original(method, path, *rest)
+
+        api.request = request
+        started = host.clock
+        adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+        self.assertEqual((folder / "level.dat").read_bytes(), b"first session")
+        self.assertEqual(host.clock - started, 10)
+
+    def test_restore_refuses_while_the_host_is_draining(self):
+        folder = self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        adapter.host_drain()  # the same boot: the launcher has not stopped the host yet
+        (folder / "level.dat").write_bytes(b"current")
+        key = "instances/family/crafty/20261010T180000Z.tar.gz"
+        with self.assertRaisesRegex(crafty.CraftyError, "^host is draining; finish stopping the host before restoring$"):
+            adapter.restore("family", key)
+        self.assertEqual((folder / "level.dat").read_bytes(), b"current")
+        self.assertNotIn(("s3", "cp-down", key), host.calls)
+
+    def test_restore_removes_earlier_leftovers_and_nothing_else(self):
+        self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        self.archived(adapter, host)
+        staging = self.root / "crafty" / "staging"
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "level.dat").write_bytes(b"kept")
+        for name in ("replaced-family-20261001T000000Z", "replaced-family-20261002T000000Z", "restore-abc12345"):
+            (staging / name / "world").mkdir(parents=True)
+            (staging / name / "world" / "level.dat").write_bytes(b"old")
+        # Another instance's folder, other work, a file and a link are never removed, nor anything a link points to.
+        kept = ["content-abc12345", "replaced-family-two-20261001T000000Z", "replaced-family-20261003T000000Z", "restore-notes"]
+        (staging / kept[0]).mkdir()
+        (staging / kept[1]).mkdir()
+        (staging / kept[2]).symlink_to(outside)
+        (staging / kept[3]).write_bytes(b"a file")
+        result = adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+        self.assertEqual(set(result), {"instance", "restored", "replaced"})
+        self.assertEqual(result["replaced"], str(staging / "replaced-family-20261010T180000Z"))
+        self.assertEqual(sorted(path.name for path in staging.iterdir()), sorted([*kept, "replaced-family-20261010T180000Z"]))
+        self.assertEqual((outside / "level.dat").read_bytes(), b"kept")
+
+    def stored_archive(self, host, members) -> str:
+        """Store an archive of members with its checksum, as a stop stores its own."""
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+            for info, data in members:
+                bundle.addfile(info, None if data is None else io.BytesIO(data))
+        key = "instances/family/crafty/20261011T180000Z.tar.gz"
+        host.stored[key] = buffer.getvalue()
+        host.stored[key + ".sha256"] = f"{hashlib.sha256(buffer.getvalue()).hexdigest()}  20261011T180000Z.tar.gz\n".encode()
+        return key
+
+    def test_restore_refuses_special_files_and_links_out_of_the_folder(self):
+        folder = self.played_server()
+        adapter, host = self.adapter(FakeAPI())
+        staging = self.root / "crafty" / "staging"
+        base = [member("family", tarfile.DIRTYPE), member("family/level.dat", data=b"restored")]
+        refused = {
+            "a FIFO": member("family/pipe", tarfile.FIFOTYPE),
+            "a character device": member("family/null", tarfile.CHRTYPE),
+            "a block device": member("family/disk", tarfile.BLKTYPE),
+            "a link up and out": member("family/escape", tarfile.SYMTYPE, linkname="../../../outside"),
+            "an absolute link": member("family/passwd", tarfile.SYMTYPE, linkname="/etc/passwd"),
+            "a hard link out": member("family/hard", tarfile.LNKTYPE, linkname="../outside"),
+            "an absolute hard link": member("family/shadow", tarfile.LNKTYPE, linkname="/etc/shadow"),
+        }
+        for case, bad in refused.items():
+            with self.subTest(case=case):
+                key = self.stored_archive(host, [*base, bad])
+                with self.assertRaisesRegex(crafty.CraftyError, "^the archive could not be unpacked$"):
+                    adapter.restore("family", key)
+                self.assertEqual((folder / "level.dat").read_bytes(), b"first session")
+                self.assertEqual(list(staging.iterdir()), [])
+        # Links that stay inside the folder are the server's own and come back, with the owners and modes stored.
+        key = self.stored_archive(host, [*base, member("family/latest", tarfile.SYMTYPE, linkname="level.dat"),
+                                         member("family/copy", tarfile.LNKTYPE, linkname="family/level.dat")])
+        adapter.restore("family", key)
+        self.assertEqual((folder / "latest").readlink(), Path("level.dat"))
+        self.assertEqual((folder / "copy").read_bytes(), b"restored")
+        self.assertEqual(stat.S_IMODE((folder / "level.dat").stat().st_mode), 0o644)
+
+    def test_a_full_disk_while_unpacking_says_to_grow_the_disk(self):
+        folder = self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        self.archived(adapter, host)
+        (folder / "level.dat").write_bytes(b"current")
+        staging = self.root / "crafty" / "staging"
+        for number, raised in ((errno.ENOSPC, crafty.CraftyError), (errno.EIO, OSError)):
+            def fail(*arguments, number=number):
+                raise OSError(number, os.strerror(number))
+
+            with self.subTest(errno=number), unittest.mock.patch.object(tarfile.TarFile, "makefile", fail):
+                with self.assertRaises(raised) as caught:
+                    adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+                if raised is crafty.CraftyError:
+                    self.assertEqual(str(caught.exception),
+                                     "the data disk filled up while unpacking the archive; grow the disk, then restore again")
+                else:
+                    self.assertNotIsInstance(caught.exception, crafty.CraftyError)
+                self.assertEqual((folder / "level.dat").read_bytes(), b"current")
+                self.assertEqual(list(staging.glob("restore-*")), [])
+
+    def test_the_cli_restore_prints_one_json_object(self):
+        self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        self.archived(adapter, host)
+        path = self.root / "operator.json"
+        path.write_text(json.dumps(config(self.root)))
+        key = "instances/family/crafty/20261010T180000Z.tar.gz"
+        arguments = ["--config", str(path), "restore", "family", "--key", key]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = crafty.main(arguments, api=api, host=host)
+        self.assertEqual((code, json.loads(output.getvalue())), (0, {
+            "instance": "family", "restored": key, "replaced": str(self.root / "crafty" / "staging" / "replaced-family-20261010T180000Z")}))
+        # An AWS CLI that never exits is killed, and the answer is still one JSON object.
+        host.download = lambda *arguments: crafty.Host.download(host, *arguments)
+        process = unittest.mock.Mock(stdout=io.BytesIO(host.stored[key]))
+        process.wait.side_effect = [subprocess.TimeoutExpired("aws", 1800), 0]
+        output = io.StringIO()
+        with unittest.mock.patch.object(crafty.subprocess, "Popen", return_value=process), contextlib.redirect_stdout(output):
+            code = crafty.main(arguments, api=api, host=host)
+        self.assertEqual((code, json.loads(output.getvalue())), (1, {"error": "AWS download did not finish"}))
+        process.kill.assert_called_once_with()
 
     def test_a_server_started_during_the_archive_fails_the_stop(self):
         self.played_server()
@@ -1272,6 +1429,246 @@ class AllowlistTests(unittest.TestCase):
         self.assertEqual(self.api.console, [])
 
 
+class ConsoleTests(unittest.TestCase):
+    """The console action an operator runs in a Session Manager shell on the host."""
+
+    ANSWER = "[10:00:00] [Server thread/INFO]: There are 1 whitelisted player(s): Sample_Java"
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.log = self.root / "crafty" / "servers" / SERVER_ID / "logs" / "latest.log"
+        self.log.parent.mkdir(parents=True)
+        self.log.write_text('[09:59:59] [Server thread/INFO]: Done (3.2s)! For help, type "help"\n')
+        self.api = FakeAPI(running=True)
+        self.api.on_console = lambda line: self.say(self.ANSWER + "\n")
+        self.host = FakeHost(self.api)
+        self.adapter = crafty.Adapter(config(self.root), self.api, self.host)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def say(self, text):
+        with self.log.open("a") as log:
+            log.write(text)
+
+    def test_the_line_goes_to_the_console_and_what_the_server_logged_next_comes_back(self):
+        result = self.adapter.console_command("family", "whitelist list")
+        self.assertEqual(result, {"instance": "family", "sent": "whitelist list", "log": [self.ANSWER]})
+        self.assertEqual(self.api.console, [(SERVER_ID, "whitelist list")])
+        self.assertEqual(self.host.clock, crafty.CONSOLE_WAIT)
+
+    def test_the_log_read_back_is_bounded_and_whole_lines_only(self):
+        self.api.on_console = lambda line: self.say("".join(f"[10:00:00] [Server thread/INFO]: line {n}\n" for n in range(300)) + "[10:00:01] partly")
+        log = self.adapter.console_command("family", "list")["log"]
+        self.assertEqual(len(log), crafty.CONSOLE_LOG_LINES)
+        self.assertEqual(log[-1], "[10:00:00] [Server thread/INFO]: line 199")
+        long = "[10:00:00] [Server thread/INFO]: " + "x" * 1000
+        self.api.on_console = lambda line: self.say((long + "\n") * 100)  # about 100 KB at once
+        log = self.adapter.console_command("family", "list")["log"]
+        self.assertEqual(log, [long] * (crafty.CONSOLE_LOG_LIMIT // (len(long) + 1)))
+
+    def test_the_lines_after_a_log_rollover_come_from_the_new_log(self):
+        def roll(line):
+            self.log.rename(self.log.parent / "2026-10-12-1.log")  # as log4j renames before it creates the new log
+            self.log.write_text(self.ANSWER + "\n")
+
+        self.api.on_console = roll
+        self.assertEqual(self.adapter.console_command("family", "whitelist list")["log"], [self.ANSWER])
+
+    def test_refuses_a_held_lock_a_draining_host_a_stopped_server_more_than_one_line_or_a_linked_log(self):
+        def held(path):
+            raise crafty.CraftyError("another lifecycle command is running; retry when it finishes")
+
+        self.host.lock = held
+        with self.assertRaisesRegex(crafty.CraftyError, "another lifecycle command"):
+            self.adapter.console_command("family", "list")
+        del self.host.lock
+        self.api.is_running = False
+        with self.assertRaisesRegex(crafty.CraftyError, "^start the server before sending console commands$"):
+            self.adapter.console_command("family", "list")
+        self.api.is_running = True
+        for line in ("", "say a\nop A", "say a\rop A", "say \x00"):
+            with self.subTest(line=line), self.assertRaisesRegex(crafty.CraftyError, "one line"):
+                self.adapter.console_command("family", line)
+        elsewhere = self.root / "elsewhere.log"
+        elsewhere.write_text("")
+        self.log.unlink()
+        self.log.symlink_to(elsewhere)
+        with self.assertRaisesRegex(crafty.CraftyError, "server log"):
+            self.adapter.console_command("family", "list")
+        crafty.write_durably(self.root / "crafty" / crafty.STATE_DIR / "host-drain.json", {"boot_id": "boot-1"})
+        with self.assertRaisesRegex(crafty.CraftyError, "^host is draining; start the host again before sending console commands$"):
+            self.adapter.console_command("family", "list")
+        self.assertEqual(self.api.console, [])
+
+    def test_the_cli_prints_one_json_object(self):
+        path = self.root / "operator.json"
+        path.write_text(json.dumps(config(self.root)))
+        for running, code, answer in ((True, 0, {"instance": "family", "sent": "whitelist list", "log": [self.ANSWER]}),
+                                      (False, 1, {"error": "start the server before sending console commands"})):
+            self.api.is_running = running
+            output = io.StringIO()
+            with self.subTest(running=running), contextlib.redirect_stdout(output):
+                result = crafty.main(["--config", str(path), "console", "family", "whitelist list"], api=self.api, host=self.host)
+            self.assertEqual((result, json.loads(output.getvalue())), (code, answer))
+
+
+PASSWORD = "made-up-first-password"
+
+
+class FakeFreshCrafty(FakeAPI):
+    """A freshly installed Crafty: its first admin login, and the API key endpoints a session may use."""
+
+    SESSION, KEY = "session." + "s" * 40, "key." + "k" * 40
+
+    def __init__(self):
+        super().__init__()
+        self.token = None  # the adapter sets the session, then the key
+        self.answers = {"login": {"token": self.SESSION, "user_id": "1", "page": "/panel/dashboard"}, "key": {"id": 7}, "token": self.KEY}
+        self.sent = []
+
+    def request(self, method, path, body=None, text=None):
+        self.sent.append((method, path, body, self.token))
+        if path == "/api/v2/auth/login" and method == "POST":
+            if body != {"username": "admin", "password": PASSWORD}:
+                raise crafty.CraftyError("Crafty API POST request failed")  # Crafty answers 401
+            return {"status": "ok", "data": self.answers["login"]}
+        if self.token != (self.SESSION if path.startswith("/api/v2/users/") else self.KEY):
+            raise crafty.CraftyError(f"Crafty API {method} request failed")
+        if path == "/api/v2/users/1/key" and method == "PATCH":
+            return {"status": "ok", "data": self.answers["key"]}
+        if path == "/api/v2/users/1/key/7" and method == "GET":
+            return {"status": "ok", "data": self.answers["token"]}
+        return super().request(method, path, body, text)
+
+
+class SetupAPIKeyTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.creds = self.root / "crafty" / "config" / "default-creds.txt"
+        self.creds.parent.mkdir(parents=True)
+        # As Crafty 4.11 writes it on a fresh install.
+        self.login = json.dumps({"username": "admin", "password": PASSWORD, "info": "This is NOT where you change your password."}, indent=4)
+        self.creds.write_text(self.login)
+        self.creds.chmod(0o600)
+        (self.root / "etc").mkdir()
+        self.token_file, self.admin_file = self.root / "etc" / "crafty-api.token", self.root / "etc" / "crafty-admin.json"
+        self.path = self.root / "operator.json"
+        self.path.write_text(json.dumps(dict(config(self.root), token_file=str(self.token_file))))
+        self.api = FakeFreshCrafty()
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def setup_api_key(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = crafty.main(["--config", str(self.path), "setup-api-key"], api=self.api, host=FakeHost(self.api))
+        return code, output.getvalue()
+
+    def assertNothingSetUp(self, output):
+        self.assertIn("error", json.loads(output))
+        for secret in (PASSWORD, FakeFreshCrafty.SESSION, FakeFreshCrafty.KEY):
+            self.assertNotIn(secret, output)
+        self.assertFalse(os.path.lexists(self.token_file))
+        self.assertFalse(os.path.lexists(self.admin_file))
+        self.assertEqual(self.creds.read_text(), self.login)
+
+    def test_the_key_is_stored_for_root_alone_and_the_first_login_leaves_crafty(self):
+        output = io.StringIO()
+        # Run as the host runs it: main makes the client, which has no token yet.
+        with unittest.mock.patch.object(crafty, "CraftyAPI", return_value=self.api) as client, contextlib.redirect_stdout(output):
+            code = crafty.main(["--config", str(self.path), "setup-api-key"], host=FakeHost(self.api))
+        client.assert_called_once_with("https://127.0.0.1:8443", None)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue()),
+                         {"key": "lifecycle", "token_file": str(self.token_file), "admin_file": str(self.admin_file)})
+        for secret in (PASSWORD, FakeFreshCrafty.SESSION, FakeFreshCrafty.KEY):
+            self.assertNotIn(secret, output.getvalue())
+        self.assertEqual(self.token_file.read_text(), FakeFreshCrafty.KEY)
+        self.assertEqual(self.admin_file.read_text(), self.login)
+        for path in (self.token_file, self.admin_file):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertFalse(os.path.lexists(self.creds))
+        self.assertEqual(self.api.sent, [
+            ("POST", "/api/v2/auth/login", {"username": "admin", "password": PASSWORD}, None),
+            ("PATCH", "/api/v2/users/1/key", {"name": "lifecycle", "full_access": True, "server_permissions_mask": "00000000",
+                                              "crafty_permissions_mask": "000"}, FakeFreshCrafty.SESSION),
+            ("GET", "/api/v2/users/1/key/7", None, FakeFreshCrafty.SESSION),
+            ("GET", "/api/v2/servers", None, FakeFreshCrafty.KEY)])
+
+    def test_an_existing_token_file_or_admin_file_is_never_replaced(self):
+        cases = ((self.token_file, False, "the API key is already set up"),
+                 (self.token_file, True, "the API key is already set up"),
+                 (self.admin_file, False, f"{self.admin_file} holds an earlier Crafty login; move it away, then run setup-api-key again"))
+        for path, link, error in cases:
+            with self.subTest(path=path.name, link=link):
+                if link:
+                    path.symlink_to(self.root / "elsewhere")  # dangling, so exists() alone would miss it
+                else:
+                    path.write_text("earlier")
+                code, output = self.setup_api_key()
+                self.assertEqual((code, json.loads(output)), (1, {"error": error}))
+                self.assertFalse(os.path.lexists(self.root / "elsewhere"))
+                self.assertEqual(path.is_symlink(), link)
+                if not link:
+                    self.assertEqual(path.read_text(), "earlier")
+                self.assertEqual(self.api.sent, [])
+                self.assertEqual(self.creds.read_text(), self.login)
+                path.unlink()
+
+    def test_without_crafty_s_first_login_nothing_is_asked(self):
+        elsewhere = self.root / "elsewhere.json"
+        elsewhere.write_text(self.login)
+        cases = {"missing": None, "not JSON": "admin " + PASSWORD, "no password": json.dumps({"username": "admin"}),
+                 "a link": elsewhere}
+        for case, content in cases.items():
+            with self.subTest(case=case):
+                self.creds.unlink(missing_ok=True)
+                if isinstance(content, Path):
+                    self.creds.symlink_to(content)
+                elif content is not None:
+                    self.creds.write_text(content)
+                code, output = self.setup_api_key()
+                self.assertEqual(code, 1)
+                self.assertIn("default-creds.txt does not hold Crafty's first admin login", json.loads(output)["error"])
+                self.assertNotIn(PASSWORD, output)
+                self.assertEqual(self.api.sent, [])
+                self.assertFalse(os.path.lexists(self.token_file))
+
+    def test_answers_crafty_should_never_give_store_nothing(self):
+        cases = {
+            "a login without a token": ("login", {"user_id": "1"}),
+            "a user ID that is a path": ("login", {"token": FakeFreshCrafty.SESSION, "user_id": "1/../2"}),
+            "a session token on two lines": ("login", {"token": FakeFreshCrafty.SESSION + "\nX: 1", "user_id": "1"}),
+            "no key ID": ("key", {}),
+            "a key ID that is true": ("key", {"id": True}),
+            "a key ID that is a path": ("key", {"id": "7/../8"}),
+            "no token": ("token", None),
+            "a token that is not text": ("token", {"token": FakeFreshCrafty.KEY}),
+            "a token with a space": ("token", "key " + "k" * 40),
+            "a token Crafty then refuses": ("token", "other." + "k" * 40),
+        }
+        for case, (step, answer) in cases.items():
+            with self.subTest(case=case):
+                self.api = FakeFreshCrafty()
+                self.api.answers[step] = answer
+                code, output = self.setup_api_key()
+                self.assertEqual(code, 1)
+                self.assertNothingSetUp(output)
+
+    def test_a_refused_login_says_to_retry_once_crafty_has_started(self):
+        self.login = json.dumps({"username": "admin", "password": "changed-since-install"})
+        self.creds.write_text(self.login)
+        code, output = self.setup_api_key()
+        self.assertEqual((code, json.loads(output)), (1, {
+            "error": "Crafty did not accept its first admin login; once Crafty has started, run setup-api-key again"}))
+        self.assertNothingSetUp(output)
+        self.assertEqual(len(self.api.sent), 1)
+
+
 class CraftyAPITests(unittest.TestCase):
     def api(self, answer):
         api = crafty.CraftyAPI("https://127.0.0.1:8443/", "token")
@@ -1299,6 +1696,13 @@ class CraftyAPITests(unittest.TestCase):
         self.assertEqual(sent[0].data, b"whitelist add Sample_Java")
         self.assertEqual(sent[0].get_header("Content-type"), "text/plain; charset=utf-8")
         self.assertEqual(sent[0].get_header("Authorization"), "Bearer token")
+
+    def test_a_request_without_a_token_carries_no_authorization(self):
+        api, sent = self.api(b'{"status": "ok", "data": {}}')
+        api.token = None
+        api.request("POST", "/api/v2/auth/login", {"username": "admin", "password": PASSWORD})
+        self.assertFalse(sent[0].has_header("Authorization"))
+        self.assertEqual(json.loads(sent[0].data), {"username": "admin", "password": PASSWORD})
 
     def test_a_stopped_server_refuses_the_console_line(self):
         api, _ = self.api(b'{"status": "error", "error": "SERVER_NOT_RUNNING"}')
@@ -1328,6 +1732,26 @@ class HostTests(unittest.TestCase):
                 crafty.Host().upload("us-west-2", "bucket", "a/b.tar.gz", 5, lambda sink: sink.write(b"hello"))
             self.assertEqual(received.read_bytes(), b"hello")
             self.assertIn("s3 cp - s3://bucket/a/b.tar.gz", Path(f"{received}.args").read_text())
+
+
+    def test_download_streams_from_the_aws_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory) / "aws"
+            fake.write_text(f"#!/bin/sh\necho \"$@\" > {directory}/args\nprintf hello\n")
+            fake.chmod(0o755)
+            received = []
+            with unittest.mock.patch.dict(os.environ, {"PATH": f"{directory}:{os.environ['PATH']}"}):
+                crafty.Host().download("us-west-2", "bucket", "a/b.tar.gz", lambda source: received.append(source.read()))
+            self.assertEqual(received, [b"hello"])
+            self.assertIn("s3 cp s3://bucket/a/b.tar.gz -", (Path(directory) / "args").read_text())
+
+    def test_a_download_that_never_finishes_is_killed_and_reported(self):
+        process = unittest.mock.Mock(stdout=io.BytesIO(b""))
+        process.wait.side_effect = [subprocess.TimeoutExpired("aws", 1800), 0]
+        with unittest.mock.patch.object(crafty.subprocess, "Popen", return_value=process):
+            with self.assertRaisesRegex(crafty.CraftyError, "^AWS download did not finish$"):
+                crafty.Host().download("us-west-2", "bucket", "a/b.tar.gz", lambda source: source.read())
+        process.kill.assert_called_once_with()
 
 
 class ConfigTests(unittest.TestCase):

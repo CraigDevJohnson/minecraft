@@ -43,6 +43,8 @@ type fakeEC2 struct {
 	onDescribe func()
 	// onStop runs at each StopInstances.
 	onStop func()
+	// onStart runs at each StartInstances.
+	onStart func()
 }
 
 func (f *fakeEC2) DescribeInstances(context.Context, *ec2.DescribeInstancesInput, ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
@@ -75,6 +77,9 @@ func (f *fakeEC2) StartInstances(_ context.Context, input *ec2.StartInstancesInp
 		panic("started another host")
 	}
 	f.starts++
+	if f.onStart != nil {
+		f.onStart()
+	}
 	return &ec2.StartInstancesOutput{}, f.startErr
 }
 
@@ -100,6 +105,8 @@ type fakeSSM struct {
 	commands   []string
 	limits     []string                         // each command's executionTimeout
 	invocation []ssm.GetCommandInvocationOutput // successive answers; the last repeats
+	// onInvocation runs at each GetCommandInvocation, before its answer.
+	onInvocation func()
 }
 
 func (f *fakeSSM) GetParameter(_ context.Context, input *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
@@ -142,6 +149,9 @@ func (f *fakeSSM) SendCommand(_ context.Context, input *ssm.SendCommandInput, _ 
 func (f *fakeSSM) GetCommandInvocation(context.Context, *ssm.GetCommandInvocationInput, ...func(*ssm.Options)) (*ssm.GetCommandInvocationOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.onInvocation != nil {
+		f.onInvocation()
+	}
 	if len(f.invocation) == 0 {
 		return nil, &ssmtypes.InvocationDoesNotExist{}
 	}
@@ -284,6 +294,11 @@ func TestRunningHostWithoutGame(t *testing.T) {
 		{name: "the idle stop is draining", launched: time.Hour, idle: `{"launch_time":"2026-10-11T15:00:00Z","drain_command_id":"x"}`, want: Stopping},
 		{name: "the idle stop requested the EC2 stop", launched: time.Hour, idle: `{"launch_time":"2026-10-11T15:00:00Z","stop_requested":true}`, want: Stopping},
 		{name: "an idle-stop drain of an earlier run", launched: time.Hour, idle: `{"launch_time":"2026-10-11T09:00:00Z","drain_command_id":"x"}`, want: Maintenance},
+		{name: "our restore is under way", launched: 3 * time.Minute, session: &Session{RequestedAt: now.Add(-4 * time.Minute), Phase: Restoring, RestoreKey: archiveKey}, want: Starting},
+		{name: "our restore outlasts a start's deadline", launched: 30 * time.Minute, session: &Session{RequestedAt: now.Add(-31 * time.Minute), LaunchTime: now.Add(-30 * time.Minute), Phase: Restoring, RestoreKey: archiveKey, RestoreCommandID: commandID}, want: Starting},
+		{name: "our restore ran past its deadline", launched: 45 * time.Minute, session: &Session{RequestedAt: now.Add(-46 * time.Minute), LaunchTime: now.Add(-45 * time.Minute), Phase: Restoring, RestoreKey: archiveKey}, want: Failed},
+		{name: "our restore failed", launched: 10 * time.Minute, session: &Session{RequestedAt: now.Add(-11 * time.Minute), LaunchTime: now.Add(-10 * time.Minute), Phase: Failed, RestoreKey: archiveKey}, want: Failed},
+		{name: "a restore tied to an earlier run does not follow", launched: time.Hour, session: &Session{RequestedAt: now.Add(-5 * time.Minute), LaunchTime: now.Add(-3 * time.Hour), Phase: Restoring, RestoreKey: archiveKey}, want: Maintenance},
 	}
 	for _, tc := range cases {
 		r := newRig(ec2types.InstanceStateNameRunning, tc.launched)

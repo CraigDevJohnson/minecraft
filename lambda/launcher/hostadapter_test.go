@@ -312,4 +312,14 @@ func TestCommandsRunAfterTheAdapterInstall(t *testing.T) {
 	if !strings.HasPrefix(script, "set -eu\n"+install+"\n") || strings.Index(script, `player="$(mktemp)"`) < len(install) {
 		t.Fatalf("the allowlist must run after the install:\n%s", script)
 	}
+
+	// The restore runs on the adapter this launcher carries, which is the one that knows how to restore.
+	restore := restoreRig(t)
+	restore.launcher.Adapter = r.launcher.Adapter
+	if err := restore.launcher.FinishStart(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := "set -eu\n" + install + "\n" + restoreCommand; len(restore.ssm.commands) != 1 || restore.ssm.commands[0] != want {
+		t.Fatalf("commands %q", restore.ssm.commands)
+	}
 }

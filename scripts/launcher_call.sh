@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Sends one signed request to the Minecraft launcher's Function URL and, for a
-# start or a stop, follows the server until it settles. The Server control
-# workflow and the Taskfile's server:* targets use it. Nothing runs where it
-# runs: the launcher does the work in AWS. See docs/operations/cloud-controls.md.
+# start, a stop or a restore, follows the server until it settles. The Server
+# control workflow and the Taskfile's server:* targets use it. Nothing runs where
+# it runs: the launcher does the work in AWS. See docs/operations/cloud-controls.md.
 #
 # Usage: launcher_call.sh status
 #        launcher_call.sh start
 #        launcher_call.sh stop [--force]
+#        launcher_call.sh restore --archive NAME
 #        launcher_call.sh allowlist-add|allowlist-remove --edition java|bedrock --player NAME
+#
+# A restore's NAME is the archive's name as the S3 console shows it, such as
+# 20261016T031500Z.tar.gz, or an S3 URI or key that ends in it; only the name is
+# sent, and the launcher finds it among its own instance's archives.
 #
 # LAUNCHER_URL names the Function URL. Credentials come from the environment
 # (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN) or, when they
@@ -16,7 +21,7 @@
 set -euo pipefail
 
 usage() {
-	printf 'usage: %s status | start | stop [--force] | allowlist-add|allowlist-remove --edition java|bedrock --player NAME\n' "${0##*/}" >&2
+	printf 'usage: %s status | start | stop [--force] | restore --archive NAME | allowlist-add|allowlist-remove --edition java|bedrock --player NAME\n' "${0##*/}" >&2
 	exit 2
 }
 
@@ -24,11 +29,16 @@ action="${1:-}"
 [[ -n "$action" ]] || usage
 shift
 force=false
+archive=""
 edition=""
 player=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--force) force=true ;;
+	--archive)
+		archive="${2:-}"
+		shift
+		;;
 	--edition)
 		edition="${2:-}"
 		shift
@@ -39,7 +49,8 @@ while [[ $# -gt 0 ]]; do
 		;;
 	*) usage ;;
 	esac
-	shift
+	# An option missing its value leaves nothing here to shift.
+	shift || usage
 done
 
 url="${LAUNCHER_URL:-}"
@@ -165,6 +176,27 @@ stop)
 	200) settle stopped stopping 80 ;;
 	409)
 		printf 'the stop was refused: %s\n' "$(field code)" >&2
+		exit 1
+		;;
+	*)
+		printf 'the launcher answered %s\n' "$status" >&2
+		exit 1
+		;;
+	esac
+	;;
+restore)
+	archive="${archive##*/}"
+	if [[ ! "$archive" =~ ^[0-9]{8}T[0-9]{6}Z\.tar\.gz$ ]]; then
+		usage
+	fi
+	body="$(python3 -c 'import json, sys; print(json.dumps({"archive": sys.argv[1]}))' "$archive")"
+	request POST /server/restore "$body"
+	printf '%s\n' "$answer"
+	case "$status" in
+	202) follow starting ready 60 ;;
+	409)
+		state="$(field state)"
+		printf 'the restore was refused: %s; the server is %s\n' "$(field code)" "${state:-unread}" >&2
 		exit 1
 		;;
 	*)

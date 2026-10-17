@@ -7,6 +7,8 @@ workstation's minecraft_host.py keep sending the same `start`, `host-drain`, `ho
 API to start or stop the server or to run one console command, then makes a cold archive of the
 stopped server directory and stores it in S3. Before each start it brings the stopped server to the
 pinned content in server.json beside it (docs/adr/0008-the-adapter-applies-the-pinned-server-content.md).
+In a Session Manager shell on the host, the operator also sends console lines with `console` and, on a
+freshly installed Crafty, creates the adapter's API key with `setup-api-key`.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime
+import errno
 import fcntl
 import hashlib
 import http.client
@@ -51,6 +54,8 @@ UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 JAR_PATH = re.compile(r"(?:plugins/)?[A-Za-z0-9._-]+\.jar")
 JAVA_NAME = re.compile(r"[A-Za-z0-9_]{3,16}")
+# A Crafty session or API token: it goes into an Authorization header, so one printable word.
+TOKEN = re.compile(r"[\x21-\x7e]{16,4096}")
 CONTAINER_SERVERS = "/crafty/servers/"
 ARTIFACT_HOSTS = {"fill-data.papermc.io", "download.geysermc.org", "github.com"}
 STATE_DIR = "state"
@@ -60,6 +65,10 @@ STORAGE_FIELDS = ("size_bytes", "available_bytes", "used_percent")
 PLAYER_FILE_LIMIT = 4096
 ALLOWLIST_LIMIT = 1024 * 1024
 LOG_LIMIT = 1024 * 1024
+# What the console action waits for and answers: the server log's next few seconds, at most this many bytes and lines.
+CONSOLE_WAIT = 3
+CONSOLE_LOG_LIMIT = 64 * 1024
+CONSOLE_LOG_LINES = 200
 # The game's console answers to `whitelist reload` and `whitelist list`, whole lines as Paper's logs/latest.log
 # records them ("[12:00:00] [Server thread/INFO]: Reloaded the whitelist"). Paper puts a logger's name before the
 # text only for loggers outside the game's own, which these answers do not come from; one is accepted anyway, but
@@ -105,8 +114,9 @@ def load_config(path: Path) -> dict:
 
 
 class CraftyAPI:
-    def __init__(self, base_url: str, token: str):
+    def __init__(self, base_url: str, token: str | None):
         self.base_url = base_url.rstrip("/")
+        # None until setup-api-key has logged in; a request without a token carries no Authorization header.
         self.token = token
         context = ssl.create_default_context()
         context.check_hostname = False
@@ -114,7 +124,7 @@ class CraftyAPI:
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
 
     def request(self, method: str, path: str, body: dict | None = None, *, text: str | None = None) -> dict:
-        headers = {"Authorization": f"Bearer {self.token}"}
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         data = b"" if method == "POST" else None
         if body is not None:
             data = json.dumps(body).encode()
@@ -200,11 +210,14 @@ class Host:
         except OSError as exc:
             raise CraftyError("AWS download could not run") from exc
         try:
-            read(process.stdout)
+            with process.stdout:
+                read(process.stdout)
             code = process.wait(timeout=1800)
-        except BaseException:
+        except BaseException as exc:
             process.kill()
             process.wait()
+            if isinstance(exc, subprocess.TimeoutExpired):
+                raise CraftyError("AWS download did not finish") from exc  # still one JSON answer, never a traceback
             raise
         if code:
             raise CraftyError("AWS download failed")
@@ -313,6 +326,13 @@ def fingerprint(source: Path) -> list:
     return [count, size, newest]
 
 
+def restored_member(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo:
+    """tarfile's "tar" filter keeps a member's owner and mode, but it lets device files, FIFOs and links that point
+    out of the folder through. The "data" filter refuses those, so a member must pass both; a refusal is a TarError."""
+    tarfile.data_filter(member, path)
+    return tarfile.tar_filter(member, path)
+
+
 class Adapter:
     def __init__(self, config: dict, api, host=None, manifest: dict | None = None):
         self.config = config
@@ -390,6 +410,58 @@ class Adapter:
                   "Crafty has not finished unpacking the archive; rerun import-server to keep waiting, "
                   "or delete the server in Crafty if its import log shows a failure")
         return {"instance": instance, "server_id": server["server_id"]}
+
+    def setup_api_key(self) -> dict:
+        """Create the lifecycle API key on a freshly installed Crafty with the first admin login it wrote, store the
+        key's token for this adapter, and move that login out of Crafty's config folder. Neither is ever printed."""
+        token_file = Path(self.config["token_file"])
+        admin_file = token_file.parent / "crafty-admin.json"
+        creds = self.root / "crafty" / "config" / "default-creds.txt"
+        if os.path.lexists(token_file):
+            raise CraftyError("the API key is already set up")
+        if os.path.lexists(admin_file):
+            raise CraftyError(f"{admin_file} holds an earlier Crafty login; move it away, then run setup-api-key again")
+        login = None
+        try:
+            descriptor = os.open(creds, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as stream:
+                if stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    data = stream.read(PLAYER_FILE_LIMIT + 1)
+                    login = json.loads(data) if len(data) <= PLAYER_FILE_LIMIT else None
+        except (OSError, ValueError):
+            pass
+        if not isinstance(login, dict) or not all(isinstance(login.get(name), str) and login[name] for name in ("username", "password")):
+            raise CraftyError(f"{creds} does not hold Crafty's first admin login; run setup-api-key only on a freshly installed Crafty")
+        try:
+            session = self.api.request("POST", "/api/v2/auth/login", {name: login[name] for name in ("username", "password")})
+        except CraftyError:
+            raise CraftyError("Crafty did not accept its first admin login; once Crafty has started, run setup-api-key again") from None
+        session = session.get("data")
+        user, started = (session.get("user_id"), session.get("token")) if isinstance(session, dict) else (None, None)
+        if not (isinstance(user, str) and re.fullmatch(r"[0-9]{1,18}", user)
+                and isinstance(started, str) and TOKEN.fullmatch(started)):
+            raise CraftyError("Crafty's login answer holds no session")
+        self.api.token = started
+        # Crafty's handler needs all four fields; full access makes the masks moot.
+        created = self.api.request("PATCH", f"/api/v2/users/{user}/key", {
+            "name": "lifecycle", "full_access": True, "server_permissions_mask": "00000000", "crafty_permissions_mask": "000"}).get("data")
+        key = created.get("id") if isinstance(created, dict) else None
+        if type(key) not in (int, str) or not re.fullmatch(r"[0-9]{1,18}", str(key)):
+            raise CraftyError("Crafty did not report the new API key")
+        token = self.api.request("GET", f"/api/v2/users/{user}/key/{key}").get("data")
+        if not isinstance(token, str) or not TOKEN.fullmatch(token):
+            raise CraftyError("Crafty did not return the new API key's token")
+        self.api.token = token
+        if not self.api_ready():
+            raise CraftyError("Crafty did not accept the new API key")
+        try:
+            write_private(token_file, token.encode())
+        except FileExistsError:
+            raise CraftyError("the API key is already set up") from None
+        # Root keeps the admin password for a hands-on emergency, outside the folder Crafty's container shares.
+        write_private(admin_file, data)
+        creds.unlink()
+        return {"key": "lifecycle", "token_file": str(token_file), "admin_file": str(admin_file)}
 
     # Recorded backup state ------------------------------------------------------------------
 
@@ -514,17 +586,28 @@ class Adapter:
 
     def restore(self, instance: str, key: str) -> dict:
         """Replace the stopped server folder with a verified archive from S3. The folder it
-        replaces is kept under crafty/staging until the operator deletes it."""
+        replaces is kept under crafty/staging until the next restore removes it."""
         with self.lifecycle():
             prefix = f"instances/{instance}/crafty/"
             if not re.fullmatch(re.escape(prefix) + r"[0-9]{8}T[0-9]{6}Z\.tar\.gz", key):
                 raise CraftyError("restore needs the key of one of this instance's archives")
+            if self.draining():
+                raise CraftyError("host is draining; finish stopping the host before restoring")
+            # The launcher restores right after an EC2 start, while Crafty's container may still be booting.
+            self.wait(self.api_ready, self.timeouts["start"], "Crafty's API did not come up; check minecraft-crafty.service")
             server = self.server(instance)
             if self.running(server):
                 raise CraftyError("stop the server before restoring it")
             target, backup = self.server_dir(server), self.config["backup"]
             staging = self.root / "crafty" / "staging"
             staging.mkdir(mode=0o700, parents=True, exist_ok=True)
+            # Each is another copy of a world on the data disk: work folders of restores cut off before their
+            # cleanup, and the folders earlier restores replaced, whose worlds are in S3. Only plain folders go.
+            leftover = re.compile(rf"replaced-{re.escape(instance)}-[0-9]{{8}}T[0-9]{{6}}Z|restore-[a-z0-9_]+")
+            with os.scandir(staging) as entries:
+                stale = [entry.path for entry in entries if leftover.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False)]
+            for path in stale:
+                shutil.rmtree(path, ignore_errors=True)
             work = Path(tempfile.mkdtemp(dir=staging, prefix="restore-"))
             try:
                 expected = self.archive_checksum(backup, key, work / "checksum")
@@ -532,10 +615,9 @@ class Adapter:
 
                 def read(source) -> None:
                     counted["source"] = _CountedReader(source)
-                    # The archive is this adapter's own, so keep its owners; the tar filter still
-                    # refuses absolute paths, links out of the folder and device files.
+                    # The archive is this adapter's own, so its owners and modes are kept (restored_member).
                     with tarfile.open(fileobj=counted["source"], mode="r|gz") as bundle:
-                        bundle.extractall(work / "files", filter="tar", numeric_owner=True)
+                        bundle.extractall(work / "files", filter=restored_member, numeric_owner=True)
                     while counted["source"].read(1024 * 1024):
                         pass
 
@@ -543,6 +625,10 @@ class Adapter:
                     self.host.download(backup["region"], backup["bucket"], key, read)
                 except (tarfile.TarError, EOFError) as exc:
                     raise CraftyError("the archive could not be unpacked") from exc
+                except OSError as exc:
+                    if exc.errno != errno.ENOSPC:
+                        raise
+                    raise CraftyError("the data disk filled up while unpacking the archive; grow the disk, then restore again") from exc
                 digest = counted["source"].digest.hexdigest()
                 restored = work / "files" / instance
                 if digest != expected or not restored.is_dir() or restored.is_symlink():
@@ -793,6 +879,21 @@ class Adapter:
             raise CraftyError("a console command must be one line")
         self.api.request("POST", f"/api/v2/servers/{server['server_id']}/stdin", text=line)
 
+    def console_command(self, instance: str, line: str) -> dict:
+        """Send one line to the running server's console from a shell on the host, and answer the lines the server
+        logged in the next few seconds. Not a launcher action: an operator runs it in a Session Manager shell."""
+        with self.lifecycle():
+            if self.draining():
+                raise CraftyError("host is draining; start the host again before sending console commands")
+            server = self.server(instance)
+            if not self.running(server):
+                raise CraftyError("start the server before sending console commands")
+            console = _Console(self, server)
+            mark = console.log_end()
+            self.console(server, line)
+            self.host.sleep(CONSOLE_WAIT)
+            return {"instance": instance, "sent": line, "log": console.lines_after(mark)}
+
     def allowlist(self, instance: str, operation: str, edition: str, player: dict) -> dict:
         """Add or remove one verified player on the running server (docs/operations/allowlist.md)."""
         from minecraft_access import AccessError, change_allowlist  # only this action needs it
@@ -908,9 +1009,9 @@ class _Console:
         stream.close()
         return metadata.st_dev, metadata.st_ino, metadata.st_size
 
-    def _listed_after(self, mark: tuple) -> set | None:
-        """The names, lowercased, of the first list the log shows after the first reload logged since mark, or None
-        until both are there. A log that rolled over since mark is read from its start."""
+    def _read_after(self, mark: tuple, limit: int) -> bytes | None:
+        """At most limit bytes the log gained since mark, or None while it does not exist. A log that rolled over
+        since mark is read from its start."""
         opened = self._open_log()
         if opened is None:
             return None
@@ -918,7 +1019,19 @@ class _Console:
         with stream:
             same = (metadata.st_dev, metadata.st_ino) == mark[:2] and metadata.st_size >= mark[2]
             stream.seek(mark[2] if same else 0)
-            data = stream.read(LOG_LIMIT + 1)
+            return stream.read(limit)
+
+    def lines_after(self, mark: tuple) -> list:
+        """The whole lines the log gained since mark, within the console action's bounds."""
+        lines = (self._read_after(mark, CONSOLE_LOG_LIMIT) or b"").decode("utf-8", "replace").split("\n")[:-1]
+        return [line.rstrip("\r") for line in lines[:CONSOLE_LOG_LINES]]
+
+    def _listed_after(self, mark: tuple) -> set | None:
+        """The names, lowercased, of the first list the log shows after the first reload logged since mark, or None
+        until both are there."""
+        data = self._read_after(mark, LOG_LIMIT + 1)
+        if data is None:
+            return None
         if len(data) > LOG_LIMIT:
             raise CraftyError("the server log grew too fast to confirm the allowlist reload")
         reloaded = False
@@ -1146,7 +1259,27 @@ def write_durably(path: Path, value: dict | bytes, *, mode: int | None = None) -
         os.fsync(output.fileno())
         temporary = Path(output.name)
     temporary.replace(path)
-    folder = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    sync_folder(path.parent)
+
+
+def write_private(path: Path, data: bytes) -> None:
+    """Create path as a new file only its owner, root, may read, holding data durably. An existing file or link is
+    never replaced; that raises FileExistsError."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    sync_folder(path.parent)
+
+
+def sync_folder(path: Path) -> None:
+    folder = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(folder)
     finally:
@@ -1338,6 +1471,10 @@ def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
     allow.add_argument("operation", choices=("add", "remove"))
     allow.add_argument("--edition", choices=("java", "bedrock"), required=True)
     allow.add_argument("--player-file", type=Path, required=True)
+    send = commands.add_parser("console", help="send one line to the running server's console and print what it logged")
+    send.add_argument("instance")
+    send.add_argument("line")
+    commands.add_parser("setup-api-key", help="create the lifecycle API key on a freshly installed Crafty and store its token")
     args = parser.parse_args(argv)
     try:
         if args.action == "stage-import":
@@ -1351,7 +1488,8 @@ def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
         if getattr(args, "instance", None) is not None and args.instance not in config["instances"]:
             raise CraftyError("instance is not configured")
         if api is None:
-            token = Path(config["token_file"]).read_text().strip()
+            # setup-api-key makes the token, so it starts without one.
+            token = None if args.action == "setup-api-key" else Path(config["token_file"]).read_text().strip()
             api = CraftyAPI(config["crafty_url"], token)
         # A start applies the pinned content the launcher installed beside the adapter, and fails without it.
         adapter = Adapter(config, api, host, load_manifest(manifest) if args.action == "start" else None)
@@ -1362,6 +1500,10 @@ def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
             output = adapter.restore(args.instance, args.key)
         elif args.action == "allowlist":
             output = adapter.allowlist(args.instance, args.operation, args.edition, read_player_file(args.player_file))
+        elif args.action == "console":
+            output = adapter.console_command(args.instance, args.line)
+        elif args.action == "setup-api-key":
+            output = adapter.setup_api_key()
         elif args.action == "import-server":
             output = adapter.import_server(args.instance, args.archive_name, args.max_memory_gb)
         elif args.action == "host-drain":

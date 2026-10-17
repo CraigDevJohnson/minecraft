@@ -42,7 +42,7 @@ findmnt --mountpoint "$data_root" >/dev/null || {
 
 # The Compose file comes from the pinned server content (its Crafty image by digest and the game ports its Bedrock
 # transport needs), rendered the way each start renders it again (docs/adr/0008-the-adapter-applies-the-pinned-server-content.md).
-# Game ports are public; the Crafty web UI listens on loopback only and is reached through SSM.
+# Game ports are public; the Crafty web UI and API listen on loopback only, where the adapter reaches them.
 compose="$(python3 -B "$source_dir/scripts/minecraft_crafty.py" render-compose --manifest "$source_dir/runtime/crafty/server.json" --data-root "$data_root")" || {
 	printf 'The pinned server content is not valid: %s\n' "$compose" >&2
 	exit 1
@@ -94,4 +94,4 @@ UNIT
 systemctl daemon-reload
 systemctl enable minecraft-crafty.service
 systemctl start minecraft-crafty.service
-printf 'Crafty is running. Open its admin page through an SSM port forward, then follow docs/operations/crafty.md.\n'
+printf 'Crafty is running. Write /etc/minecraft/operator.json and run minecraft-instance setup-api-key, as docs/operations/crafty.md describes.\n'

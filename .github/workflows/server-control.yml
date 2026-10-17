@@ -1,9 +1,9 @@
-# Controls the family server from anywhere with GitHub: status, start, stop and
-# allowlist changes, each one signed request to the launcher's Function URL.
-# Nothing runs here but that request; the launcher does the work in AWS. The
-# job runs only when Craig's own account started the run (and any re-run of it):
-# the launcher treats this role as the operator. See
-# docs/operations/cloud-controls.md and ADR 0006.
+# Controls the family server from anywhere with GitHub: status, start, stop,
+# restoring an archive into the stopped server, and allowlist changes, each one
+# signed request to the launcher's Function URL. Nothing runs here but that
+# request; the launcher does the work in AWS. The job runs only when Craig's own
+# account started the run (and any re-run of it): the launcher treats this role
+# as the operator. See docs/operations/cloud-controls.md and ADR 0006.
 #
 # The minecraft-server-control role trusts this job through GitHub OIDC with
 # the subject repo:CraigDevJohnson@42454849/minecraft@1359070973:environment:server
@@ -16,12 +16,16 @@ on:
       action:
         description: What to do with the family server
         type: choice
-        options: [status, start, stop, allowlist-add, allowlist-remove]
+        options: [status, start, stop, restore, allowlist-add, allowlist-remove]
         default: status
       nobody_playing:
         description: For stop, confirm nobody is playing, so the server stops even when the game still reports players or does not answer
         type: boolean
         default: false
+      archive:
+        description: For restore, the archive's name in S3, such as 20261016T031500Z.tar.gz
+        type: string
+        default: ''
       edition:
         description: For the allowlist actions, the player's edition
         type: choice
@@ -55,7 +59,8 @@ jobs:
       github.ref == 'refs/heads/main' &&
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    # A stop waits for the drain, which may take up to the launcher's 75-minute deadline.
+    # A stop waits for the drain, which may take up to the launcher's 75-minute deadline, and a restore is
+    # followed for up to 60 minutes while the archive is put in place and the server starts.
     timeout-minutes: 90
     environment: server
     permissions:
@@ -94,6 +99,7 @@ jobs:
         env:
           ACTION: ${{ inputs.action }}
           NOBODY_PLAYING: ${{ inputs.nobody_playing }}
+          ARCHIVE: ${{ inputs.archive }}
           EDITION: ${{ inputs.edition }}
           PLAYER: ${{ inputs.player }}
           LAUNCHER_URL: ${{ vars.MINECRAFT_LAUNCHER_URL }}
@@ -104,6 +110,9 @@ jobs:
             if [[ "$NOBODY_PLAYING" == true ]]; then
               args+=(--force)
             fi
+            ;;
+          restore)
+            args+=(--archive "$ARCHIVE")
             ;;
           allowlist-add | allowlist-remove)
             args+=(--edition "$EDITION" --player "$PLAYER")

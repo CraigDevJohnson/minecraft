@@ -1,10 +1,11 @@
 // Command launcher is the Minecraft Launcher's backend: it answers The Lobby's site with the family server's
-// status, and starts or stops the server when a Member or the operator's workflow asks.
+// status, starts or stops the server when a Member or the operator's workflow asks, and restores an archive
+// when the operator's workflow asks.
 //
 // On Lambda it serves the site through its Function URL, which only the site's role and the operator's
-// control role may call (the-lobby ADR 0006, ADR 0006 here), and finishes each start or stop in a second,
-// asynchronous run of itself. Anywhere else it listens on a local port with the caller's own AWS credentials
-// and finishes them in the background.
+// control role may call (the-lobby ADR 0006, ADR 0006 here), and finishes each start, stop or restore in a
+// second, asynchronous run of itself. Anywhere else it listens on a local port with the caller's own AWS
+// credentials and finishes them in the background.
 package main
 
 import (
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -42,6 +44,10 @@ const (
 // followUpMargin leaves the follow-up run time to record a failure before Lambda ends it.
 const followUpMargin = 20 * time.Second
 
+// instanceName is the host adapter's rule for an instance's name (INSTANCE_ID in scripts/minecraft_crafty.py).
+// The name goes unquoted into the commands this function runs on the host.
+var instanceName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
 func loadConfig(getenv func(string) string) (Config, *DNSPointer, error) {
 	cfg := Config{
 		HostID:                 getenv("HOST_ID"),
@@ -58,6 +64,9 @@ func loadConfig(getenv func(string) string) (Config, *DNSPointer, error) {
 	cfg.BedrockPort = port
 	if cfg.HostID == "" || cfg.Instance == "" || cfg.ServerName == "" || !parameterName.MatchString(cfg.StateParameter) {
 		return Config{}, nil, errors.New("HOST_ID, INSTANCE, SERVER_NAME and STATE_PARAMETER are required")
+	}
+	if !instanceName.MatchString(cfg.Instance) {
+		return Config{}, nil, errors.New("INSTANCE must be an instance name: a lower-case letter, then up to 31 lower-case letters, digits or hyphens")
 	}
 	if cfg.IdleStopStateParameter != "" && !parameterName.MatchString(cfg.IdleStopStateParameter) {
 		return Config{}, nil, errors.New("IDLE_STOP_STATE_PARAMETER must be a parameter name")
