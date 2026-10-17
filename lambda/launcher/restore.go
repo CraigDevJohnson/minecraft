@@ -75,8 +75,13 @@ func (l *Launcher) Restore(ctx context.Context, archive string) (Status, bool, e
 		if state != Failed {
 			return l.answer(state, l.current(h, session)), false, nil
 		}
-		// The host runs, but a start or restore of ours failed on this run: restore on the same run. A game
-		// started by hand after a failed restore still runs, and the adapter refuses until it is stopped.
+		// A failed restore reads failed even while a game started by hand answers: that game plays the world a
+		// restore would replace, so it is refused like any server not stopped.
+		if _, up := l.gameAnswers(ctx, h.publicIP); up {
+			return l.answer(state, l.current(h, session)), false, nil
+		}
+		// The host runs, but a start or restore of ours failed on this run, and no game is up: restore on the
+		// same run.
 		session = Session{RequestedAt: now, LaunchTime: h.launchTime, Phase: Restoring, RestoreKey: key}
 		if err := l.saveSession(ctx, session); err != nil {
 			return l.answer(Unknown, Session{}), false, err

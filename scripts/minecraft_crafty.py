@@ -333,18 +333,27 @@ def restored_member(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo:
     return tarfile.tar_filter(member, path)
 
 
+def read_regular(path: Path, limit: int) -> bytes | None:
+    """The bytes of path when it is a regular file, never a link, of at most limit bytes; otherwise None."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            if stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                data = stream.read(limit + 1)
+                return data if len(data) <= limit else None
+    except OSError:
+        pass
+    return None
+
+
 def first_login(creds: Path) -> bytes:
     """The first admin login a fresh Crafty wrote to creds, as written: a regular file, never a link, holding a
     username and a password."""
-    data = login = None
+    data = read_regular(creds, PLAYER_FILE_LIMIT)
     try:
-        descriptor = os.open(creds, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(descriptor, "rb") as stream:
-            if stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                data = stream.read(PLAYER_FILE_LIMIT + 1)
-                login = json.loads(data) if len(data) <= PLAYER_FILE_LIMIT else None
-    except (OSError, ValueError):
-        pass
+        login = json.loads(data) if data is not None else None
+    except ValueError:
+        login = None
     if not isinstance(login, dict) or not all(isinstance(login.get(name), str) and login[name] for name in ("username", "password")):
         raise CraftyError(f"{creds} does not hold Crafty's first admin login; run setup-api-key only on a freshly installed Crafty")
     return data
@@ -431,14 +440,22 @@ class Adapter:
     def setup_api_key(self) -> dict:
         """Create the lifecycle API key on a freshly installed Crafty with the first admin login it wrote, store the
         key's token for this adapter, and move that login out of Crafty's config folder. Neither is ever printed.
-        Run again after it was cut off between storing the token and moving the login, it finishes the move."""
+        Run again after it was cut off once the token was stored, it finishes moving the login."""
         token_file = Path(self.config["token_file"])
         admin_file = token_file.parent / "crafty-admin.json"
         creds = self.root / "crafty" / "config" / "default-creds.txt"
         if os.path.lexists(token_file):
             if not os.path.lexists(creds):
                 raise CraftyError("the API key is already set up")
-            # The token is stored but the login still sits where Crafty's container reads it.
+            # The token is stored but the login still sits where Crafty's container reads it. Only a token this
+            # Crafty accepts proves the setup got that far: an empty one, a link, or one a lost data disk's Crafty
+            # issued leaves this Crafty's only login where it is.
+            stored = read_regular(token_file, 4096)
+            token = stored.decode("ascii", "replace").strip() if stored is not None else ""
+            self.api.token = token
+            if not (TOKEN.fullmatch(token) and self.api_ready()):
+                raise CraftyError(f"Crafty does not accept the key in {token_file}; once Crafty has started, run "
+                                  "setup-api-key again, and if it still refuses, remove that file first")
             self.move_first_login(creds, admin_file, first_login(creds))
             return {"token_file": str(token_file), "admin_file": str(admin_file)}
         if os.path.lexists(admin_file):
@@ -480,8 +497,11 @@ class Adapter:
         try:
             write_private(admin_file, data)
         except FileExistsError:
-            raise CraftyError(f"{admin_file} holds an earlier Crafty login; move it away, then run setup-api-key again") from None
+            # A run cut off after storing this same login has only the removal below left to do.
+            if read_regular(admin_file, PLAYER_FILE_LIMIT) != data:
+                raise CraftyError(f"{admin_file} holds an earlier Crafty login; move it away, then run setup-api-key again") from None
         creds.unlink()
+        sync_folder(creds.parent)
 
     # Recorded backup state ------------------------------------------------------------------
 
@@ -492,7 +512,7 @@ class Adapter:
         try:
             state = json.loads(self.state_path(instance).read_text())
         except FileNotFoundError:
-            return "not-required"  # nothing has ever been played on this disk
+            return "not-required"  # no adapter start, stop or restore has recorded anything on this disk
         except (OSError, ValueError):
             return "failed"
         value = state.get("backup") if isinstance(state, dict) else None
@@ -620,16 +640,13 @@ class Adapter:
             if self.running(server):
                 raise CraftyError("stop the server before restoring it")
             target, backup = self.server_dir(server), self.config["backup"]
-            # The world in place is in S3 only when the last archive stored it unchanged. Only then may a later
-            # restore remove the folder this one replaces. Missing state proves nothing: a session run from
-            # Crafty's own UI before the adapter's first start leaves none.
-            archived = self.backup_state(instance) == "complete" and self.unchanged(instance)
             staging = self.root / "crafty" / "staging"
             staging.mkdir(mode=0o700, parents=True, exist_ok=True)
             # Each is another copy of a world on the data disk: work folders of restores cut off before their
-            # cleanup, and the folders earlier restores replaced whose worlds were in S3. Only plain folders go;
-            # an unarchived-* folder stays until the operator deletes it.
-            leftover = re.compile(rf"replaced-{re.escape(instance)}-[0-9]{{8}}T[0-9]{{6}}Z|restore-[a-z0-9_]+")
+            # cleanup (mkdtemp's eight-character names), and the folders earlier restores replaced whose worlds
+            # were in S3. Only plain folders go. An unarchived-* folder, and a replaced-* folder an adapter before
+            # this one left without checking its world, stay until the operator deletes them.
+            leftover = re.compile(rf"archived-{re.escape(instance)}-[0-9]{{8}}T[0-9]{{6}}Z|restore-[a-z0-9_]{{8}}")
             with os.scandir(staging) as entries:
                 stale = [entry.path for entry in entries if leftover.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False)]
             for path in stale:
@@ -662,9 +679,14 @@ class Adapter:
                 # Crafty's own UI could have started the server while the archive unpacked.
                 if self.running(server):
                     raise CraftyError("the server was started during the restore; stop it and restore again")
+                # The world in place is in S3 only when the last archive stored it unchanged, checked now, after the
+                # download, since Crafty's UI may have run it meanwhile. Only then may a later restore remove the
+                # folder this one replaces. Missing state proves nothing: a session run from Crafty's own UI before
+                # the adapter's first start leaves none.
+                archived = self.backup_state(instance) == "complete" and self.unchanged(instance)
                 replaced = None
                 if target.exists():
-                    kept = "replaced" if archived else "unarchived"
+                    kept = "archived" if archived else "unarchived"
                     replaced = staging / f"{kept}-{instance}-{self.host.now().strftime('%Y%m%dT%H%M%SZ')}"
                     target.rename(replaced)
                 try:

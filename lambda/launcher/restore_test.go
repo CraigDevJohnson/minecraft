@@ -114,6 +114,8 @@ func TestRestoreRefusesUnlessTheServerIsStoppedOrFailed(t *testing.T) {
 		{name: "the idle stop is draining", host: ec2types.InstanceStateNameRunning, launched: time.Hour, idle: `{"launch_time":"2026-10-11T15:00:00Z","drain_command_id":"x"}`, want: Stopping},
 		{name: "a start just recorded that EC2 does not show yet", host: ec2types.InstanceStateNameStopped, session: &Session{RequestedAt: now.Add(-time.Second), Phase: Starting}, want: Starting},
 		{name: "a restore just recorded that EC2 does not show yet", host: ec2types.InstanceStateNameStopped, session: &Session{RequestedAt: now.Add(-time.Second), Phase: Restoring, RestoreKey: archiveKey}, want: Starting},
+		// The failed restore reads failed, but the game started by hand plays the world a restore would replace.
+		{name: "a game started by hand after our restore failed", host: ec2types.InstanceStateNameRunning, launched: 10 * time.Minute, gameUp: true, session: &Session{RequestedAt: now.Add(-11 * time.Minute), LaunchTime: now.Add(-10 * time.Minute), Phase: Failed, RestoreKey: archiveKey}, want: Failed},
 	} {
 		r := newRig(tc.host, tc.launched)
 		r.gameUp = tc.gameUp
@@ -179,6 +181,10 @@ func TestARestoreReadsAsStarting(t *testing.T) {
 		{"the adapter refused under a game started by hand", ec2types.InstanceStateNameRunning, 10 * time.Minute, true, Session{RequestedAt: now.Add(-11 * time.Minute), LaunchTime: now.Add(-10 * time.Minute), Phase: Failed, RestoreKey: archiveKey, Detail: "restore the archive: stop the server before restoring it"}, Failed},
 		// The start that follows a confirmed restore carries no archive, so its game reads ready as any start's.
 		{"the game the restore's start began answers", ec2types.InstanceStateNameRunning, 12 * time.Minute, true, Session{RequestedAt: now.Add(-time.Minute), LaunchTime: now.Add(-12 * time.Minute), Phase: Starting}, Ready},
+		// A failed start of ours carries no archive: its game reads ready once it answers.
+		{"a failed start's game answers", ec2types.InstanceStateNameRunning, 10 * time.Minute, true, Session{RequestedAt: now.Add(-11 * time.Minute), LaunchTime: now.Add(-10 * time.Minute), Phase: Failed}, Ready},
+		// A restore that failed before EC2 ran the host never reached a run: one started otherwise soon after is not its.
+		{"a restore that never reached the host", ec2types.InstanceStateNameRunning, 5 * time.Minute, true, Session{RequestedAt: now.Add(-12 * time.Minute), Phase: Failed, RestoreKey: archiveKey, Detail: "EC2 did not start the host"}, Ready},
 		// A failed restore of an earlier run of the host no longer decides.
 		{"a failed restore of an earlier run", ec2types.InstanceStateNameRunning, 10 * time.Minute, true, Session{RequestedAt: now.Add(-3 * time.Hour), LaunchTime: now.Add(-3 * time.Hour), Phase: Failed, RestoreKey: archiveKey}, Ready},
 	} {

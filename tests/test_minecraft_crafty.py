@@ -471,19 +471,24 @@ class AdapterTests(unittest.TestCase):
         outside = self.root / "outside"
         outside.mkdir()
         (outside / "level.dat").write_bytes(b"kept")
-        for name in ("replaced-family-20261001T000000Z", "replaced-family-20261002T000000Z", "restore-abc12345"):
+        for name in ("archived-family-20261001T000000Z", "archived-family-20261002T000000Z", "restore-abc_1234"):
             (staging / name / "world").mkdir(parents=True)
             (staging / name / "world" / "level.dat").write_bytes(b"old")
-        # Another instance's folder, other work, a file and a link are never removed, nor anything a link points to.
-        kept = ["content-abc12345", "replaced-family-two-20261001T000000Z", "replaced-family-20261003T000000Z", "restore-notes"]
+        # Another instance's folder, other work, folders named by hand, a file and a link are never removed, nor
+        # anything a link points to. Nor is a replaced-* folder an earlier adapter left without checking its world.
+        kept = ["content-abc12345", "archived-family-two-20261001T000000Z", "archived-family-20261003T000000Z", "restore-notes",
+                "restore-old", "restore-abc123456", "replaced-family-20261001T000000Z"]
         (staging / kept[0]).mkdir()
         (staging / kept[1]).mkdir()
         (staging / kept[2]).symlink_to(outside)
         (staging / kept[3]).write_bytes(b"a file")
+        for name in kept[4:]:
+            (staging / name).mkdir()
+            (staging / name / "level.dat").write_bytes(b"kept")
         result = adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
         self.assertEqual(set(result), {"instance", "restored", "replaced"})
-        self.assertEqual(result["replaced"], str(staging / "replaced-family-20261010T180000Z"))
-        self.assertEqual(sorted(path.name for path in staging.iterdir()), sorted([*kept, "replaced-family-20261010T180000Z"]))
+        self.assertEqual(result["replaced"], str(staging / "archived-family-20261010T180000Z"))
+        self.assertEqual(sorted(path.name for path in staging.iterdir()), sorted([*kept, "archived-family-20261010T180000Z"]))
         self.assertEqual((outside / "level.dat").read_bytes(), b"kept")
 
     def test_restore_keeps_a_replaced_world_that_no_archive_holds(self):
@@ -501,12 +506,31 @@ class AdapterTests(unittest.TestCase):
         # the unarchived one.
         host.now = lambda: datetime.datetime(2026, 10, 11, 8, 30, tzinfo=datetime.timezone.utc)
         second = adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
-        self.assertEqual(second["replaced"], str(staging / "replaced-family-20261011T083000Z"))
+        self.assertEqual(second["replaced"], str(staging / "archived-family-20261011T083000Z"))
         host.now = lambda: datetime.datetime(2026, 10, 11, 9, 0, tzinfo=datetime.timezone.utc)
         adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
         self.assertEqual(sorted(path.name for path in staging.iterdir()),
-                         ["replaced-family-20261011T090000Z", "unarchived-family-20261011T080000Z"])
+                         ["archived-family-20261011T090000Z", "unarchived-family-20261011T080000Z"])
         self.assertEqual((staging / "unarchived-family-20261011T080000Z" / "level.dat").read_bytes(), b"third session, never archived")
+
+    def test_restore_keeps_a_world_played_from_crafty_while_the_archive_downloaded(self):
+        folder = self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        self.archived(adapter, host)
+        staging = self.root / "crafty" / "staging"
+        download = host.download
+
+        def played_meanwhile(*arguments):
+            # Started, played and stopped from Crafty's own UI while the archive streamed: stopped again at the swap.
+            (folder / "level.dat").write_bytes(b"played during the download")
+            download(*arguments)
+
+        host.download = played_meanwhile
+        host.now = lambda: datetime.datetime(2026, 10, 11, 8, 0, tzinfo=datetime.timezone.utc)
+        first = adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+        self.assertEqual(first["replaced"], str(staging / "unarchived-family-20261011T080000Z"))
+        self.assertEqual((staging / "unarchived-family-20261011T080000Z" / "level.dat").read_bytes(), b"played during the download")
 
     def test_restore_keeps_a_world_played_before_the_adapter_recorded_anything(self):
         # A fresh disk whose server was played from Crafty's own UI before the adapter's first start: no state
@@ -522,7 +546,7 @@ class AdapterTests(unittest.TestCase):
         host.now = lambda: datetime.datetime(2026, 10, 12, 8, 30, tzinfo=datetime.timezone.utc)
         adapter.restore("family", key)
         self.assertEqual(sorted(path.name for path in staging.iterdir()),
-                         ["replaced-family-20261012T083000Z", "unarchived-family-20261012T080000Z"])
+                         ["archived-family-20261012T083000Z", "unarchived-family-20261012T080000Z"])
         self.assertEqual((staging / "unarchived-family-20261012T080000Z" / "level.dat").read_bytes(), b"first session")
         self.assertEqual((folder / "level.dat").read_bytes(), b"restored")
 
@@ -615,7 +639,7 @@ class AdapterTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             code = crafty.main(arguments, api=api, host=host)
         self.assertEqual((code, json.loads(output.getvalue())), (0, {
-            "instance": "family", "restored": key, "replaced": str(self.root / "crafty" / "staging" / "replaced-family-20261010T180000Z")}))
+            "instance": "family", "restored": key, "replaced": str(self.root / "crafty" / "staging" / "archived-family-20261010T180000Z")}))
         # An AWS CLI that never exits is killed, and the answer is still one JSON object.
         host.download = lambda *arguments: crafty.Host.download(host, *arguments)
         process = unittest.mock.Mock(stdout=io.BytesIO(host.stored[key]))
@@ -1682,21 +1706,56 @@ class SetupAPIKeyTests(unittest.TestCase):
                 path.unlink()
 
     def test_a_setup_cut_off_after_storing_the_token_finishes_the_move(self):
-        # The token was stored, then the setup stopped before the login left Crafty's config folder.
-        self.token_file.write_text(FakeFreshCrafty.KEY)
-        code, output = self.setup_api_key()
-        self.assertEqual((code, json.loads(output)), (0, {"token_file": str(self.token_file), "admin_file": str(self.admin_file)}))
-        self.assertNotIn(FIRST_ADMIN_PHRASE, output)
-        self.assertEqual(self.api.sent, [])
-        self.assertEqual(self.token_file.read_text(), FakeFreshCrafty.KEY)
-        self.assertEqual(self.admin_file.read_text(), self.login)
-        self.assertEqual(stat.S_IMODE(self.admin_file.stat().st_mode), 0o600)
-        self.assertFalse(os.path.lexists(self.creds))
-        # Run once more, there is nothing left to do.
-        code, output = self.setup_api_key()
-        self.assertEqual((code, json.loads(output)), (1, {"error": "the API key is already set up"}))
+        checked = [("GET", "/api/v2/servers", None, FakeFreshCrafty.KEY)]
+        # The token was stored, then the setup stopped before the login left Crafty's config folder, or after an
+        # identical copy of it was stored but before default-creds.txt was gone for good.
+        for copied in (False, True):
+            with self.subTest(copied=copied):
+                self.api = FakeFreshCrafty()
+                self.token_file.write_text(FakeFreshCrafty.KEY + "\n")
+                if copied:
+                    self.admin_file.write_text(self.login)
+                    self.admin_file.chmod(0o600)
+                code, output = self.setup_api_key()
+                self.assertEqual((code, json.loads(output)), (0, {"token_file": str(self.token_file), "admin_file": str(self.admin_file)}))
+                self.assertNotIn(FIRST_ADMIN_PHRASE, output)
+                self.assertEqual(self.api.sent, checked)  # only the stored key's check, no new key
+                self.assertEqual(self.token_file.read_text(), FakeFreshCrafty.KEY + "\n")
+                self.assertEqual(self.admin_file.read_text(), self.login)
+                self.assertEqual(stat.S_IMODE(self.admin_file.stat().st_mode), 0o600)
+                self.assertFalse(os.path.lexists(self.creds))
+                # Run once more, there is nothing left to do.
+                code, output = self.setup_api_key()
+                self.assertEqual((code, json.loads(output)), (1, {"error": "the API key is already set up"}))
+                for path in (self.token_file, self.admin_file):
+                    path.unlink()
+                self.creds.write_text(self.login)
 
-    def test_finishing_the_move_never_replaces_an_admin_file_or_follows_a_link(self):
+    def test_a_token_this_crafty_does_not_accept_leaves_its_first_login_in_place(self):
+        # An empty token from a cut-off write, a link, or the token of the Crafty a lost data disk held.
+        refusal = (f"Crafty does not accept the key in {self.token_file}; once Crafty has started, run setup-api-key again, "
+                   "and if it still refuses, remove that file first")
+        for case in ("empty", "a link", "another Crafty's"):
+            with self.subTest(case=case):
+                self.api = FakeFreshCrafty()
+                if case == "a link":
+                    elsewhere = self.root / "elsewhere"
+                    elsewhere.write_text(FakeFreshCrafty.KEY)
+                    self.token_file.symlink_to(elsewhere)
+                else:
+                    self.token_file.write_text("" if case == "empty" else "other." + "k" * 40)
+                code, output = self.setup_api_key()
+                self.assertEqual((code, json.loads(output)), (1, {"error": refusal}))
+                self.assertEqual(self.creds.read_text(), self.login)
+                self.assertFalse(os.path.lexists(self.admin_file))
+                self.assertNotIn(FakeFreshCrafty.KEY, output)
+                self.token_file.unlink()
+        # Once that file is gone, the setup runs from the start.
+        code, _ = self.setup_api_key()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.token_file.read_text(), FakeFreshCrafty.KEY)
+
+    def test_finishing_the_move_never_replaces_another_admin_file_or_follows_a_link(self):
         self.token_file.write_text(FakeFreshCrafty.KEY)
         self.admin_file.write_text("earlier")
         code, output = self.setup_api_key()
@@ -1715,7 +1774,6 @@ class SetupAPIKeyTests(unittest.TestCase):
         self.assertNotIn(FIRST_ADMIN_PHRASE, output)
         self.assertFalse(os.path.lexists(self.admin_file))
         self.assertTrue(self.creds.is_symlink())
-        self.assertEqual(self.api.sent, [])
 
     def test_without_crafty_s_first_login_nothing_is_asked(self):
         elsewhere = self.root / "elsewhere.json"
