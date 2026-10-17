@@ -486,6 +486,28 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in staging.iterdir()), sorted([*kept, "replaced-family-20261010T180000Z"]))
         self.assertEqual((outside / "level.dat").read_bytes(), b"kept")
 
+    def test_restore_keeps_a_replaced_world_that_no_archive_holds(self):
+        folder = self.played_server()
+        api = FakeAPI(running=True)
+        adapter, host = self.adapter(api)
+        self.archived(adapter, host)
+        staging = self.root / "crafty" / "staging"
+        # Played again, then the host went down without a drain: this world is in no archive.
+        (folder / "level.dat").write_bytes(b"third session, never archived")
+        host.now = lambda: datetime.datetime(2026, 10, 11, 8, 0, tzinfo=datetime.timezone.utc)
+        first = adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+        self.assertEqual(first["replaced"], str(staging / "unarchived-family-20261011T080000Z"))
+        # The restored world is its archive's, so the next restore may remove the folder it replaces, but never
+        # the unarchived one.
+        host.now = lambda: datetime.datetime(2026, 10, 11, 8, 30, tzinfo=datetime.timezone.utc)
+        second = adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+        self.assertEqual(second["replaced"], str(staging / "replaced-family-20261011T083000Z"))
+        host.now = lambda: datetime.datetime(2026, 10, 11, 9, 0, tzinfo=datetime.timezone.utc)
+        adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
+        self.assertEqual(sorted(path.name for path in staging.iterdir()),
+                         ["replaced-family-20261011T090000Z", "unarchived-family-20261011T080000Z"])
+        self.assertEqual((staging / "unarchived-family-20261011T080000Z" / "level.dat").read_bytes(), b"third session, never archived")
+
     def stored_archive(self, host, members) -> str:
         """Store an archive of members with its checksum, as a stop stores its own."""
         buffer = io.BytesIO()
@@ -525,6 +547,20 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual((folder / "latest").readlink(), Path("level.dat"))
         self.assertEqual((folder / "copy").read_bytes(), b"restored")
         self.assertEqual(stat.S_IMODE((folder / "level.dat").stat().st_mode), 0o644)
+        # An absolute name lands inside the folder being unpacked, never at that path.
+        planted = self.root / "outside" / "planted"
+        key = self.stored_archive(host, [*base, member(str(planted), data=b"planted")])
+        adapter.restore("family", key)
+        self.assertFalse(planted.exists())
+        self.assertEqual((folder / "level.dat").read_bytes(), b"restored")
+
+    def test_restored_members_keep_their_owners(self):
+        # The adapter runs as root, and the server's files belong to the account Crafty runs it as: the "data"
+        # filter alone would make every restored file root's.
+        info, _ = member("family/level.dat", data=b"x")
+        info.uid, info.gid, info.uname, info.gname = 1000, 1000, "crafty", "crafty"
+        kept = crafty.restored_member(info, str(self.root))
+        self.assertEqual((kept.uid, kept.gid, kept.uname, kept.gname), (1000, 1000, "crafty", "crafty"))
 
     def test_a_full_disk_while_unpacking_says_to_grow_the_disk(self):
         folder = self.played_server()

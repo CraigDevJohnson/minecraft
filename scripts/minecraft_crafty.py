@@ -585,8 +585,9 @@ class Adapter:
             return False
 
     def restore(self, instance: str, key: str) -> dict:
-        """Replace the stopped server folder with a verified archive from S3. The folder it
-        replaces is kept under crafty/staging until the next restore removes it."""
+        """Replace the stopped server folder with a verified archive from S3. The folder it replaces is kept
+        under crafty/staging: until the next restore when its world is in S3, otherwise until the operator
+        deletes it."""
         with self.lifecycle():
             prefix = f"instances/{instance}/crafty/"
             if not re.fullmatch(re.escape(prefix) + r"[0-9]{8}T[0-9]{6}Z\.tar\.gz", key):
@@ -599,10 +600,15 @@ class Adapter:
             if self.running(server):
                 raise CraftyError("stop the server before restoring it")
             target, backup = self.server_dir(server), self.config["backup"]
+            # The world in place is in S3 when the last archive stored it unchanged, or when nothing was ever
+            # played on this disk. Only then may a later restore remove the folder this one replaces.
+            state = self.backup_state(instance)
+            archived = state == "not-required" or (state == "complete" and self.unchanged(instance))
             staging = self.root / "crafty" / "staging"
             staging.mkdir(mode=0o700, parents=True, exist_ok=True)
             # Each is another copy of a world on the data disk: work folders of restores cut off before their
-            # cleanup, and the folders earlier restores replaced, whose worlds are in S3. Only plain folders go.
+            # cleanup, and the folders earlier restores replaced whose worlds were in S3. Only plain folders go;
+            # an unarchived-* folder stays until the operator deletes it.
             leftover = re.compile(rf"replaced-{re.escape(instance)}-[0-9]{{8}}T[0-9]{{6}}Z|restore-[a-z0-9_]+")
             with os.scandir(staging) as entries:
                 stale = [entry.path for entry in entries if leftover.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False)]
@@ -638,7 +644,8 @@ class Adapter:
                     raise CraftyError("the server was started during the restore; stop it and restore again")
                 replaced = None
                 if target.exists():
-                    replaced = staging / f"replaced-{instance}-{self.host.now().strftime('%Y%m%dT%H%M%SZ')}"
+                    kept = "replaced" if archived else "unarchived"
+                    replaced = staging / f"{kept}-{instance}-{self.host.now().strftime('%Y%m%dT%H%M%SZ')}"
                     target.rename(replaced)
                 try:
                     restored.rename(target)

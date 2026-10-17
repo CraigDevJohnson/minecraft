@@ -412,6 +412,18 @@ func TestFinishRestoreFailsWhenItsCommandNeverAppears(t *testing.T) {
 	}
 }
 
+func TestFinishRestoreFailsWhenEC2NeverStartedTheHost(t *testing.T) {
+	r := restoreRig(t)
+	r.setSession(t, Session{RequestedAt: now.Add(-3 * time.Minute), Phase: Restoring, RestoreKey: archiveKey})
+	r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameStopped}
+	if err := r.launcher.FinishStart(context.Background()); err == nil || !strings.Contains(err.Error(), "did not start") {
+		t.Fatalf("err=%v", err)
+	}
+	if session := r.session(t); session.Phase != Failed || session.Detail != "EC2 did not start the host" || r.followUps != 0 || len(r.ssm.commands) != 0 {
+		t.Fatalf("session %+v followUps=%d commands=%v", session, r.followUps, r.ssm.commands)
+	}
+}
+
 func TestFinishRestoreLeavesALaterRequestAlone(t *testing.T) {
 	// A later request recorded before the restore is sent: nothing is sent.
 	r := restoreRig(t)
