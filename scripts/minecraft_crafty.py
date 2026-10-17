@@ -497,9 +497,17 @@ class Adapter:
         try:
             write_private(admin_file, data)
         except FileExistsError:
-            # A run cut off after storing this same login has only the removal below left to do.
+            # A run cut off after storing this same login has only the removal below left to do, once that copy is on
+            # disk: a run killed before its fsync can leave it written only in memory.
             if read_regular(admin_file, PLAYER_FILE_LIMIT) != data:
-                raise CraftyError(f"{admin_file} holds an earlier Crafty login; move it away, then run setup-api-key again") from None
+                raise CraftyError(f"{admin_file} holds a login other than the one in {creds.name}; move it away, then run "
+                                  "setup-api-key again") from None
+            descriptor = os.open(admin_file, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            sync_folder(admin_file.parent)
         creds.unlink()
         sync_folder(creds.parent)
 
@@ -676,14 +684,15 @@ class Adapter:
                 restored = work / "files" / instance
                 if digest != expected or not restored.is_dir() or restored.is_symlink():
                     raise CraftyError("the archive does not match its recorded SHA-256")
-                # Crafty's own UI could have started the server while the archive unpacked.
-                if self.running(server):
-                    raise CraftyError("the server was started during the restore; stop it and restore again")
                 # The world in place is in S3 only when the last archive stored it unchanged, checked now, after the
                 # download, since Crafty's UI may have run it meanwhile. Only then may a later restore remove the
                 # folder this one replaces. Missing state proves nothing: a session run from Crafty's own UI before
                 # the adapter's first start leaves none.
                 archived = self.backup_state(instance) == "complete" and self.unchanged(instance)
+                # Crafty's own UI could have started the server while the archive unpacked, or while the check above
+                # read the world, so this is the last look before the swap.
+                if self.running(server):
+                    raise CraftyError("the server was started during the restore; stop it and restore again")
                 replaced = None
                 if target.exists():
                     kept = "archived" if archived else "unarchived"

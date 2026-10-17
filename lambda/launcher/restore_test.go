@@ -19,7 +19,7 @@ const (
 	archiveFile = "20261016T031500Z.tar.gz"
 	archiveKey  = "instances/family/crafty/" + archiveFile
 	// restoredOutput is the adapter's answer to a restore, as scripts/minecraft_crafty.py prints it.
-	restoredOutput = `{"instance": "family", "replaced": "/srv/minecraft/crafty/staging/replaced-family-20261011T160100Z", "restored": "` + archiveKey + `"}`
+	restoredOutput = `{"instance": "family", "replaced": "/srv/minecraft/crafty/staging/archived-family-20261011T160100Z", "restored": "` + archiveKey + `"}`
 	restoreCommand = remoteCommand + " restore family --key '" + archiveKey + "'"
 )
 
@@ -523,6 +523,30 @@ func TestFinishRestoreRecordsAStartItCouldNotHandOff(t *testing.T) {
 	}
 	if session := r.session(t); session.Phase != Failed || !session.RequestedAt.Equal(now) || session.Detail != "hand off the rest of the start: throttled" || session.LaunchTime.IsZero() {
 		t.Fatalf("session %+v", session)
+	}
+}
+
+func TestFinishRestoreTiesItsFailureToTheRunItReached(t *testing.T) {
+	// The host runs, then the record cannot be read: the failed restore still names this run, so a game started
+	// by hand on it reads failed, not ready.
+	r := restoreRig(t)
+	reads := 0
+	r.ssm.onGet = func() error {
+		if reads++; reads == 2 {
+			return errors.New("throttled")
+		}
+		return nil
+	}
+	if err := r.launcher.FinishStart(context.Background()); err == nil || !strings.Contains(err.Error(), "throttled") {
+		t.Fatalf("err=%v", err)
+	}
+	r.ssm.onGet = nil
+	if session := r.session(t); session.Phase != Failed || !session.LaunchTime.Equal(now.Add(30*time.Second)) || session.RestoreKey != archiveKey || len(r.ssm.commands) != 0 {
+		t.Fatalf("session %+v commands=%v", session, r.ssm.commands)
+	}
+	r.gameUp = true
+	if status, err := r.launcher.Status(context.Background()); err != nil || status.State != Failed {
+		t.Fatalf("state=%s err=%v", status.State, err)
 	}
 }
 

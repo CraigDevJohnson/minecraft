@@ -107,6 +107,8 @@ type fakeSSM struct {
 	invocation []ssm.GetCommandInvocationOutput // successive answers; the last repeats
 	// onInvocation runs at each GetCommandInvocation, before its answer.
 	onInvocation func()
+	// onGet runs at each GetParameter, before its answer, and an error it returns is the answer.
+	onGet func() error
 }
 
 func (f *fakeSSM) GetParameter(_ context.Context, input *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
@@ -114,6 +116,11 @@ func (f *fakeSSM) GetParameter(_ context.Context, input *ssm.GetParameterInput, 
 	defer f.mu.Unlock()
 	if f.getErr != nil {
 		return nil, f.getErr
+	}
+	if f.onGet != nil {
+		if err := f.onGet(); err != nil {
+			return nil, err
+		}
 	}
 	value, ok := f.params[aws.ToString(input.Name)]
 	if !ok {

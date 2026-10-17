@@ -477,7 +477,7 @@ class AdapterTests(unittest.TestCase):
         # Another instance's folder, other work, folders named by hand, a file and a link are never removed, nor
         # anything a link points to. Nor is a replaced-* folder an earlier adapter left without checking its world.
         kept = ["content-abc12345", "archived-family-two-20261001T000000Z", "archived-family-20261003T000000Z", "restore-notes",
-                "restore-old", "restore-abc123456", "replaced-family-20261001T000000Z"]
+                "restore-old", "restore-old-copy", "restore-abc123456", "replaced-family-20261001T000000Z"]
         (staging / kept[0]).mkdir()
         (staging / kept[1]).mkdir()
         (staging / kept[2]).symlink_to(outside)
@@ -1749,6 +1749,8 @@ class SetupAPIKeyTests(unittest.TestCase):
                 self.assertEqual(self.creds.read_text(), self.login)
                 self.assertFalse(os.path.lexists(self.admin_file))
                 self.assertNotIn(FakeFreshCrafty.KEY, output)
+                if case != "another Crafty's":
+                    self.assertEqual(self.api.sent, [])  # no token that could not be Crafty's is ever sent
                 self.token_file.unlink()
         # Once that file is gone, the setup runs from the start.
         code, _ = self.setup_api_key()
@@ -1759,9 +1761,18 @@ class SetupAPIKeyTests(unittest.TestCase):
         self.token_file.write_text(FakeFreshCrafty.KEY)
         self.admin_file.write_text("earlier")
         code, output = self.setup_api_key()
-        self.assertEqual((code, json.loads(output)),
-                         (1, {"error": f"{self.admin_file} holds an earlier Crafty login; move it away, then run setup-api-key again"}))
+        refusal = f"{self.admin_file} holds a login other than the one in default-creds.txt; move it away, then run setup-api-key again"
+        self.assertEqual((code, json.loads(output)), (1, {"error": refusal}))
         self.assertEqual(self.admin_file.read_text(), "earlier")
+        self.assertEqual(self.creds.read_text(), self.login)
+        # A link counts as another file, even to a copy of this same login.
+        self.admin_file.unlink()
+        copy = self.root / "copy.json"
+        copy.write_text(self.login)
+        self.admin_file.symlink_to(copy)
+        code, output = self.setup_api_key()
+        self.assertEqual((code, json.loads(output)), (1, {"error": refusal}))
+        self.assertTrue(self.admin_file.is_symlink())
         self.assertEqual(self.creds.read_text(), self.login)
         self.admin_file.unlink()
         elsewhere = self.root / "elsewhere.json"

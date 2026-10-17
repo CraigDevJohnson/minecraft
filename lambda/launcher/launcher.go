@@ -304,8 +304,8 @@ func (l *Launcher) classify(ctx context.Context, h host, session Session) (strin
 	// A restore's record decides before the game does. A game that answers before the adapter confirms the
 	// archive, or after it refused it, was started by hand on the world the restore was to replace, so a restore
 	// reads as starting until the start that follows it replaces its record, and as failed once it failed on the
-	// run it reached. A restore that failed before EC2 ran the host never reached a run, and a run started some
-	// other way follows the usual rules.
+	// run it reached. A restore that failed before its follow-up saw the host running never reached a run, and a
+	// run started some other way follows the usual rules.
 	if session, ok := l.sessionFor(h, session); ok && (session.Phase == Restoring || (session.Phase == Failed && session.RestoreKey != "" && !session.LaunchTime.IsZero())) {
 		// Starting, because the page knows only these states and the game is on its way.
 		if session.Phase == Restoring && !overdue(session, now) {

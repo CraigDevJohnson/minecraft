@@ -70,7 +70,7 @@ On its first start Crafty writes its initial admin login to `/srv/minecraft/craf
 {"admin_file": "/etc/minecraft/crafty-admin.json", "key": "lifecycle", "token_file": "/etc/minecraft/crafty-api.token"}
 ```
 
-If it is cut off after storing the token, such as by a power loss, run it again: once Crafty accepts the stored key, it finishes moving the login and prints only the two files. If Crafty does not accept that key, it says so and leaves the login in place; remove the token file and run it again.
+If it is cut off after storing the token, such as by a power loss, run it again once Crafty has started: when Crafty accepts the stored key, it finishes moving the login and prints only the two files. If Crafty still refuses that key, it leaves the login in place; remove the token file and run it again, then in Crafty's panel delete the older of the admin user's two `lifecycle` keys, which the cut-off run had already created. If it says `crafty-admin.json` holds a login other than the one in `default-creds.txt`, a cut-off run left that copy incomplete, or another Crafty's login is there: move it away and run it again.
 
 It refuses to run again once the token file exists and `default-creds.txt` is gone, and it refuses while Crafty is still starting; run it again a minute later.
 

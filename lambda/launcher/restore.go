@@ -136,6 +136,11 @@ func (l *Launcher) restoreSteps(ctx context.Context, session *Session, deadline 
 	if err != nil {
 		return err
 	}
+	// The restore reached this run of the host, so any failure from here on names it: a game started by hand on
+	// this run then reads failed, not ready.
+	if _, ok := l.sessionFor(h, *session); ok {
+		session.LaunchTime = h.launchTime
+	}
 	saved, err := l.loadSession(ctx)
 	if err != nil {
 		return err
