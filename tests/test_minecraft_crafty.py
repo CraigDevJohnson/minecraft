@@ -508,6 +508,24 @@ class AdapterTests(unittest.TestCase):
                          ["replaced-family-20261011T090000Z", "unarchived-family-20261011T080000Z"])
         self.assertEqual((staging / "unarchived-family-20261011T080000Z" / "level.dat").read_bytes(), b"third session, never archived")
 
+    def test_restore_keeps_a_world_played_before_the_adapter_recorded_anything(self):
+        # A fresh disk whose server was played from Crafty's own UI before the adapter's first start: no state
+        # proves that play is in S3.
+        folder = self.played_server()
+        adapter, host = self.adapter(FakeAPI())
+        self.assertEqual(adapter.backup_state("family"), "not-required")
+        staging = self.root / "crafty" / "staging"
+        key = self.stored_archive(host, [member("family", tarfile.DIRTYPE), member("family/level.dat", data=b"restored")])
+        host.now = lambda: datetime.datetime(2026, 10, 12, 8, 0, tzinfo=datetime.timezone.utc)
+        first = adapter.restore("family", key)
+        self.assertEqual(first["replaced"], str(staging / "unarchived-family-20261012T080000Z"))
+        host.now = lambda: datetime.datetime(2026, 10, 12, 8, 30, tzinfo=datetime.timezone.utc)
+        adapter.restore("family", key)
+        self.assertEqual(sorted(path.name for path in staging.iterdir()),
+                         ["replaced-family-20261012T083000Z", "unarchived-family-20261012T080000Z"])
+        self.assertEqual((staging / "unarchived-family-20261012T080000Z" / "level.dat").read_bytes(), b"first session")
+        self.assertEqual((folder / "level.dat").read_bytes(), b"restored")
+
     def stored_archive(self, host, members) -> str:
         """Store an archive of members with its checksum, as a stop stores its own."""
         buffer = io.BytesIO()
@@ -1646,6 +1664,10 @@ class SetupAPIKeyTests(unittest.TestCase):
                     path.symlink_to(self.root / "elsewhere")  # dangling, so exists() alone would miss it
                 else:
                     path.write_text("earlier")
+                # A key set up earlier has moved the first login away; an admin file alone blocks a fresh setup.
+                moved = path == self.token_file
+                if moved:
+                    self.creds.unlink()
                 code, output = self.setup_api_key()
                 self.assertEqual((code, json.loads(output)), (1, {"error": error}))
                 self.assertFalse(os.path.lexists(self.root / "elsewhere"))
@@ -1653,8 +1675,47 @@ class SetupAPIKeyTests(unittest.TestCase):
                 if not link:
                     self.assertEqual(path.read_text(), "earlier")
                 self.assertEqual(self.api.sent, [])
+                if moved:
+                    self.assertFalse(os.path.lexists(self.creds))
+                    self.creds.write_text(self.login)
                 self.assertEqual(self.creds.read_text(), self.login)
                 path.unlink()
+
+    def test_a_setup_cut_off_after_storing_the_token_finishes_the_move(self):
+        # The token was stored, then the setup stopped before the login left Crafty's config folder.
+        self.token_file.write_text(FakeFreshCrafty.KEY)
+        code, output = self.setup_api_key()
+        self.assertEqual((code, json.loads(output)), (0, {"token_file": str(self.token_file), "admin_file": str(self.admin_file)}))
+        self.assertNotIn(FIRST_ADMIN_PHRASE, output)
+        self.assertEqual(self.api.sent, [])
+        self.assertEqual(self.token_file.read_text(), FakeFreshCrafty.KEY)
+        self.assertEqual(self.admin_file.read_text(), self.login)
+        self.assertEqual(stat.S_IMODE(self.admin_file.stat().st_mode), 0o600)
+        self.assertFalse(os.path.lexists(self.creds))
+        # Run once more, there is nothing left to do.
+        code, output = self.setup_api_key()
+        self.assertEqual((code, json.loads(output)), (1, {"error": "the API key is already set up"}))
+
+    def test_finishing_the_move_never_replaces_an_admin_file_or_follows_a_link(self):
+        self.token_file.write_text(FakeFreshCrafty.KEY)
+        self.admin_file.write_text("earlier")
+        code, output = self.setup_api_key()
+        self.assertEqual((code, json.loads(output)),
+                         (1, {"error": f"{self.admin_file} holds an earlier Crafty login; move it away, then run setup-api-key again"}))
+        self.assertEqual(self.admin_file.read_text(), "earlier")
+        self.assertEqual(self.creds.read_text(), self.login)
+        self.admin_file.unlink()
+        elsewhere = self.root / "elsewhere.json"
+        elsewhere.write_text(self.login)
+        self.creds.unlink()
+        self.creds.symlink_to(elsewhere)
+        code, output = self.setup_api_key()
+        self.assertEqual(code, 1)
+        self.assertIn("default-creds.txt does not hold Crafty's first admin login", json.loads(output)["error"])
+        self.assertNotIn(FIRST_ADMIN_PHRASE, output)
+        self.assertFalse(os.path.lexists(self.admin_file))
+        self.assertTrue(self.creds.is_symlink())
+        self.assertEqual(self.api.sent, [])
 
     def test_without_crafty_s_first_login_nothing_is_asked(self):
         elsewhere = self.root / "elsewhere.json"

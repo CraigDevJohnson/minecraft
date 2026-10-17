@@ -70,6 +70,8 @@ On its first start Crafty writes its initial admin login to `/srv/minecraft/craf
 {"admin_file": "/etc/minecraft/crafty-admin.json", "key": "lifecycle", "token_file": "/etc/minecraft/crafty-api.token"}
 ```
 
+If it is cut off after storing the token, such as by a power loss, run it again: it finishes moving the login and prints only the two files.
+
 It refuses to run again once the token file exists, and it refuses while Crafty is still starting; run it again a minute later.
 
 ## Create the server
@@ -141,7 +143,7 @@ The launcher starts the host, points the hostname at it, and has the adapter str
 
 A restore that fails reads `failed`, the alarm emails you, and the launcher's log holds the adapter's reason. Until its swap, the world in place is the one from before; a Member's **Start** then starts whatever world is in place, and a new `restore` tries again on the same run of the host. Its reasons include a full data disk and an archive that does not match its SHA-256. A restore unpacks beside the current folder, so the data disk needs free space for one more copy of the server; one that runs out fails with "the data disk filled up while unpacking the archive" and leaves the old world in place, so [grow the disk](data-disk-capacity.md#grow-the-disk) and restore again.
 
-The folder a restore replaces stays in `/srv/minecraft/crafty/staging/`. When its world is in S3 (the last stop archived it and nobody played since, or it was itself restored from an archive), it is named `replaced-family-<UTC time>`, and the next restore removes it, with any folder a restore cut off partway left behind. Otherwise, such as after the host went down without its drain, it is named `unarchived-family-<UTC time>` and kept until you delete it in a [shell on the host](#open-a-shell-on-the-host), because it holds the only copy of that play. If a restore is cut off partway, such as by a power loss, run it again once the server reads `failed` or `stopped`: it puts the archive in place whether or not the old folder is still there.
+The folder a restore replaces stays in `/srv/minecraft/crafty/staging/`. When its world is in S3 (the last stop archived it and nobody played since, or it was itself restored from an archive), it is named `replaced-family-<UTC time>`, and the next restore removes it, with any folder a restore cut off partway left behind. Otherwise, such as after the host went down without its drain, or on a disk the adapter holds no backup record for yet, it is named `unarchived-family-<UTC time>` and kept until you delete it in a [shell on the host](#open-a-shell-on-the-host), because it holds the only copy of that play. If a restore is cut off partway, such as by a power loss, run it again once the server reads `failed` or `stopped`: it puts the archive in place whether or not the old folder is still there.
 
 The two archives from 2026-10-11 at 05:59Z have no `.sha256` beside them. The adapter that stored them (#53) put the SHA-256 in the object's `sha256` metadata instead, and `restore` falls back to that metadata; neither object has been read to confirm it. Retention does not count them, so they go once 14 newer archives with a `.sha256` exist.
 

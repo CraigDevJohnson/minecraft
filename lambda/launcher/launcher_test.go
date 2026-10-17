@@ -282,6 +282,8 @@ func TestRunningHostWithoutGame(t *testing.T) {
 		session  *Session
 		idle     string
 		want     string
+		// decided marks a restore record of this run, which decides before the game is asked.
+		decided bool
 	}{
 		{name: "someone else's start is recent", launched: 2 * time.Minute, want: Starting},
 		{name: "someone else's host runs on without a game", launched: time.Hour, want: Maintenance},
@@ -294,10 +296,10 @@ func TestRunningHostWithoutGame(t *testing.T) {
 		{name: "the idle stop is draining", launched: time.Hour, idle: `{"launch_time":"2026-10-11T15:00:00Z","drain_command_id":"x"}`, want: Stopping},
 		{name: "the idle stop requested the EC2 stop", launched: time.Hour, idle: `{"launch_time":"2026-10-11T15:00:00Z","stop_requested":true}`, want: Stopping},
 		{name: "an idle-stop drain of an earlier run", launched: time.Hour, idle: `{"launch_time":"2026-10-11T09:00:00Z","drain_command_id":"x"}`, want: Maintenance},
-		{name: "our restore is under way", launched: 3 * time.Minute, session: &Session{RequestedAt: now.Add(-4 * time.Minute), Phase: Restoring, RestoreKey: archiveKey}, want: Starting},
-		{name: "our restore outlasts a start's deadline", launched: 30 * time.Minute, session: &Session{RequestedAt: now.Add(-31 * time.Minute), LaunchTime: now.Add(-30 * time.Minute), Phase: Restoring, RestoreKey: archiveKey, RestoreCommandID: commandID}, want: Starting},
-		{name: "our restore ran past its deadline", launched: 45 * time.Minute, session: &Session{RequestedAt: now.Add(-46 * time.Minute), LaunchTime: now.Add(-45 * time.Minute), Phase: Restoring, RestoreKey: archiveKey}, want: Failed},
-		{name: "our restore failed", launched: 10 * time.Minute, session: &Session{RequestedAt: now.Add(-11 * time.Minute), LaunchTime: now.Add(-10 * time.Minute), Phase: Failed, RestoreKey: archiveKey}, want: Failed},
+		{name: "our restore is under way", launched: 3 * time.Minute, session: &Session{RequestedAt: now.Add(-4 * time.Minute), Phase: Restoring, RestoreKey: archiveKey}, want: Starting, decided: true},
+		{name: "our restore outlasts a start's deadline", launched: 30 * time.Minute, session: &Session{RequestedAt: now.Add(-31 * time.Minute), LaunchTime: now.Add(-30 * time.Minute), Phase: Restoring, RestoreKey: archiveKey, RestoreCommandID: commandID}, want: Starting, decided: true},
+		{name: "our restore ran past its deadline", launched: 45 * time.Minute, session: &Session{RequestedAt: now.Add(-46 * time.Minute), LaunchTime: now.Add(-45 * time.Minute), Phase: Restoring, RestoreKey: archiveKey}, want: Failed, decided: true},
+		{name: "our restore failed", launched: 10 * time.Minute, session: &Session{RequestedAt: now.Add(-11 * time.Minute), LaunchTime: now.Add(-10 * time.Minute), Phase: Failed, RestoreKey: archiveKey}, want: Failed, decided: true},
 		{name: "a restore tied to an earlier run does not follow", launched: time.Hour, session: &Session{RequestedAt: now.Add(-5 * time.Minute), LaunchTime: now.Add(-3 * time.Hour), Phase: Restoring, RestoreKey: archiveKey}, want: Maintenance},
 	}
 	for _, tc := range cases {
@@ -313,7 +315,7 @@ func TestRunningHostWithoutGame(t *testing.T) {
 		if err != nil || status.State != tc.want {
 			t.Fatalf("%s: state=%s err=%v", tc.name, status.State, err)
 		}
-		if wantPings := map[bool]int{true: 0, false: 2}[tc.idle != "" && tc.want == Stopping]; len(r.pinged) != wantPings {
+		if wantPings := map[bool]int{true: 0, false: 2}[tc.idle != "" && tc.want == Stopping || tc.decided]; len(r.pinged) != wantPings {
 			t.Fatalf("%s: pinged %d times, want %d", tc.name, len(r.pinged), wantPings)
 		}
 	}

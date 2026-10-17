@@ -173,7 +173,14 @@ func TestARestoreReadsAsStarting(t *testing.T) {
 		// A start would have failed by now; a restore has longer.
 		{"pending past a start's deadline", ec2types.InstanceStateNamePending, 19 * time.Minute, false, Session{RequestedAt: now.Add(-20 * time.Minute), Phase: Restoring, RestoreKey: archiveKey}, Starting},
 		{"pending past its own deadline", ec2types.InstanceStateNamePending, 45 * time.Minute, false, Session{RequestedAt: now.Add(-46 * time.Minute), Phase: Restoring, RestoreKey: archiveKey}, Failed},
-		{"the game answers", ec2types.InstanceStateNameRunning, 10 * time.Minute, true, Session{RequestedAt: now.Add(-11 * time.Minute), LaunchTime: now.Add(-10 * time.Minute), Phase: Restoring, RestoreKey: archiveKey}, Ready},
+		// A game that answers before the archive is confirmed was started by hand on the old world: never ready.
+		{"a game started by hand answers", ec2types.InstanceStateNameRunning, 10 * time.Minute, true, Session{RequestedAt: now.Add(-11 * time.Minute), LaunchTime: now.Add(-10 * time.Minute), Phase: Restoring, RestoreKey: archiveKey}, Starting},
+		{"a game started by hand outlasts the restore", ec2types.InstanceStateNameRunning, 45 * time.Minute, true, Session{RequestedAt: now.Add(-46 * time.Minute), LaunchTime: now.Add(-45 * time.Minute), Phase: Restoring, RestoreKey: archiveKey}, Failed},
+		{"the adapter refused under a game started by hand", ec2types.InstanceStateNameRunning, 10 * time.Minute, true, Session{RequestedAt: now.Add(-11 * time.Minute), LaunchTime: now.Add(-10 * time.Minute), Phase: Failed, RestoreKey: archiveKey, Detail: "restore the archive: stop the server before restoring it"}, Failed},
+		// The start that follows a confirmed restore carries no archive, so its game reads ready as any start's.
+		{"the game the restore's start began answers", ec2types.InstanceStateNameRunning, 12 * time.Minute, true, Session{RequestedAt: now.Add(-time.Minute), LaunchTime: now.Add(-12 * time.Minute), Phase: Starting}, Ready},
+		// A failed restore of an earlier run of the host no longer decides.
+		{"a failed restore of an earlier run", ec2types.InstanceStateNameRunning, 10 * time.Minute, true, Session{RequestedAt: now.Add(-3 * time.Hour), LaunchTime: now.Add(-3 * time.Hour), Phase: Failed, RestoreKey: archiveKey}, Ready},
 	} {
 		r := newRig(tc.host, tc.launched)
 		r.gameUp = tc.gameUp

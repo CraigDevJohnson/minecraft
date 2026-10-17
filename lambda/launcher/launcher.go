@@ -301,6 +301,17 @@ func (l *Launcher) classify(ctx context.Context, h host, session Session) (strin
 	if session, ok := l.sessionFor(h, session); ok && session.Phase == Stopping && now.Sub(session.RequestedAt) < stopDeadline {
 		return Stopping, 0, nil
 	}
+	// A restore's record decides before the game does. A game that answers before the adapter confirms the
+	// archive, or after it refused it, was started by hand on the world the restore was to replace, so a restore
+	// reads as starting until the start that follows it replaces its record, and as failed once it failed: it
+	// never reads ready without the archive in place.
+	if session, ok := l.sessionFor(h, session); ok && (session.Phase == Restoring || (session.Phase == Failed && session.RestoreKey != "")) {
+		// Starting, because the page knows only these states and the game is on its way.
+		if session.Phase == Restoring && !overdue(session, now) {
+			return Starting, 0, nil
+		}
+		return Failed, 0, nil
+	}
 	if players, up := l.gameAnswers(ctx, h.publicIP); up {
 		return Ready, players, nil
 	}
@@ -308,8 +319,7 @@ func (l *Launcher) classify(ctx context.Context, h host, session Session) (strin
 		switch session.Phase {
 		case Failed:
 			return Failed, 0, nil
-		case Starting, Restoring:
-			// A restore reads as starting: the page knows only the states above, and the game is on its way.
+		case Starting:
 			if !overdue(session, now) {
 				return Starting, 0, nil
 			}

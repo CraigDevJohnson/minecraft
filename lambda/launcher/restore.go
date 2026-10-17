@@ -75,8 +75,8 @@ func (l *Launcher) Restore(ctx context.Context, archive string) (Status, bool, e
 		if state != Failed {
 			return l.answer(state, l.current(h, session)), false, nil
 		}
-		// The host runs, but a start or restore of ours failed on this run, so no game is up: restore on the
-		// same run.
+		// The host runs, but a start or restore of ours failed on this run: restore on the same run. A game
+		// started by hand after a failed restore still runs, and the adapter refuses until it is stopped.
 		session = Session{RequestedAt: now, LaunchTime: h.launchTime, Phase: Restoring, RestoreKey: key}
 		if err := l.saveSession(ctx, session); err != nil {
 			return l.answer(Unknown, Session{}), false, err

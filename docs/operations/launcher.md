@@ -11,11 +11,11 @@ The site has one environment per hostname (dev, then production), and each site 
 | State | When |
 | --- | --- |
 | `stopped` | EC2 reports the host stopped. |
-| `starting` | EC2 is `pending`. Or the host runs without a game answering, and either a start of this function is under way (at most 15 minutes), a restore of this function is under way (at most 45 minutes), or the host launched less than 10 minutes ago, which covers a start from the workstation. |
-| `ready` | The game answers a Java status ping at the host's public address, with one retry. EC2 or Crafty being up is not enough. Bedrock players join through Geyser in the same server, so the one ping covers both editions. |
+| `starting` | EC2 is `pending`. Or a restore of this function is under way (at most 45 minutes), whether or not a game answers. Or the host runs without a game answering, and either a start of this function is under way (at most 15 minutes) or the host launched less than 10 minutes ago, which covers a start from the workstation. |
+| `ready` | The game answers a Java status ping at the host's public address, with one retry. EC2 or Crafty being up is not enough, and neither is a game that answers while a restore of this function is under way or after one failed: it was started by hand on the world the restore replaces. Bedrock players join through Geyser in the same server, so the one ping covers both editions. |
 | `stopping` | EC2 is `stopping`, a stop of this function is under way (at most 75 minutes), or the [idle stop](idle-stop.md) has a drain or EC2 stop under way for this run. |
 | `maintenance` | The host has run for more than 10 minutes without a game answering, and no start of this function is pending. Examples are a server stopped from Crafty's page, or a workstation `stop` archiving before it stops EC2. Members get no Start button. |
-| `failed` | A start or restore of this function failed, or has not finished after 15 or 45 minutes. Start is offered again, and on a running host it retries only the game. |
+| `failed` | A start or restore of this function failed, or has not finished after 15 or 45 minutes. Start is offered again, and on a running host it retries only the game. A failed restore reads `failed` even while a game answers, until a start, a forced stop or another restore replaces its record. |
 | `unknown` | AWS could not be read. `last_known` is the last state this warm function answered, when it has one. |
 
 The Member named in `X-Lobby-Member` is logged with every start, stop, restore and allowlist request; the workflow sends none.
