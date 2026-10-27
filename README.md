@@ -1,6 +1,6 @@
 # Minecraft
 
-One fresh family survival server for up to six Java and Bedrock players. The repository defines the replaceable host, retained storage, state bootstrap, pinned crossplay runtime, guarded session commands, verified cold backup publication, and isolated restore, with reproducible tools and credential-free checks. Live AWS deployment and demonstrated S3 recovery remain separate deliveries.
+One family Minecraft server, with a survival and a creative world, for up to six Java and Bedrock players. The server runs under Crafty Controller on a retained AWS host ([ADR 0004](docs/adr/0004-crafty-multiverse-rebuild.md)); the Launcher starts, stops, restores and allowlists it from The Lobby, the Server control workflow or `task server:*` ([ADR 0006](docs/adr/0006-cloud-controls.md)). The repository defines the host, its retained storage and state bootstrap, the pinned server content, the host adapter the Launcher carries, and the deploy and health workflows, with reproducible tools and credential-free checks.
 
 Changes go through feature branches and pull requests in this repository; it is not taking outside contributions. Keep credentials, local configuration, and generated server data out of Git.
 
@@ -13,16 +13,10 @@ Report suspected vulnerabilities using the [security policy](SECURITY.md).
 - [Server operations design](docs/superpowers/specs/2026-09-07-server-operations-design.md)
 - [Infrastructure ownership, setup, costs, and handoff](docs/operations/infrastructure.md)
 - [State bootstrap and recovery](docs/operations/state-bootstrap.md)
-- [Runtime installation and private configuration](docs/operations/runtime-installation.md)
-- [Instance commands and backup-hook contract](docs/operations/runtime-operations.md)
-- [Backup commands, retention, and isolated recovery](docs/operations/backup-recovery.md)
-- [Live persistence and recovery rehearsal](docs/operations/live-recovery-rehearsal.md)
 - [Optional idle stop](docs/operations/idle-stop.md)
 - [Launcher backend for The Lobby](docs/operations/launcher.md)
 - [Cloud controls: stop, start, restore, allowlist and deploy from anywhere](docs/operations/cloud-controls.md)
-- [Pinned content and explicit local runtime validation](docs/operations/runtime-content.md)
 - [Family device joins, console rollback, and play acceptance](docs/operations/family-device-validation.md)
-- [Creative world, separate ports and shared-host operation](docs/operations/creative-world.md)
 - [Client compatibility and upstream release gates](docs/operations/client-compatibility-readiness.md)
 - [Foundation issue #3](https://github.com/CraigDevJohnson/minecraft/issues/3) and [current issues](https://github.com/CraigDevJohnson/minecraft/issues)
 

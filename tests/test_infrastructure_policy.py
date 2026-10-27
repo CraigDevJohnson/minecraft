@@ -129,7 +129,7 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
 
     def test_host_bootstrap_receives_retained_identity_and_both_scripts(self):
         host = resource_blocks(INFRA)["aws_instance.host"]
-        self.assertRegex(host, r"user_data_base64\s*=\s*base64gzip\(join\(")
+        self.assertRegex(host, r"user_data_base64\s*=\s*base64gzip\(templatefile\(")
         self.assertIn("../scripts/host-bootstrap.sh.tftpl", host)
         self.assertIn("../scripts/minecraft_storage.py", host)
         self.assertRegex(host, r"data_volume_id\s*=\s*local.data_volume_id\b")

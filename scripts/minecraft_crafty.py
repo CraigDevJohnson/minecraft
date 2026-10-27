@@ -48,6 +48,9 @@ from minecraft_content import _approved_geyser, _managed_file_bytes  # noqa: E40
 MANIFEST = Path(__file__).resolve().parent / "server.json"
 COMPOSE = Path("/opt/minecraft-crafty/compose.yaml")
 GEYSER_CONFIG = "plugins/Geyser-Spigot/config.yml"
+# Geyser 2.11 reads config version 8; 2.12, the first with Bedrock 26.60, adds keys the family server leaves at their
+# defaults and would rewrite an older file, so a manifest pins the version its Geyser build writes.
+GEYSER_CONFIG_VERSIONS = (8, 11)
 # NetherNet's WebRTC candidates carry the host's public address, which changes with every EC2 start.
 ADVERTISE = re.compile(r" -DgeyserAdvertiseAddresses=\S*")
 INSTANCE_ID = re.compile(r"[a-z][a-z0-9-]{0,31}")
@@ -1453,10 +1456,11 @@ def bedrock_transport(manifest: dict) -> str:
     """The Bedrock transport the manifest's Geyser configuration selects, which must be one Craig approved (#30):
     RakNet alone, or both, which adds NetherNet's built-in signaling on TCP 19132 and WebRTC on UDP 19133."""
     configs = [item.get("content") for item in manifest.get("managed_files", []) if item.get("path") == GEYSER_CONFIG]
-    if configs == [_approved_geyser(8)]:
-        return "raknet"
-    if configs == [_approved_geyser(8, dual_transport=True)]:
-        return "both"
+    for version in GEYSER_CONFIG_VERSIONS:
+        if configs == [_approved_geyser(version)]:
+            return "raknet"
+        if configs == [_approved_geyser(version, dual_transport=True)]:
+            return "both"
     raise CraftyError("the Geyser configuration must be one of the approved Bedrock transports")
 
 
