@@ -1,5 +1,4 @@
 data "aws_ami" "host" {
-  count  = var.session_present ? 1 : 0
   owners = [var.ami_owner_account_id]
   filter {
     name   = "image-id"
@@ -23,28 +22,29 @@ data "aws_ami" "host" {
   }
 }
 
+# The retired on-demand and S3-only lifecycles (ADR 0003, #70) counted these resources so that a
+# session could remove them. The retained host has exactly one of each, at the plain address again.
 moved {
-  from = aws_instance.host
-  to   = aws_instance.host[0]
+  from = aws_instance.host[0]
+  to   = aws_instance.host
 }
 
 moved {
-  from = aws_volume_attachment.data
-  to   = aws_volume_attachment.data[0]
+  from = aws_volume_attachment.data[0]
+  to   = aws_volume_attachment.data
+}
+
+moved {
+  from = aws_ebs_volume.data[0]
+  to   = aws_ebs_volume.data
 }
 
 locals {
-  data_volume_id = var.data_ownership == "retained" ? aws_ebs_volume.data[0].id : try(aws_ebs_volume.session_data[0].id, null)
-}
-
-moved {
-  from = aws_ebs_volume.data
-  to   = aws_ebs_volume.data[0]
+  data_volume_id = aws_ebs_volume.data.id
 }
 
 resource "aws_instance" "host" {
-  count                       = var.session_present ? 1 : 0
-  ami                         = data.aws_ami.host[0].id
+  ami                         = data.aws_ami.host.id
   instance_type               = "m7g.large"
   availability_zone           = var.availability_zone
   subnet_id                   = aws_subnet.public.id
@@ -84,7 +84,6 @@ resource "aws_instance" "host" {
   depends_on = [
     aws_iam_role_policy.ssm,
     aws_iam_role_policy.backups,
-    aws_iam_role_policy.bootstrap,
     aws_vpc_security_group_egress_rule.web,
     # First boot installs packages and registers with SSM through the public route.
     aws_route.internet,
@@ -93,7 +92,6 @@ resource "aws_instance" "host" {
 }
 
 resource "aws_ebs_volume" "data" {
-  count             = var.data_ownership == "retained" ? 1 : 0
   availability_zone = var.availability_zone
   encrypted         = true
   type              = "gp3"
@@ -105,23 +103,9 @@ resource "aws_ebs_volume" "data" {
 }
 
 resource "aws_volume_attachment" "data" {
-  count        = var.session_present ? 1 : 0
   device_name  = "/dev/sdf"
   volume_id    = local.data_volume_id
-  instance_id  = aws_instance.host[0].id
+  instance_id  = aws_instance.host.id
   force_detach = false
   skip_destroy = false
-}
-
-# Import/move the existing disk here only through the separately reviewed no-change
-# ownership/protection migration. The retained address above remains protected.
-resource "aws_ebs_volume" "session_data" {
-  count             = var.data_ownership == "session" && var.session_present ? 1 : 0
-  availability_zone = var.availability_zone
-  encrypted         = true
-  type              = "gp3"
-  size              = var.data_volume_size_gib
-  # Preserve physical attributes/tags during ownership migration; the address and
-  # reviewed controller policy carry session ownership, not a destructive retag.
-  tags = { Name = "${var.resource_prefix}-data", Purpose = "retained-instance-data" }
 }

@@ -10,7 +10,7 @@ It also pins Geyser's configuration, which selects the Bedrock transports. Since
 
 ## Infrastructure inputs
 
-Use the existing OpenTofu root with the default `lifecycle_mode = "retained-host"` and `data_ownership = "retained"`. In the private `deployment.tfvars`:
+Use the existing OpenTofu root. In the private `deployment.tfvars`:
 
 - `instance_ids = ["family"]`, so the host role may store archives under `instances/family/`.
 - `bedrock_transport = "both"`, the default, so the security group admits signaling TCP 19132 and WebRTC UDP 19133 and lets ICE checks out. Set `"raknet"` only with a manifest whose Geyser configuration selects RakNet alone.

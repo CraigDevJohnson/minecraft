@@ -279,73 +279,11 @@ variable "launcher" {
     error_message = "launcher supports exactly one game instance on Java port 25565."
   }
   validation {
-    condition     = var.launcher == null || var.lifecycle_mode == "retained-host"
-    error_message = "launcher starts the retained host and is incompatible with on-demand and S3-only lifecycles."
-  }
-  validation {
     condition     = var.launcher == null || try(can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", var.launcher.permissions_boundary_arn)) && split(":", var.launcher.permissions_boundary_arn)[4] == var.account_id, false)
     error_message = "launcher.permissions_boundary_arn must name the administrator-created launcher boundary, a managed policy in the target account. The operator role may create the launcher's role only inside it."
   }
   validation {
     condition     = var.launcher == null || try(!startswith(lower(reverse(split("/", var.launcher.permissions_boundary_arn))[0]), "${var.resource_prefix}-"), false)
     error_message = "launcher.permissions_boundary_arn must name a policy outside the resource prefix, so prefix-scoped operator permissions never cover it."
-  }
-}
-
-variable "lifecycle_mode" {
-  description = "Opt-in session host removal. Retained-host preserves existing stop/start operation. Activation requires a reviewed recurring policy and initial migration."
-  type        = string
-  default     = "retained-host"
-  validation {
-    condition     = contains(["retained-host", "on-demand-host", "s3-only"], var.lifecycle_mode)
-    error_message = "lifecycle_mode must be retained-host, on-demand-host, or s3-only."
-  }
-  validation {
-    condition     = var.lifecycle_mode == "retained-host" || var.idle_stop == null
-    error_message = "On-demand host mode is incompatible with idle_stop's fixed host identity."
-  }
-}
-
-variable "session_present" {
-  description = "Session host and attachment presence; protected data/network/IAM/backups/state remain retained."
-  type        = bool
-  default     = true
-  validation {
-    condition     = var.session_present || var.lifecycle_mode == "on-demand-host" || (var.lifecycle_mode == "s3-only" && var.data_ownership == "session")
-    error_message = "Only opt-in on-demand mode permits an absent session host."
-  }
-}
-
-variable "bootstrap_sha256" {
-  description = "Pinned immutable runtime archive SHA-256 under bootstrap/releases/<digest>/runtime.tar.gz in the private backup bucket. Never contains credentials."
-  type        = string
-  default     = null
-  validation {
-    condition     = var.lifecycle_mode == "retained-host" || try(can(regex("^[0-9a-f]{64}$", var.bootstrap_sha256)), false)
-    error_message = "On-demand mode requires a pinned bootstrap archive SHA-256."
-  }
-}
-
-variable "data_ownership" {
-  description = "Retained keeps existing data protected. Session requires the separately reviewed no-change ownership/protection migration before S3-only deletion authority."
-  type        = string
-  default     = "retained"
-  validation {
-    condition     = contains(["retained", "session"], var.data_ownership) && (var.data_ownership == "retained" || var.lifecycle_mode == "s3-only")
-    error_message = "Session data ownership is allowed only in s3-only mode after reviewed migration."
-  }
-}
-
-variable "recovery_receipt_ids" {
-  description = "Exact independently verified and durable current recovery selections. S3-only off-state requires one receipt for every configured instance; never catalog latest."
-  type        = map(string)
-  default     = {}
-  validation {
-    condition     = alltrue([for id in values(var.recovery_receipt_ids) : can(regex("^[0-9a-f]{64}$", id))])
-    error_message = "Each recovery receipt ID must be a lowercase SHA-256."
-  }
-  validation {
-    condition     = var.lifecycle_mode != "s3-only" || var.session_present || toset(keys(var.recovery_receipt_ids)) == var.instance_ids
-    error_message = "S3-only absent-data handoff requires a verified receipt for every configured instance."
   }
 }

@@ -1,6 +1,6 @@
 # Data disk capacity
 
-The retained data disk, `aws_ebs_volume.data[0]` mounted at `/srv/minecraft`, takes its size from the required private input `data_volume_size_gib`. EBS grows a volume online and never shrinks one, so the disk starts small and grows when the [usage warning](#usage-report-and-warning) says so. gp3 gives the same 3,000 IOPS and 125 MiB/s at any size: a smaller disk is not a slower one. Keep volume IDs, UUIDs, and command output in the private operator directory, never in an issue or pull request.
+The retained data disk, `aws_ebs_volume.data` mounted at `/srv/minecraft`, takes its size from the required private input `data_volume_size_gib`. EBS grows a volume online and never shrinks one, so the disk starts small and grows when the [usage warning](#usage-report-and-warning) says so. gp3 gives the same 3,000 IOPS and 125 MiB/s at any size: a smaller disk is not a slower one. Keep volume IDs, UUIDs, and command output in the private operator directory, never in an issue or pull request.
 
 ## What the disk holds
 
@@ -28,7 +28,7 @@ No code depends on the size. `minecraft-storage mount` and `verify` check the EB
 
 The variable has no default, so a deployment that has not set it fails to plan instead of planning a shrink. An existing deployment sets its current size, 40 for the first deployment, before any plan with this revision.
 
-`prevent_destroy` does not catch a shrink. The pinned AWS provider plans a smaller `size` as an in-place update. The apply then calls `ModifyVolume`, AWS rejects it, and other changes in that apply may already have happened. Treat **any plan in which `aws_ebs_volume.data[0]` `size` decreases** as a stop, whether it shows as an update or as a replacement. A smaller disk comes only from the [replacement](#replace-the-disk-with-a-smaller-one) below.
+`prevent_destroy` does not catch a shrink. The pinned AWS provider plans a smaller `size` as an in-place update. The apply then calls `ModifyVolume`, AWS rejects it, and other changes in that apply may already have happened. Treat **any plan in which `aws_ebs_volume.data` `size` decreases** as a stop, whether it shows as an update or as a replacement. A smaller disk comes only from the [replacement](#replace-the-disk-with-a-smaller-one) below.
 
 ## Usage report and warning
 
@@ -39,7 +39,7 @@ The emergency [host commands](host-commands.md#data-disk-usage) `minecraft_host.
 Growing needs no downtime and does not replace the host: `size` is not part of the host's user data.
 
 1. In the private tfvars, raise `data_volume_size_gib`, for example from 5 to 10. Never lower it.
-2. Make a saved plan from the private infrastructure copy used for the last apply, as in [infrastructure operations](infrastructure.md#private-deployment-inputs-and-output). It must show only `aws_ebs_volume.data[0]` updated in place, with `size` increasing. Anything else, including a host replacement, is a stop. Apply only the saved plan that Craig approved.
+2. Make a saved plan from the private infrastructure copy used for the last apply, as in [infrastructure operations](infrastructure.md#private-deployment-inputs-and-output). It must show only `aws_ebs_volume.data` updated in place, with `size` increasing. Anything else, including a host replacement, is a stop. Apply only the saved plan that Craig approved.
 3. Wait for the new size to reach the host, with `data_volume_id` set from the private `deployment` output. It does once the modification is `optimizing`, usually within seconds:
 
    ```sh
@@ -61,7 +61,7 @@ AWS accepts another modification of the same volume only after the previous one 
 
 ## Replace the disk with a smaller one
 
-EBS cannot shrink a volume or create a smaller one from a snapshot. A replacement is a new blank disk, created by OpenTofu together with a new host, then a restore of the newest verified archive onto it: first setup of the new disk ([disk setup and readiness](infrastructure.md#disk-setup-and-readiness-handoff-to-5-and-7)), then [Install Crafty on the host](crafty.md#install-crafty-on-the-host) through [Create the server](crafty.md#create-the-server), then [Recover from an archive](crafty.md#recover-from-an-archive). Any plan that shrinks `aws_ebs_volume.data[0]` in place is a stop, and Craig approves the exact replacement plan and, separately, retiring the old volume.
+EBS cannot shrink a volume or create a smaller one from a snapshot. A replacement is a new blank disk, created by OpenTofu together with a new host, then a restore of the newest verified archive onto it: first setup of the new disk ([disk setup and readiness](infrastructure.md#disk-setup-and-readiness-handoff-to-5-and-7)), then [Install Crafty on the host](crafty.md#install-crafty-on-the-host) through [Create the server](crafty.md#create-the-server), then [Recover from an archive](crafty.md#recover-from-an-archive). Any plan that shrinks `aws_ebs_volume.data` in place is a stop, and Craig approves the exact replacement plan and, separately, retiring the old volume.
 
 The 2026-10-03 replacement ([Evidence](#evidence)) followed the Compose-era step-by-step procedure, which #70 retired with its restore tooling; it stays in git history. A Crafty-era replacement needs its own reviewed step-by-step procedure before it runs.
 
