@@ -867,7 +867,7 @@ def content_manifest(transport: str = "both") -> dict:
     for artifact in manifest["artifacts"]:
         artifact["sha256"] = hashlib.sha256(jar(artifact)).hexdigest()
     geyser = manifest["managed_files"][0]
-    geyser["content"] = crafty._approved_geyser(8, dual_transport=transport == "both")
+    geyser["content"] = crafty._approved_geyser(geyser["content"]["config-version"], dual_transport=transport == "both")
     geyser["sha256"] = hashlib.sha256(crafty._managed_file_bytes(geyser)).hexdigest()
     return manifest
 
@@ -1249,6 +1249,17 @@ class ContentTests(unittest.TestCase):
             manifest["managed_files"][0]["content"]["bedrock"].update(change)
             with self.assertRaises(crafty.CraftyError):
                 crafty.bedrock_transport(manifest)
+        # Geyser 2.11's version 8 and 2.12's version 11, and no other.
+        for version, accepted in ((7, False), (8, True), (9, False), (10, False), (11, True), (12, False)):
+            for transport in ("both", "raknet"):
+                with self.subTest(version=version, transport=transport):
+                    manifest = content_manifest(transport)
+                    manifest["managed_files"][0]["content"]["config-version"] = version
+                    if accepted:
+                        self.assertEqual(crafty.bedrock_transport(manifest), transport)
+                    else:
+                        with self.assertRaises(crafty.CraftyError):
+                            crafty.bedrock_transport(manifest)
 
     def test_the_cli_start_applies_the_manifest_beside_the_adapter_and_fails_without_it(self):
         path = self.root / "operator.json"
