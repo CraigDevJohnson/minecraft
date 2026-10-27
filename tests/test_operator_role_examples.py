@@ -46,7 +46,7 @@ EC2_SECURITY_SETTINGS = [
     "ec2:ModifyVpcBlockPublicAccessExclusion",
     "ec2:DeleteVpcBlockPublicAccessExclusion",
 ]
-HOST_POLICY_SOURCES = [ROOT / "infra/iam.tf", ROOT / "infra/recovery-rehearsal/iam.tf"]
+HOST_POLICY_SOURCES = [ROOT / "infra/iam.tf"]
 
 
 def statements(name):

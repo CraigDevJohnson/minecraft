@@ -44,7 +44,6 @@ def main() -> None:
         roots = [
             workspace / "infra",
             workspace / "infra/state-bootstrap",
-            workspace / "infra/recovery-rehearsal",
         ]
         for module in roots:
             if not module.is_dir():

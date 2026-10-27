@@ -175,17 +175,17 @@ run "retained_encrypted_data_and_replaceable_root" {
   command = plan
 
   assert {
-    condition     = aws_ebs_volume.data[0].encrypted && aws_ebs_volume.data[0].type == "gp3" && aws_ebs_volume.data[0].size == 5
+    condition     = aws_ebs_volume.data.encrypted && aws_ebs_volume.data.type == "gp3" && aws_ebs_volume.data.size == 5
     error_message = "The retained data disk must be encrypted gp3 at the configured 5 GiB."
   }
 
   assert {
-    condition     = aws_instance.host[0].root_block_device[0].encrypted && aws_instance.host[0].root_block_device[0].volume_size == 20 && aws_instance.host[0].root_block_device[0].delete_on_termination
+    condition     = aws_instance.host.root_block_device[0].encrypted && aws_instance.host.root_block_device[0].volume_size == 20 && aws_instance.host.root_block_device[0].delete_on_termination
     error_message = "The replaceable root disk must be encrypted 20 GiB and deleted on host termination."
   }
 
   assert {
-    condition     = aws_volume_attachment.data[0].force_detach == false && aws_volume_attachment.data[0].skip_destroy == false
+    condition     = aws_volume_attachment.data.force_detach == false && aws_volume_attachment.data.skip_destroy == false
     error_message = "Normal host replacement must use an orderly detach of the independent retained disk."
   }
 }
@@ -196,7 +196,7 @@ run "retained_data_disk_size_follows_the_private_input" {
     data_volume_size_gib = 8
   }
   assert {
-    condition     = aws_ebs_volume.data[0].size == 8 && aws_instance.host[0].root_block_device[0].volume_size == 20
+    condition     = aws_ebs_volume.data.size == 8 && aws_instance.host.root_block_device[0].volume_size == 20
     error_message = "The retained data disk must take its size from data_volume_size_gib and leave the root disk at 20 GiB."
   }
 }
@@ -273,12 +273,12 @@ run "game_only_ingress_and_ssm_only_administration" {
   }
 
   assert {
-    condition     = aws_instance.host[0].metadata_options[0].http_tokens == "required" && aws_instance.host[0].metadata_options[0].http_put_response_hop_limit == 1 && aws_instance.host[0].metadata_options[0].instance_metadata_tags == "disabled"
+    condition     = aws_instance.host.metadata_options[0].http_tokens == "required" && aws_instance.host.metadata_options[0].http_put_response_hop_limit == 1 && aws_instance.host.metadata_options[0].instance_metadata_tags == "disabled"
     error_message = "Host credentials must require IMDSv2 and must not be exposed through an extra container-network hop."
   }
 
   assert {
-    condition     = !aws_subnet.public.map_public_ip_on_launch && aws_instance.host[0].associate_public_ip_address && aws_route.internet.destination_cidr_block == "0.0.0.0/0"
+    condition     = !aws_subnet.public.map_public_ip_on_launch && aws_instance.host.associate_public_ip_address && aws_route.internet.destination_cidr_block == "0.0.0.0/0"
     error_message = "Only the host may take a public IPv4 address, assigned at launch and on each start, with a public internet route."
   }
 }
@@ -580,188 +580,15 @@ run "reject_wildcard_idle_stop_secret_permissions" {
   expect_failures = [var.idle_stop]
 }
 
-run "on_demand_off_preserves_protected_infrastructure" {
-  command = plan
-  variables {
-    lifecycle_mode   = "on-demand-host"
-    session_present  = false
-    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-  }
-  assert {
-    condition     = length(data.aws_ami.host) == 0 && length(aws_instance.host) == 0 && length(aws_volume_attachment.data) == 0 && aws_ebs_volume.data[0].size == 5 && aws_ebs_volume.data[0].encrypted
-    error_message = "Off-state removes only session host/attachment and retains the encrypted protected disk."
-  }
-  assert {
-    condition     = output.deployment.schema_version == 2 && output.deployment.lifecycle_mode == "on-demand-host" && output.deployment.session_present == false && output.deployment.host_id == null
-    error_message = "Absent session requires an explicit versioned off-state deployment handoff."
-  }
-  assert {
-    condition     = length(aws_iam_role_policy.bootstrap) == 1 && jsondecode(aws_iam_role_policy.bootstrap[0].policy).Statement[0].Action == ["s3:GetObject"] && jsondecode(aws_iam_role_policy.bootstrap[0].policy).Statement[0].Resource == ["arn:aws:s3:::minecraft-test-example-backups/bootstrap/releases/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/*"]
-    error_message = "Host runtime release permission must be read-only and pinned to one immutable digest prefix."
-  }
-}
-
-run "existing_mode_cannot_remove_host" {
-  command = plan
-  variables { session_present = false }
-  expect_failures = [var.session_present]
-}
-
-run "on_demand_rejects_fixed_host_idle_stop" {
-  command = plan
-  variables {
-    lifecycle_mode   = "on-demand-host"
-    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    idle_stop = {
-      package_path                = "tests/fixtures/idle-stop.placeholder"
-      cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:example/test-123456"
-    }
-  }
-  expect_failures = [var.lifecycle_mode]
-}
-
 run "default_bootstrap_bytes_remain_identical" {
   command = plan
   assert {
-    condition = aws_instance.host[0].user_data_base64 == base64gzip(templatefile("${path.module}/../scripts/host-bootstrap.sh.tftpl", {
+    condition = aws_instance.host.user_data_base64 == base64gzip(templatefile("${path.module}/../scripts/host-bootstrap.sh.tftpl", {
       storage_script_base64 = filebase64("${path.module}/../scripts/minecraft_storage.py")
-      data_volume_id        = aws_ebs_volume.data[0].id
+      data_volume_id        = aws_ebs_volume.data.id
       data_filesystem_uuid  = var.data_filesystem_uuid
     }))
     error_message = "Retained-host defaults must preserve exact existing bootstrap bytes and avoid an unintended host replacement."
-  }
-}
-
-run "s3_only_off_has_no_session_ebs_and_keeps_foundation" {
-  command = plan
-  variables {
-    lifecycle_mode       = "s3-only"
-    data_ownership       = "session"
-    session_present      = false
-    bootstrap_sha256     = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    recovery_receipt_ids = { survival = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
-  }
-  assert {
-    condition     = length(aws_instance.host) == 0 && length(aws_volume_attachment.data) == 0 && length(aws_ebs_volume.data) == 0 && length(aws_ebs_volume.session_data) == 0
-    error_message = "S3-only off-state must own no session host/root/data EBS."
-  }
-  assert {
-    condition     = output.deployment.schema_version == 2 && output.deployment.host_id == null && output.deployment.data_volume_id == null && output.deployment.data_filesystem_uuid == null && output.deployment.recovery_receipt_ids == tomap(var.recovery_receipt_ids)
-    error_message = "Absent data requires an explicit receipt-bound versioned handoff."
-  }
-  assert {
-    condition     = aws_s3_bucket.backups.bucket == var.backup_bucket_name && aws_iam_role.host.permissions_boundary == var.host_permissions_boundary_arn && aws_subnet.public.availability_zone == var.availability_zone
-    error_message = "Session removal must retain backups, bounded host role and networking."
-  }
-}
-
-run "s3_only_requires_receipts_before_absent_data" {
-  command = plan
-  variables {
-    lifecycle_mode   = "s3-only"
-    data_ownership   = "session"
-    session_present  = false
-    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-  }
-  expect_failures = [var.recovery_receipt_ids]
-}
-
-run "s3_only_keeps_retained_protection_until_ownership_migrates" {
-  command = plan
-  variables {
-    lifecycle_mode   = "s3-only"
-    data_ownership   = "retained"
-    session_present  = true
-    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-  }
-  assert {
-    condition     = length(aws_ebs_volume.data) == 1 && length(aws_ebs_volume.session_data) == 0 && aws_ebs_volume.data[0].encrypted
-    error_message = "Before explicit ownership migration, the original data disk remains retained/protected."
-  }
-}
-
-run "s3_only_expires_only_explicitly_retired_versions" {
-  command = plan
-  variables {
-    lifecycle_mode   = "s3-only"
-    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-  }
-  assert {
-    condition     = toset([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule.id]) == toset(["retire-verified-survival", "abort-incomplete-survival", "remove-expired-markers-survival"])
-    error_message = "S3-only mode must remove the blanket noncurrent rule and separate retirement, multipart and marker cleanup."
-  }
-  assert {
-    condition     = one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "retire-verified-survival"]).filter[0].and[0].prefix == "instances/survival/" && one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "retire-verified-survival"]).filter[0].and[0].tags["minecraft-retention"] == "retired" && length(one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "retire-verified-survival"]).filter[0].and[0].tags) == 1 && one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "retire-verified-survival"]).expiration[0].days == 14 && one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "retire-verified-survival"]).noncurrent_version_expiration[0].noncurrent_days == 14
-    error_message = "Current and historical data may expire only inside survival's prefix with the explicit retired tag."
-  }
-  assert {
-    condition     = one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "abort-incomplete-survival"]).filter[0].prefix == "instances/survival/" && one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "abort-incomplete-survival"]).abort_incomplete_multipart_upload[0].days_after_initiation == 1 && length(one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "abort-incomplete-survival"]).expiration) == 0 && length(one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "abort-incomplete-survival"]).noncurrent_version_expiration) == 0
-    error_message = "Multipart cleanup must be prefix-only and cannot expire a complete recovery object."
-  }
-  assert {
-    condition     = one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "remove-expired-markers-survival"]).filter[0].prefix == "instances/survival/" && one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "remove-expired-markers-survival"]).expiration[0].expired_object_delete_marker && length(one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "remove-expired-markers-survival"]).filter[0].and) == 0 && length(one([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule if rule.id == "remove-expired-markers-survival"]).noncurrent_version_expiration) == 0
-    error_message = "Expired delete-marker cleanup must be a separate untagged rule with no historical-data expiration."
-  }
-}
-
-run "s3_only_runtime_reads_versions_and_only_publishes_points" {
-  command = plan
-  variables {
-    lifecycle_mode   = "s3-only"
-    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-  }
-  assert {
-    condition     = toset(flatten([for statement in jsondecode(aws_iam_role_policy.backups.policy).Statement : statement.Action])) == toset(["s3:ListBucket", "s3:GetBucketLocation", "s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"])
-    error_message = "S3-only runtime credentials must not gain deletion, tagging, receipt mutation or bucket administration."
-  }
-  assert {
-    condition     = toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[1].Resource) == toset(["arn:aws:s3:::minecraft-test-example-backups/instances/survival/completed/*", "arn:aws:s3:::minecraft-test-example-backups/instances/survival/objects/*"]) && !contains(jsondecode(aws_iam_role_policy.backups.policy).Statement[1].Action, "s3:DeleteObject")
-    error_message = "Immutable point publication and version reads must use only the configured completed/object prefixes."
-  }
-  assert {
-    condition     = one([for statement in jsondecode(aws_iam_role_policy.backups.policy).Statement : statement if statement.Sid == "ReadExactRecoveryReceipts"]).Action == ["s3:GetObject", "s3:GetObjectVersion"] && one([for statement in jsondecode(aws_iam_role_policy.backups.policy).Statement : statement if statement.Sid == "ReadExactRecoveryReceipts"]).Resource == ["arn:aws:s3:::minecraft-test-example-backups/instances/survival/receipts/*"]
-    error_message = "Receipt access must remain a separate read-only exact-instance permission."
-  }
-}
-
-run "s3_only_bucket_guards_immutable_publication_and_selection" {
-  command = plan
-  variables {
-    lifecycle_mode   = "s3-only"
-    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-  }
-  assert {
-    condition     = one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireImmutableRecoveryPublication"]).Condition.StringNotEquals["s3:if-none-match"] == "*" && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireImmutableRecoveryPublication"]).Condition.Bool["s3:ObjectCreationOperation"] == "true" && contains(one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireImmutableRecoveryPublication"]).Resource, "arn:aws:s3:::minecraft-test-example-backups/instances/survival/receipts/${join("", [for index in range(64) : "?"])}.json")
-    error_message = "Immutable point/receipt completion needs If-None-Match while multipart creation and parts remain exempt."
-  }
-  assert {
-    condition     = one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireConditionalCurrentSelection"]).Resource == ["arn:aws:s3:::minecraft-test-example-backups/instances/survival/receipts/current.json"] && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireConditionalCurrentSelection"]).Condition.Null == { "s3:if-match" = "true", "s3:if-none-match" = "true" } && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "NeverDeleteCurrentSelection"]).Action == ["s3:DeleteObject", "s3:DeleteObjectVersion"]
-    error_message = "Authoritative selection needs conditional creation/CAS and cannot be directly deleted."
-  }
-  assert {
-    condition     = one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "LifecycleOwnsRetiredVersionDeletion"]).Action == "s3:DeleteObjectVersion" && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RuntimeCannotRetireRecoveryObjects"]).Condition.ArnEquals["aws:PrincipalArn"] == "arn:aws:iam::111122223333:role/minecraft-test-host" && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RuntimeCannotPublishReceipts"]).Action == ["s3:PutObject", "s3:AbortMultipartUpload"]
-    error_message = "The bucket must deny manual historical deletion and runtime deletion/tagging/receipt publication despite broader identity permissions."
-  }
-  assert {
-    condition     = one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireRetentionTagValue"]).Condition.StringNotEquals["s3:RequestObjectTag/minecraft-retention"] == ["keep", "retired"] && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RequireRetentionTagKeys"]).Condition.Null["s3:RequestObjectTagKeys"] == "true" && one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "RejectUnownedRetentionTagKeys"]).Condition["ForAnyValue:StringNotEquals"]["s3:RequestObjectTagKeys"] == ["minecraft-retention"]
-    error_message = "Retention writes must require the approved nonempty key/value and reject extra tags."
-  }
-}
-
-run "s3_only_multiple_instances_have_separate_retirement_prefixes" {
-  command = plan
-  variables {
-    lifecycle_mode   = "s3-only"
-    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    instance_ids     = ["survival", "creative"]
-  }
-  assert {
-    condition     = length(aws_s3_bucket_lifecycle_configuration.backups.rule) == 6 && toset([for rule in aws_s3_bucket_lifecycle_configuration.backups.rule : rule.filter[0].and[0].prefix if startswith(rule.id, "retire-verified-")]) == toset(["instances/survival/", "instances/creative/"])
-    error_message = "Every configured instance needs its own retired-only rule and separate cleanup scope."
-  }
-  assert {
-    condition     = toset(one([for statement in jsondecode(aws_s3_bucket_policy.backups.policy).Statement : statement if statement.Sid == "NeverDeleteCurrentSelection"]).Resource) == toset(["arn:aws:s3:::minecraft-test-example-backups/instances/survival/receipts/current.json", "arn:aws:s3:::minecraft-test-example-backups/instances/creative/receipts/current.json"])
-    error_message = "Only configured per-instance authoritative selections receive the deletion guard."
   }
 }
 
@@ -974,16 +801,6 @@ run "reject_launcher_token_outside_its_prefix" {
   command = plan
   variables {
     launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, cloudflare_token_parameter = "/portfolio/lambda/prod/token", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
-  }
-  expect_failures = [var.launcher]
-}
-
-run "reject_launcher_for_on_demand_hosts" {
-  command = plan
-  variables {
-    lifecycle_mode   = "on-demand-host"
-    bootstrap_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    launcher         = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
   }
   expect_failures = [var.launcher]
 }

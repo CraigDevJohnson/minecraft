@@ -21,10 +21,10 @@ def resource_blocks(directory):
 
 
 class ProtectedInfrastructurePolicyTests(unittest.TestCase):
-    def test_removal_does_not_lookup_a_launch_only_ami(self):
+    def test_the_one_host_boots_the_exact_looked_up_ami(self):
         source = (INFRA / 'host.tf').read_text()
-        self.assertRegex(source, r'data "aws_ami" "host" \{\s*count\s*=\s*var\.session_present\s*\?\s*1\s*:\s*0')
-        self.assertRegex(resource_blocks(INFRA)['aws_instance.host'], r'ami\s*=\s*data\.aws_ami\.host\[0\]\.id')
+        self.assertNotRegex(source, r'\bcount\s*=')
+        self.assertRegex(resource_blocks(INFRA)['aws_instance.host'], r'ami\s*=\s*data\.aws_ami\.host\.id')
 
     def test_retained_resources_refuse_destroy(self):
         main = resource_blocks(INFRA)
@@ -59,7 +59,6 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
         # while the host is stopped, which is most of the time, would replace it.
         hosts = {
             "infra": resource_blocks(INFRA)["aws_instance.host"],
-            "recovery-rehearsal": resource_blocks(INFRA / "recovery-rehearsal")["aws_instance.recovery"],
         }
         for root, body in hosts.items():
             with self.subTest(root=root):
@@ -68,7 +67,7 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
 
     def test_no_root_declares_an_elastic_ip(self):
         # An allocated address bills all month; the hosts use an address billed only while running.
-        for root in (INFRA, INFRA / "state-bootstrap", INFRA / "recovery-rehearsal"):
+        for root in (INFRA, INFRA / "state-bootstrap"):
             with self.subTest(root=root.name):
                 source = "\n".join(path.read_text() for path in root.glob("*.tf"))
                 self.assertNotRegex(source, r"\baws_eip(?:_association)?\b")
@@ -117,10 +116,10 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
         role_policies = {name: body for name, body in blocks.items() if name.startswith("aws_iam_role_policy.")}
         self.assertEqual(
             {name for name, body in role_policies.items() if re.search(r"\brole\s*=\s*aws_iam_role\.host\.", body)},
-            {"aws_iam_role_policy.ssm", "aws_iam_role_policy.backups", "aws_iam_role_policy.bootstrap"},
+            {"aws_iam_role_policy.ssm", "aws_iam_role_policy.backups"},
         )
         # The only other inline policies belong to the separate idle-stop and launcher function roles, never the host.
-        self.assertEqual(set(role_policies), {"aws_iam_role_policy.ssm", "aws_iam_role_policy.backups", "aws_iam_role_policy.bootstrap", "aws_iam_role_policy.idle_stop", "aws_iam_role_policy.launcher"})
+        self.assertEqual(set(role_policies), {"aws_iam_role_policy.ssm", "aws_iam_role_policy.backups", "aws_iam_role_policy.idle_stop", "aws_iam_role_policy.launcher"})
         self.assertRegex(role_policies["aws_iam_role_policy.idle_stop"], r"\brole\s*=\s*aws_iam_role\.idle_stop\[0\]\.id\b")
         self.assertRegex(role_policies["aws_iam_role_policy.launcher"], r"\brole\s*=\s*aws_iam_role\.launcher\[each\.key\]\.id\b")
         self.assertFalse(
@@ -145,33 +144,20 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
 
     def test_no_age_expiration_of_current_backups_or_state(self):
         backup_lifecycle = resource_blocks(INFRA)["aws_s3_bucket_lifecycle_configuration.backups"]
-        legacy = re.search(r'dynamic "rule" \{\n(.*?)\n  \}\n  dynamic "rule"', backup_lifecycle, re.S)
-        self.assertIsNotNone(legacy)
-        self.assertRegex(legacy.group(1), r'for_each\s*=\s*var\.lifecycle_mode == "s3-only" \? \[\] : \[1\]')
-        self.assertNotRegex(legacy.group(1), r"(?<![a-z_])expiration\s*\{")
+        self.assertEqual(len(re.findall(r"(?m)^  rule \{", backup_lifecycle)), 1)
+        self.assertNotIn('dynamic "rule"', backup_lifecycle)
+        self.assertRegex(backup_lifecycle, r"noncurrent_version_expiration\s*\{\s*noncurrent_days\s*=\s*14")
+        self.assertNotRegex(backup_lifecycle, r"(?<![a-z_])expiration\s*\{")
         self.assertFalse(
             any(name.startswith("aws_s3_bucket_lifecycle_configuration.") for name in resource_blocks(INFRA / "state-bootstrap"))
         )
 
-    def test_s3_only_expiration_requires_retired_tag_and_cleanup_is_separate(self):
-        lifecycle = resource_blocks(INFRA)["aws_s3_bucket_lifecycle_configuration.backups"]
-        self.assertRegex(lifecycle, r'(?s)id\s*=\s*"retire-verified-\$\{rule.value\}".*?and\s*\{.*?prefix\s*=\s*"instances/\$\{rule.value\}/".*?tags\s*=\s*\{\s*minecraft-retention\s*=\s*"retired"\s*\}')
-        self.assertIn('"abort-incomplete-${rule.value}"', lifecycle)
-        self.assertIn('"remove-expired-markers-${rule.value}"', lifecycle)
-        self.assertEqual(len(re.findall(r'for_each\s*=\s*var\.lifecycle_mode == "s3-only" \? var\.instance_ids : \[\]', lifecycle)), 3)
-        self.assertNotRegex(lifecycle, r'(?<![a-z_])expiration\s*\{\s*days\s*=\s*0\b')
-
-    def test_s3_only_host_permission_boundary_supports_only_scoped_historical_reads(self):
+    def test_host_permission_boundary_grants_no_object_version_reads(self):
         import json
         boundary = json.loads((ROOT / "docs/operations/operator-role/host-boundary.json.example").read_text())
-        historical = [statement for statement in boundary["Statement"] if "s3:GetObjectVersion" in statement["Action"]]
-        self.assertEqual(len(historical), 1)
-        self.assertEqual(historical[0]["Action"], ["s3:GetObjectVersion"])
-        self.assertEqual(historical[0]["Resource"], [
-            "arn:aws:s3:::example-prefix-*/instances/*/completed/*",
-            "arn:aws:s3:::example-prefix-*/instances/*/objects/*",
-            "arn:aws:s3:::example-prefix-*/instances/*/receipts/*",
-        ])
+        actions = {action for statement in boundary["Statement"] for action in statement["Action"]}
+        self.assertNotIn("s3:GetObjectVersion", actions)
+        self.assertNotIn("s3:ListBucketVersions", actions)
 
     def test_deployment_outputs_are_private(self):
         self.assertRegex(

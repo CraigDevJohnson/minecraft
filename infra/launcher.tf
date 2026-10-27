@@ -9,7 +9,7 @@ locals {
   # The site may call only backends named *-<its environment>-* (the-lobby's site boundary), so each name carries the environment it serves.
   launcher_names    = { for environment in keys(local.launcher_sites) : environment => "${var.resource_prefix}-${environment}-launcher" }
   launcher_arns     = { for environment, name in local.launcher_names : environment => "arn:aws:lambda:${var.region}:${var.account_id}:function:${name}" }
-  launcher_host_arn = "arn:aws:ec2:${var.region}:${var.account_id}:instance/${try(aws_instance.host[0].id, "absent")}"
+  launcher_host_arn = "arn:aws:ec2:${var.region}:${var.account_id}:instance/${aws_instance.host.id}"
   # The start record and the Cloudflare token belong to the host, not to a site, so every function shares them:
   # a start from one site shows as starting on the others.
   launcher_state_name      = "/${var.resource_prefix}/launcher/state"
@@ -207,7 +207,7 @@ resource "aws_lambda_function" "launcher" {
   timeout = 900
   environment {
     variables = {
-      HOST_ID                    = try(aws_instance.host[0].id, "absent")
+      HOST_ID                    = aws_instance.host.id
       INSTANCE                   = one(var.instance_ids)
       SERVER_NAME                = var.launcher.server_name
       PUBLIC_HOSTNAME            = var.public_hostname

@@ -11,12 +11,6 @@
     {"Sid": "ManageCurrentProjectBackupObjects", "Effect": "Allow",
      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:AbortMultipartUpload","s3:ListMultipartUploadParts"],
      "Resource": "arn:aws:s3:::example-prefix-*/*",
-     "Condition": {"StringEquals": {"s3:ResourceAccount": "123456789012"}}},
-    {"Sid": "ReadHistoricalInstanceRecoveryObjects", "Effect": "Allow",
-     "Action": ["s3:GetObjectVersion"],
-     "Resource": ["arn:aws:s3:::example-prefix-*/instances/*/completed/*",
-                  "arn:aws:s3:::example-prefix-*/instances/*/objects/*",
-                  "arn:aws:s3:::example-prefix-*/instances/*/receipts/*"],
      "Condition": {"StringEquals": {"s3:ResourceAccount": "123456789012"}}}
   ]
 }
