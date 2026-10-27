@@ -54,14 +54,11 @@ resource "aws_instance" "host" {
   monitoring                  = false
   hibernation                 = false
   user_data_replace_on_change = true
-  user_data_base64 = base64gzip(join("", [templatefile("${path.module}/../scripts/host-bootstrap.sh.tftpl", {
+  user_data_base64 = base64gzip(templatefile("${path.module}/../scripts/host-bootstrap.sh.tftpl", {
     storage_script_base64 = filebase64("${path.module}/../scripts/minecraft_storage.py")
     data_volume_id        = local.data_volume_id
     data_filesystem_uuid  = var.data_filesystem_uuid
-    }), var.lifecycle_mode == "retained-host" ? "" : templatefile("${path.module}/../scripts/on-demand-bootstrap.sh.tftpl", {
-    cli_installer_base64  = filebase64("${path.module}/../scripts/install_aws_cli.sh")
-    release_script_base64 = filebase64("${path.module}/../scripts/minecraft_bootstrap_release.py")
-  })]))
+  }))
 
   root_block_device {
     encrypted             = true
