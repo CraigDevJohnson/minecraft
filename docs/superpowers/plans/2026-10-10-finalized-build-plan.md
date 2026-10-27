@@ -4,12 +4,12 @@ Craig asked to revisit and finalize the build plan, using an earlier outside rec
 
 ## What is built and accepted
 
-- **Runtime:** Docker Compose with `itzg/minecraft-server` running Paper 26.2, Geyser 2.11.3, Floodgate and ViaVersion ([ADR 0001](../../adr/0001-independent-server-instances.md), [runtime content](../../operations/runtime-content.md)).
-- **Worlds:** two independent instances on one host, `survival` (Java 25565, Bedrock 19132, 5G heap) and `creative` (Java 25566, Bedrock 19134, 1G heap) ([creative world](../../operations/creative-world.md)).
+- **Runtime:** Docker Compose with `itzg/minecraft-server` running Paper 26.2, Geyser 2.11.3, Floodgate and ViaVersion ([ADR 0001](../../adr/0001-independent-server-instances.md); its runtime content runbook was retired in #70).
+- **Worlds:** two independent instances on one host, `survival` (Java 25565, Bedrock 19132, 5G heap) and `creative` (Java 25566, Bedrock 19134, 1G heap) (its creative world runbook was retired in #70).
 - **Host:** EC2 `m7g.large` (8 GiB) in `us-west-2`, started and stopped on demand from the operator workstation, with a Cloudflare hostname that follows the dynamic IPv4 ([ADR 0002](../../adr/0002-dynamic-public-ipv4-with-cloudflare-hostname.md), [ADR 0003](../../adr/0003-on-demand-host-sessions.md)).
-- **Backups:** cold backups to versioned S3 on every stop, with verified restore tooling ([backup recovery](../../operations/backup-recovery.md)).
+- **Backups:** cold backups to versioned S3 on every stop, with verified restore tooling (its backup recovery runbook was retired in #70).
 - **Play acceptance:** on 2026-10-03 Craig accepted four simultaneous joins (Java on Mac, Bedrock on iPhone and two iPads). Console play was waived, not tested ([family device validation](../../operations/family-device-validation.md)).
-- **On-demand cold start:** accepted on 2026-10-05 at 3 minutes 53 seconds for both worlds ([on-demand host](../../operations/on-demand-host.md#recorded-live-status-2026-10-05)).
+- **On-demand cold start:** accepted on 2026-10-05 at 3 minutes 53 seconds for both worlds ([#23](https://github.com/CraigDevJohnson/minecraft/issues/23); its runbook was retired in #70).
 
 ## Pasted recommendation against the built system
 
@@ -42,7 +42,7 @@ Craig said on 2026-10-10 that the existing worlds were test worlds and need not 
 
 1. **Build the Crafty host in the repo** (no AWS needed): pinned Crafty image and plugin manifest, host bootstrap that installs Docker and Crafty on the retained data disk, a script that creates the Paper server and Multiverse worlds through the Crafty API, S3 backup sync, single-address ingress, and workstation `start`, `stop`, `status` and `admin` (SSM port-forward to Crafty) commands. Offline tests for each.
 2. **Tear down and deploy** (needs Craig's workstation, AWS SSO and the Cloudflare token, and his approval of the reviewed plan): remove the stalled S3-only host and blank disk, apply `retained-host` with the new data disk and Crafty bootstrap, set the Crafty admin password, and confirm Java and Bedrock joins and portal travel between worlds.
-3. **Retire the old controllers**: remove the S3-only, on-demand and Compose instance code once the Crafty host is proven, and close #24 as superseded.
+3. **Retire the old controllers**: remove the S3-only, on-demand and Compose instance code once the Crafty host is proven, and close #24 as superseded. (#24 closed on 2026-10-16; #70 retired the code and runbooks.)
 4. **#26, NetherNet before Bedrock 26.60 drops RakNet (high)** and **#27, Java 26.3 (medium)**: unchanged gates, now applied to the Crafty-managed server's pinned jars.
 5. **Website dashboard** from portfolio PR #126, talking to Crafty's API once its exposure is decided.
 6. **Optional:** console joins through BedrockConnect, an adventure or lobby world, and pointing the idle-stop Lambda at Crafty.

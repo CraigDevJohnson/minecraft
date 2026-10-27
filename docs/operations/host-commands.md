@@ -12,12 +12,12 @@ mkdir -p operator-config/family
 .tools/bin/tofu -chdir=infra output -json deployment > operator-config/family/deployment.json
 ```
 
-Install and configure the instance runtime on the host before using these commands. SSM invokes `/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json` as the fixed host-side interface. That private configuration supplies explicit EULA acceptance, retained-volume identity, and the required backup hook. Host startup does not supply or infer those values.
+Install Crafty and the adapter on the host before using these commands ([Crafty host](crafty.md#install-crafty-on-the-host)). SSM invokes `/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json` as the fixed host-side interface. That private configuration names Crafty's loopback URL, its API token file and the backup bucket ([operator configuration](crafty.md#create-the-api-key-and-operator-configuration)). Host startup does not supply or infer those values.
 
 Every invocation, including `status`, first calls `sts get-caller-identity` with the operator's active credentials and requires its account to match the deployment handoff before any EC2 or SSM call. A missing or malformed deployment account, failed identity lookup, or mismatch stops the command. Correct the AWS profile/session or handoff and retry; the diagnostic does not print either account ID or the caller identity. The STS request shares the 30-second AWS process bound. [GetCallerIdentity](https://docs.aws.amazon.com/cli/latest/reference/sts/get-caller-identity.html) identifies the account owning the caller and does not require a new IAM permission grant.
 
 ```sh
-python3 scripts/minecraft_host.py --deployment operator-config/family/deployment.json start --instance survival
+python3 scripts/minecraft_host.py --deployment operator-config/family/deployment.json start --instance family
 python3 scripts/minecraft_host.py --deployment operator-config/family/deployment.json status
 python3 scripts/minecraft_host.py --deployment operator-config/family/deployment.json stop
 python3 scripts/minecraft_host.py --deployment operator-config/family/deployment.json dns
@@ -25,7 +25,7 @@ python3 scripts/minecraft_host.py --deployment operator-config/family/deployment
 
 When the deployment has a public hostname, `start`, `stop`, and `dns` also keep its DNS record on the host and need the Cloudflare token for that one command; see [Public hostname](#public-hostname).
 
-`start --instance survival` starts EC2 only when stopped, waits for EC2 running and SSM online, then starts that configured instance and requires actual application readiness. The instance ID is required and must match the deployment. Repeating start on a running, ready instance is safe. An already-pending EC2 startup is observed to completion. Other transitional states fail with a retry instruction.
+`start --instance family` starts EC2 only when stopped, waits for EC2 running and SSM online, then starts that configured instance and requires actual application readiness. The instance ID is required and must match the deployment. Repeating start on a running, ready instance is safe. An already-pending EC2 startup is observed to completion. Other transitional states fail with a retry instruction.
 
 `stop` is a separate host operation. It asks the host to drain every configured instance, including already-stopped instances with pending or failed backup work. The host holds lifecycle exclusion during shutdown and cold backup, and writes a drain barrier tied to the current Linux boot. Another session start cannot cancel that barrier. EC2 stop is requested only after the response covers exactly the configured instances, confirms the barrier, and reports every application stopped with backup complete. `not-required` is accepted only through the host runtime's pristine, never-started-instance rule.
 
@@ -40,7 +40,7 @@ Failed operations exit nonzero. If EC2 stop fails after a successful drain, outp
 `start` and `status` add the host's `storage` report for the retained data disk: `size_bytes`, `available_bytes`, which is what Minecraft's unprivileged account can still write, and `used_percent`. The percentage is computed like `df`'s `Use%`, so the blocks ext4 reserves for root count as neither used nor available:
 
 ```json
-{"host": "running", "draining": false, "instances": {"survival": {"instance": "survival", "application": "running", "backup": "pending"}}, "storage": {"size_bytes": 5196382208, "available_bytes": 4100000000, "used_percent": 17}}
+{"host": "running", "draining": false, "instances": {"family": {"instance": "family", "application": "running", "backup": "pending"}}, "storage": {"size_bytes": 5196382208, "available_bytes": 4100000000, "used_percent": 17}}
 ```
 
 At 80 percent or more the output also has `storage_warning`, `data disk N% used; grow it (docs/operations/data-disk-capacity.md)`. The warning never changes the exit status and never blocks a start. [Grow the disk](data-disk-capacity.md#grow-the-disk) when it first appears; that takes minutes and no downtime.
@@ -75,7 +75,7 @@ CLOUDFLARE_API_TOKEN="op://<vault>/<item>/credential"
 ```sh
 cloudflare_env=operator-config/family/cloudflare.env
 op run --env-file="$cloudflare_env" -- \
-  python3 scripts/minecraft_host.py --deployment operator-config/family/deployment.json start --instance survival
+  python3 scripts/minecraft_host.py --deployment operator-config/family/deployment.json start --instance family
 ```
 
 Any other source works if it sets the variable for that one command rather than exporting it into a long-lived shell.
@@ -102,7 +102,7 @@ The family allowlist and online authentication remain the access control. The ho
 - Missing, failed, incomplete, or timed-out drain evidence forbids EC2 stop. No timeout path force-stops EC2.
 - An AWS transport timeout can leave the requested action in progress. Local timeout does not cancel an already-submitted SSM operation. Inspect status and retry the same lifecycle command; host-side locking, backup state, and the boot-bound drain barrier govern the retry. A host already stopping returns a retry instruction until its transition finishes.
 
-The initial single `survival` instance fits this remote execution envelope with the documented per-instance shutdown and backup bounds. Before deploying additional instances, reassess the total sequential drain duration against the one-hour SSM limit; a larger fleet must not rely on a timeout to finish its backups.
+The single `family` instance fits this remote execution envelope with the documented per-instance shutdown and backup bounds. Before deploying additional instances, reassess the total sequential drain duration against the one-hour SSM limit; a larger fleet must not rely on a timeout to finish its backups.
 
 The operator needs existing access to `ec2:DescribeInstances`, `ec2:StartInstances`, `ec2:StopInstances`, `ssm:DescribeInstanceInformation`, `ssm:SendCommand`, and `ssm:GetCommandInvocation`. The [example operator role](operator-role/permissions.json.example) allows `ssm:SendCommand` only on instances tagged `Project=minecraft`, which the OpenTofu provider's default tags apply to the host, and only with the `AWS-RunShellScript` document. Operators also need `cloudtrail:LookupEvents`, but only for the disk provenance check before a first-setup zero-fill in [infrastructure operations](infrastructure.md#disk-setup-and-readiness-handoff-to-5-and-7); these commands do not use it. DNS updates need no additional AWS permission: the address comes from the same `ec2:DescribeInstances` call. These commands do not create or modify IAM policies. Actual AWS authorization and live start/stop validation remain the deployment work in issue #7.
 
@@ -117,9 +117,3 @@ For data disk usage, they cover the three validated numbers passing through `sta
 These tests contact neither AWS nor Cloudflare and do not establish live backup recovery, live DNS behavior, or a real disk's usage.
 
 AWS interface references: [SendCommand delivery timeout and parameters](https://docs.aws.amazon.com/cli/latest/reference/ssm/send-command.html), [GetCommandInvocation eventual consistency](https://docs.aws.amazon.com/cli/latest/reference/ssm/get-command-invocation.html), and [Run Shell Script execution timeout](https://docs.aws.amazon.com/systems-manager/latest/userguide/documents-command-ssm-plugin-reference.html#aws-runShellScript).
-
-## Opt-in absent-host lifecycle
-
-The version-2 `on-demand-host` handoff can name an absent host. That mode requires the separately reviewed workstation policy (`--lifecycle` and `--policy-sha256`) and replaces EC2 stop/start with guarded OpenTofu session removal/recreation. The protected data disk remains retained. Follow [on-demand host sessions](on-demand-host.md) for migration, private transfer, interruption repair, recurring authority and actual cold-start timing. Existing handoffs retain the commands above.
-
-The separate opt-in `s3-only` mode also removes the session data disk, with exact independently verified recovery selections in its absent-data handoff. Follow [S3-only world operations](s3-only-world.md) for the explicit ownership/protection migration, provenance floor, receipt transfer, restore retries and measured timing. Existing retained-host and on-demand-host modes remain compatible.

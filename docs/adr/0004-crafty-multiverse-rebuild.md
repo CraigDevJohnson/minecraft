@@ -1,6 +1,6 @@
 # ADR 0004: Rebuild on Crafty Controller and Multiverse
 
-Status: Accepted direction, 2026-10-10. Supersedes ADR 0001's Compose runtime and independent-instance layout, and ADR 0003's host sessions. Live since 2026-10-10 (#53, #55). See the [Crafty runbook](../operations/crafty.md).
+Status: Accepted direction, 2026-10-10. Supersedes ADR 0001's Compose runtime and independent-instance layout, and ADR 0003's host sessions. Live since 2026-10-10 (#53, #55). See the [Crafty runbook](../operations/crafty.md). Amended 2026-10-27: #70 retired the S3-only, on-demand and Compose code and runbooks.
 
 On October 10, 2026, Craig chose to rebuild around Crafty Controller and Multiverse instead of keeping the Compose stack with independent `survival` and `creative` instances. He also chose to keep the world on a disk while the server is off, rather than only in S3, and said the existing worlds were test worlds that do not need to be kept. See the [finalized build plan](../superpowers/plans/2026-10-10-finalized-build-plan.md).
 

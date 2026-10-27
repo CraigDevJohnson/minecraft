@@ -8,10 +8,10 @@ The remaining instructions are optional future help and observations, not replac
 
 1. Record the installed content revision, actual client versions, device models, and each intended network in a private copy of the [evidence form](family-device-evidence.md.example). Keep account names, UUIDs, the endpoint, screenshots, original DNS settings and raw diagnostics in ignored `operator-config/family/` or other private storage. Share only aliases and numeric observations in the issue.
 2. Check [current compatibility and release gates](client-compatibility-readiness.md), then [allowlist](allowlist.md) the verified family identities. If Floodgate cannot resolve a gamertag, use a real join attempt or verified Floodgate UUID; do not guess the identity. Sign in to the console and Microsoft accounts and confirm the household's multiplayer permissions and applicable online-service access before changing DNS.
-3. Start `survival` through the [host commands](host-commands.md), including the private Cloudflare token reference when required. Wait for `application: running` and the DNS update before giving devices the private hostname. Use Java TCP port `25565` and Bedrock UDP port `19132` for the current release.
+3. Start the server with the [Server control workflow](cloud-controls.md#the-server-control-workflow) or the `/minecraft` page. Wait for the start to report the server ready and the DNS update before giving devices the hostname. Use Java TCP port `25565` and Bedrock UDP port `19132` for the current release.
 4. Begin with Java and a direct tablet connection. If both fail, investigate server readiness, hostname resolution and protocol compatibility before changing console settings. A hostname can take about a minute to follow a host start; restart a client that retains the previous address.
 
-The current server is Paper 26.2 with ViaVersion for Java 26.3 and Geyser 2.12.1 for Bedrock 26.40–26.60. Recheck [runtime content](runtime-content.md) after any client or content update. The approved dual-transport revision keeps this hostname/port while adding built-in NetherNet signaling on TCP `19132` and WebRTC UDP `19133`. After an approved rollout, confirm the hostname before accepting its first-use trust prompt; WebRTC UDP `19133` is negotiated, not a separate Add Server port. Preserve the Geyser identity through backup/restore and investigate unexpected trust changes. Console routes remain unverified optional guidance. This acceptance does not certify Bedrock 26.60 or resolve the separate technical release gates.
+The current server is Paper 26.2 with ViaVersion for Java 26.3 and Geyser 2.12.1 for Bedrock 26.40–26.60. Recheck [what is pinned](crafty.md#what-is-pinned) after any client or content update. The approved dual-transport revision keeps this hostname/port while adding built-in NetherNet signaling on TCP `19132` and WebRTC UDP `19133`. After an approved rollout, confirm the hostname before accepting its first-use trust prompt; WebRTC UDP `19133` is negotiated, not a separate Add Server port. Preserve the Geyser identity through backup/restore and investigate unexpected trust changes. Console routes remain unverified optional guidance. This acceptance does not certify Bedrock 26.60 or resolve the separate technical release gates.
 
 ## Join on Java and tablet/iPad
 
@@ -58,37 +58,33 @@ For a requested play observation, record the actual peak count and duration; fou
 Collect samples before play, during exploration and after shared play. On the already-running host in the existing private operator session, first confirm readiness:
 
 ```sh
-sudo /usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json status survival
+sudo /usr/local/sbin/minecraft-instance status family
 ```
 
-Then collect the server's tick metrics without changing the session lifecycle:
+Then collect the server's tick metrics through the adapter's `console` action ([Crafty host](crafty.md#send-a-console-command)), which changes nothing about the session:
 
 ```sh
 date -u +%FT%TZ
-sudo docker compose --project-name minecraft-survival \
-  --file /srv/minecraft/instances/survival/runtime/compose.json \
-  exec -T minecraft rcon-cli tps
-sudo docker compose --project-name minecraft-survival \
-  --file /srv/minecraft/instances/survival/runtime/compose.json \
-  exec -T minecraft rcon-cli mspt
+sudo /usr/local/sbin/minecraft-instance console family 'tps'
+sudo /usr/local/sbin/minecraft-instance console family 'mspt'
 ```
 
-Read container memory separately. This selects the same Compose project/service and refuses an ambiguous result:
+Read container memory separately. This selects Crafty's container, which runs the server, and refuses an ambiguous result:
 
 ```sh
-family_container=$(sudo docker ps -q \
-  --filter label=com.docker.compose.project=minecraft-survival \
-  --filter label=com.docker.compose.service=minecraft)
-if [ -n "$family_container" ] && [ "$(printf '%s\n' "$family_container" | wc -l)" -eq 1 ]; then
-  sudo docker stats --no-stream --format '{{.MemUsage}}' "$family_container"
+crafty_container=$(sudo docker ps -q \
+  --filter label=com.docker.compose.project=minecraft-crafty \
+  --filter label=com.docker.compose.service=crafty)
+if [ -n "$crafty_container" ] && [ "$(printf '%s\n' "$crafty_container" | wc -l)" -eq 1 ]; then
+  sudo docker stats --no-stream --format '{{.MemUsage}}' "$crafty_container"
 else
-  printf 'Expected one running survival container; check instance status.\n' >&2
+  printf 'Expected one running Crafty container; check the host.\n' >&2
 fi
 ```
 
-Transcribe only the timestamp, actual player count, TPS intervals, MSPT values and container memory usage/limit into the evidence form. Record lag, rubber-banding, crashes and user experience beside the same timestamps. Container memory includes more than the Java heap. About 20 TPS and tick durations below the 50 ms tick budget are useful observations, but the family experience and peak-session behavior determine whether the hardware is acceptable.
+Transcribe only the timestamp, actual player count, TPS intervals, MSPT values and container memory usage/limit into the evidence form. Record lag, rubber-banding, crashes and user experience beside the same timestamps. Container memory includes Crafty itself as well as the Java heap. About 20 TPS and tick durations below the 50 ms tick budget are useful observations, but the family experience and peak-session behavior determine whether the hardware is acceptable.
 
-These commands use the private generated Compose file without displaying it or putting the RCON secret in arguments. Never use Compose start/stop, edit operation records, or stop EC2 to collect metrics. Current main has no `minecraft_host.py diagnostics` command; the manual samples above are the supported preparation for this runbook.
+The `console` action sends each command through Crafty's loopback API; the server has RCON off. Never start or stop the server by hand, edit the adapter's state records, or stop EC2 to collect metrics. The manual samples above are the supported preparation for this runbook.
 
 If play still stutters, use [Paper's profiling guidance](https://docs.papermc.io/paper/profiling/) to agree on a bounded spark capture during the failure. Paper bundles spark. A profiler report can be uploaded to a third-party viewer, so confirm the capture/report destination before starting it. Collect evidence before deciding on JVM flags, pre-generation, distance changes or a larger paid instance. The October 3 proof of concept already reported stutter during chunk generation; idle TPS does not resolve that observation.
 

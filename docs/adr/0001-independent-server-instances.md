@@ -1,6 +1,6 @@
 # ADR 0001: Independently configured server instances
 
-Status: Accepted, 2026-09-07.
+Status: Accepted, 2026-09-07. Superseded by [ADR 0004](0004-crafty-multiverse-rebuild.md) on 2026-10-10 for the Compose runtime and the independent-instance layout.
 
 The family plans survival, creative, rotating experimental content, and possibly guided adventures. The first delivery remains a single survival instance. Craig approved proceeding with this structure and evaluating specific content when needed.
 

@@ -4,6 +4,8 @@ Approved direction: 2026-09-07. The user chose to build the first survival insta
 
 Owner acceptance update, 2026-10-03: Craig accepted four simultaneous joins (Java on Mac, Bedrock on iPhone and two iPads) and resolved requirements for console or family testing. The [current acceptance record](../../operations/family-device-validation.md) supersedes the earlier mandatory device matrix and representative family play conditions. PlayStation 5 and Switch remain untested, and BedrockConnect is unset. Recovery, deployment and protocol validation remain separate.
 
+Rebuild update, 2026-10-10: [ADR 0004](../../adr/0004-crafty-multiverse-rebuild.md) replaced the Docker Compose runtime and the independent `survival` and `creative` instances below with one Crafty-run `family` instance holding both worlds; the [Crafty host runbook](../../operations/crafty.md) describes the live server, and #70 retired the Compose-era code and runbooks. The shared requirements here otherwise stand.
+
 ## Delivery sequence
 
 | Order | Issue | Dependency |
@@ -25,7 +27,7 @@ Long-term independent creative, experimental, and guided instances follow [ADR 0
 ## Architecture
 
 - OpenTofu provisions AWS infrastructure. Initial region `us-west-2` and `m7g.large` (2 vCPU, 8 GiB ARM64) are deployment defaults to confirm in the live plan.
-- One public subnet, Internet gateway, a stable DNS hostname over a public IPv4 address that changes on each host start ([ADR 0002](../../adr/0002-dynamic-public-ipv4-with-cloudflare-hostname.md)), Java TCP 25565, RakNet UDP 19132, built-in NetherNet signaling TCP 19132 and WebRTC UDP 19133. The approved October 3 dual-transport revision uses first-use trust and same-port public IPv4 advertisement; [runtime content](../../operations/runtime-content.md) records its native ICE egress and verification boundaries. Administration uses Systems Manager; RCON stays local to the host.
+- One public subnet, Internet gateway, a stable DNS hostname over a public IPv4 address that changes on each host start ([ADR 0002](../../adr/0002-dynamic-public-ipv4-with-cloudflare-hostname.md)), Java TCP 25565, RakNet UDP 19132, built-in NetherNet signaling TCP 19132 and WebRTC UDP 19133. The approved October 3 dual-transport revision uses first-use trust and same-port public IPv4 advertisement; [ADR 0008](../../adr/0008-the-adapter-applies-the-pinned-server-content.md) records the pinned content and its transports. Administration uses Systems Manager; RCON stays local to the host.
 - A 20 GiB root disk is replaceable. A separate encrypted gp3 disk sized by `data_volume_size_gib` (5 GiB start, grown online; [#22](https://github.com/CraigDevJohnson/minecraft/issues/22)) retains instance data across compute replacement. Verify its filesystem identity before starting Minecraft; a missing mount must never silently become a new world on the root disk.
 - Docker Compose owns the Paper/Geyser/Floodgate runtime. Pin compatible AMI, image digest, Java, server/plugin builds and content when implementing that runtime.
 - Private, encrypted, versioned S3 storage holds backups. A separate versioned state bucket uses locking. Host credentials are temporary and scoped; operator configuration and credentials stay outside Git.
