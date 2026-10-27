@@ -1066,7 +1066,7 @@ class ContentTests(unittest.TestCase):
         host.failing_downloads = {manifest["artifacts"][2]["url"]}
         with self.assertRaises(crafty.CraftyError):
             adapter.start("family")
-        self.assertEqual((self.server / "plugins" / "Geyser-Spigot.jar").read_bytes(), b"geyser 2.11.3")
+        self.assertEqual((self.server / "plugins" / "Geyser-Spigot.jar").read_bytes(), b"geyser 2.12.1")
         self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.raknet["managed_files"][0]))
         self.assertEqual(list((self.root / "crafty" / "staging").iterdir()), [])
         self.assertEqual(api.log, [])
@@ -1081,7 +1081,7 @@ class ContentTests(unittest.TestCase):
         host.fetch = lambda *args: (fetch(*args), setattr(api, "is_running", True))
         with self.assertRaisesRegex(crafty.CraftyError, "while its content was downloading"):
             adapter.start("family")
-        self.assertEqual((self.server / "plugins" / "Geyser-Spigot.jar").read_bytes(), b"geyser 2.11.3")
+        self.assertEqual((self.server / "plugins" / "Geyser-Spigot.jar").read_bytes(), b"geyser 2.12.1")
         self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.raknet["managed_files"][0]))
         self.assertEqual(api.log, [])
 
@@ -1119,7 +1119,7 @@ class ContentTests(unittest.TestCase):
         self.assertFalse(config_path.is_symlink())
         self.assertEqual(config_path.read_bytes(), crafty._managed_file_bytes(self.manifest["managed_files"][0]))
         self.assertFalse(jar_path.is_symlink())
-        self.assertEqual(jar_path.read_bytes(), b"geyser 2.11.3")
+        self.assertEqual(jar_path.read_bytes(), b"geyser 2.12.1")
 
     def test_a_folder_swapped_for_a_link_fails_the_start(self):
         elsewhere = self.root / "elsewhere"
@@ -2214,7 +2214,7 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(manifest["server_properties"]["online-mode"])
         # Craig approved both Bedrock transports with built-in signaling on 2026-10-03 (#30), activated by #26.
         self.assertEqual(crafty.bedrock_transport(manifest), "both")
-        self.assertEqual(manifest["managed_files"][0]["sha256"], "961fc91c79c38f8e09fd14d1e959b06522ec72b595b933e78fef83563e4b8e42")
+        self.assertEqual(manifest["managed_files"][0]["sha256"], "57054bed2de9fb24327b0b4f07530e704f33d0d3260a40045165d95f28abd035")
 
     def test_managed_file_outside_the_server_folder_is_refused(self):
         manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())

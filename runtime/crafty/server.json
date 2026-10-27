@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "family-2026-10-16-nethernet-both",
+  "revision": "family-2026-10-27-geyser-2121-bedrock-2660",
   "crafty": {
     "image": "registry.gitlab.com/crafty-controller/crafty-4@sha256:7b6e87514259549647e15ceeaf73d238792e6d77e2c79fc744d5badc8d6e997c",
     "version": "4.11.0"
@@ -18,11 +18,11 @@
     },
     {
       "name": "geyser",
-      "version": "2.11.3",
-      "build": 1247,
+      "version": "2.12.1",
+      "build": 1273,
       "path": "plugins/Geyser-Spigot.jar",
-      "url": "https://download.geysermc.org/v2/projects/geyser/versions/2.11.3/builds/1247/downloads/spigot",
-      "sha256": "6fed2d9711e2db3c365508ec10db36d06a0199abd226159d23d57f82662fd7a6"
+      "url": "https://download.geysermc.org/v2/projects/geyser/versions/2.12.1/builds/1273/downloads/spigot",
+      "sha256": "218f57088fd7a147f670c489377da2341fc51f1867b2c36ed181f39c9f379b59"
     },
     {
       "name": "floodgate",
@@ -73,7 +73,7 @@
       "path": "plugins/Geyser-Spigot/config.yml",
       "format": "canonical-json-v1",
       "content": {
-        "config-version": 8,
+        "config-version": 11,
         "bedrock": {
           "address": "0.0.0.0",
           "port": 19132,
@@ -90,7 +90,7 @@
         "log-player-ip-addresses": false,
         "saved-user-logins": []
       },
-      "sha256": "961fc91c79c38f8e09fd14d1e959b06522ec72b595b933e78fef83563e4b8e42"
+      "sha256": "57054bed2de9fb24327b0b4f07530e704f33d0d3260a40045165d95f28abd035"
     }
   ],
   "server_properties": {
