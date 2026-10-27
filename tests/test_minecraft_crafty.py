@@ -1249,12 +1249,18 @@ class ContentTests(unittest.TestCase):
             manifest["managed_files"][0]["content"]["bedrock"].update(change)
             with self.assertRaises(crafty.CraftyError):
                 crafty.bedrock_transport(manifest)
+        # Geyser 2.12 selects NetherNet alone when no transport is named, so RakNet alone names it from version 11.
+        raknet = content_manifest("raknet")
+        self.assertEqual(raknet["managed_files"][0]["content"]["bedrock"]["transport"], "raknet")
+        del raknet["managed_files"][0]["content"]["bedrock"]["transport"]
+        with self.assertRaises(crafty.CraftyError):
+            crafty.bedrock_transport(raknet)
         # Geyser 2.11's version 8 and 2.12's version 11, and no other.
         for version, accepted in ((7, False), (8, True), (9, False), (10, False), (11, True), (12, False)):
             for transport in ("both", "raknet"):
                 with self.subTest(version=version, transport=transport):
                     manifest = content_manifest(transport)
-                    manifest["managed_files"][0]["content"]["config-version"] = version
+                    manifest["managed_files"][0]["content"] = crafty._approved_geyser(version, dual_transport=transport == "both")
                     if accepted:
                         self.assertEqual(crafty.bedrock_transport(manifest), transport)
                     else:

@@ -31,6 +31,8 @@ RELEASE_ASSETS = {"viaversion": "/ViaVersion/ViaVersion/releases/download/{versi
 
 
 def _approved_geyser(config_version: int, *, dual_transport: bool = False, webrtc_port: int = 19133) -> dict:
+    """The Geyser configuration #30 approved: RakNet alone, or both transports with built-in signaling. Geyser 2.12
+    (configuration version 11) selects NetherNet alone when no transport is named, so RakNet alone names it from there."""
     configuration = {
         "config-version": config_version,
         "bedrock": {"address": "0.0.0.0", "port": 19132, "clone-remote-port": False},
@@ -41,6 +43,8 @@ def _approved_geyser(config_version: int, *, dual_transport: bool = False, webrt
     if dual_transport:
         configuration["bedrock"].update({"transport": "both", "webrtc-port": webrtc_port,
                                          "signaling": {"mode": "builtin"}})
+    elif config_version >= 11:
+        configuration["bedrock"]["transport"] = "raknet"
     return configuration
 
 
