@@ -998,17 +998,18 @@ class ContentTests(unittest.TestCase):
         manifest = content_manifest()
         paper = manifest["artifacts"][0]
         self.assertEqual(paper["name"], "paper")
-        paper["version"] = "26.2.1"
+        installed = jar(paper)  # the Paper the server folder holds, from the repository's own pin
+        paper["version"] += ".1"
         paper["sha256"] = hashlib.sha256(jar(paper)).hexdigest()
         adapter, api, host = self.adapter(manifest=manifest)
         with self.assertRaisesRegex(crafty.CraftyError, "archive"):
             adapter.start("family")
-        self.assertEqual((self.server / "paper.jar").read_bytes(), b"paper 26.2")
+        self.assertEqual((self.server / "paper.jar").read_bytes(), installed)
         self.assertEqual(self.changes(host), [("imds",)])
         # Once the last archive holds the folder as it is, the new Paper goes in, before anything else.
         adapter.record("family", backup="complete", fingerprint=crafty.fingerprint(self.server))
         adapter.start("family")
-        self.assertEqual((self.server / "paper.jar").read_bytes(), b"paper 26.2.1")
+        self.assertEqual((self.server / "paper.jar").read_bytes(), jar(paper))
         self.assertEqual(api.actions, ["start_server"])
 
     def test_jars_an_earlier_manifest_pinned_go_and_others_stay(self):
@@ -2214,8 +2215,11 @@ class ManifestTests(unittest.TestCase):
     def test_repository_manifest_is_valid_and_pinned(self):
         manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
         names = {artifact["name"] for artifact in manifest["artifacts"]}
-        self.assertTrue({"paper", "geyser", "floodgate", "viaversion", "multiverse-core", "multiverse-inventories",
+        self.assertTrue({"paper", "geyser", "floodgate", "multiverse-core", "multiverse-inventories",
                          "multiverse-portals", "multiverse-netherportals"} <= names)
+        # ViaVersion left with the Paper 26.3 pin (#27): Geyser 2.12.1 and Floodgate 2.2.5 speak Java 26.3 themselves.
+        self.assertNotIn("viaversion", names)
+        self.assertEqual(manifest["minecraft_version"], "26.3")
         self.assertTrue(manifest["server_properties"]["white-list"])
         self.assertTrue(manifest["server_properties"]["online-mode"])
         # Craig approved both Bedrock transports with built-in signaling on 2026-10-03 (#30), activated by #26.
