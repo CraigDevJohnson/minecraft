@@ -1,6 +1,6 @@
 # ADR 0008: The adapter applies the pinned server content
 
-Status: Accepted, 2026-10-16. Builds the NetherNet design Craig approved on 2026-10-03 (#26, #30) on the Crafty host.
+Status: Accepted, 2026-10-16. Builds the NetherNet design Craig approved on 2026-10-03 (#26, #30) on the Crafty host. Amended 2026-10-29: the live proof is in; an iPhone on Bedrock 26.60 joined over NetherNet and the health run reported `nethernet_signaling_ok: true` (#26).
 
 [`runtime/crafty/server.json`](../../runtime/crafty/server.json) pins the Crafty image, every server jar and Geyser's configuration, but it reached the server only once: `stage-import` built the folder Crafty imported on 2026-10-10. Nothing applied a later change, so a new Geyser pin or the NetherNet configuration would have needed hands on the host, which [ADR 0006](0006-cloud-controls.md) rules out. Bedrock 26.60 drops RakNet, so the family server must offer NetherNet before it reaches the family's devices (#26). NetherNet also needs two more published ports and the host's public address in Geyser's answers, and that address changes on every EC2 start ([ADR 0002](0002-dynamic-public-ipv4-with-cloudflare-hostname.md)).
 
@@ -26,5 +26,5 @@ Status: Accepted, 2026-10-16. Builds the NetherNet design Craig approved on 2026
 - The first start after the Deploy rewrites one file, recreates Crafty's container and changes the launch command. Every later start reads the host's address and changes only the launch command, when the address changed.
 - A Paper change needs one Launcher stop before the start that applies it, if anything ran since the last archive. Rolling Paper back to an older version needs the archive from before the upgrade restored first, because Paper does not load a world a newer Paper saved. Jar downloads come from the pinned hosts over the existing HTTPS egress.
 - The install lines each start and allowlist command carries grow from about 31 KiB to about 39 KiB, and the Go test still keeps them under 48 KiB.
-- Not yet proven live: the container loading Geyser's WebRTC natives on the host, Docker's UDP publishing for ICE, and a Bedrock client joining over NetherNet. Craig's first start after the Deploy, followed by the health workflow, is that proof.
+- Proven live on 2026-10-29 (#26): the container loading Geyser's WebRTC natives on the host, Docker's UDP publishing for ICE, and a Bedrock client joining over NetherNet, at Craig's first start after the Deploy, followed by the health workflow.
 - Rejected: applying content from the Deploy workflow, because a stopped host cannot take it and it would need Run Command from GitHub. Also rejected: a separate SSM document, because it is one more thing to keep in step, and syncing a running server, because Paper and plugins read their jars only at start.
