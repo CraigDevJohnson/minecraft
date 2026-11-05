@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest a change to the family server or how it is run.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This repository is public. Leave out player names, gamertags, email addresses, credentials and private deployment values.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change? Note any cost, security or data-loss trade-off.
+    validations:
+      required: true

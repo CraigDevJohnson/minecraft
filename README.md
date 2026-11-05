@@ -1,8 +1,12 @@
 # Minecraft
 
+[![Validate](https://github.com/CraigDevJohnson/minecraft/actions/workflows/validate.yml/badge.svg)](https://github.com/CraigDevJohnson/minecraft/actions/workflows/validate.yml)
+[![Security](https://github.com/CraigDevJohnson/minecraft/actions/workflows/security.yml/badge.svg)](https://github.com/CraigDevJohnson/minecraft/actions/workflows/security.yml)
+[![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+
 One family Minecraft server, with a survival and a creative world, for up to six Java and Bedrock players. The server runs under Crafty Controller on a retained AWS host ([ADR 0004](docs/adr/0004-crafty-multiverse-rebuild.md)); the Launcher starts, stops, restores and allowlists it from The Lobby, the Server control workflow or `task server:*` ([ADR 0006](docs/adr/0006-cloud-controls.md)). The repository defines the host, its retained storage and state bootstrap, the pinned server content, the host adapter the Launcher carries, and the deploy and health workflows, with reproducible tools and credential-free checks.
 
-Changes go through feature branches and pull requests in this repository; it is not taking outside contributions. Keep credentials, local configuration, and generated server data out of Git.
+Changes go through feature branches and pull requests in this repository; it is not taking outside contributions ([contributing](CONTRIBUTING.md)). Keep credentials, local configuration, and generated server data out of Git.
 
 Report suspected vulnerabilities using the [security policy](SECURITY.md).
 

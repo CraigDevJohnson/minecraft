@@ -1,0 +1,46 @@
+name: Bug report
+description: Something about the family server, the Launcher or a workflow is not working.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This repository is public. Leave out player names, gamertags, email addresses, credentials and private deployment values.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      options:
+        - Launcher or The Lobby's Minecraft page
+        - Server control workflow
+        - Deploy workflow
+        - Health check
+        - Java join
+        - Bedrock join
+        - Crafty host or world data
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Include the workflow run link or the error text when there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start the server from the Launcher
+        2. Join from Bedrock
+        3. See the error
+    validations:
+      required: false

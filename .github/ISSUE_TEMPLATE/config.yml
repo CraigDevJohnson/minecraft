@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security report
+    url: https://github.com/CraigDevJohnson/minecraft/security/policy
+    about: Report a suspected vulnerability privately, never in a public issue.
