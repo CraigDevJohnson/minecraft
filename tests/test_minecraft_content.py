@@ -18,6 +18,15 @@ class ApprovedGeyserConfigurationTests(unittest.TestCase):
         self.assertNotIn("transport", content._approved_geyser(8)["bedrock"])
         self.assertEqual(content._approved_geyser(11)["bedrock"]["transport"], "raknet")
 
+    def test_configuration_version_12_has_no_raknet_alone_and_names_the_family_server(self):
+        with self.assertRaises(ValueError):
+            content._approved_geyser(12)
+        configuration = content._approved_geyser(12, dual_transport=True)
+        self.assertEqual(configuration["bedrock"]["transport"], "both")
+        self.assertEqual(configuration["motd"], {"primary-motd": "Family Minecraft", "secondary-motd": "Family Minecraft",
+                                                 "max-players": 10})
+        self.assertNotIn("motd", content._approved_geyser(11, dual_transport=True))
+
     def test_dual_transport_adds_built_in_signaling_and_the_selected_webrtc_port(self):
         bedrock = content._approved_geyser(11, dual_transport=True)["bedrock"]
         self.assertEqual(bedrock["transport"], "both")
@@ -26,7 +35,8 @@ class ApprovedGeyserConfigurationTests(unittest.TestCase):
         self.assertEqual(content._approved_geyser(11, dual_transport=True, webrtc_port=19134)["bedrock"]["webrtc-port"], 19134)
 
     def test_every_configuration_keeps_floodgate_authentication_and_player_privacy(self):
-        for configuration in (content._approved_geyser(8), content._approved_geyser(11), content._approved_geyser(11, dual_transport=True)):
+        for configuration in (content._approved_geyser(8), content._approved_geyser(11), content._approved_geyser(11, dual_transport=True),
+                              content._approved_geyser(12, dual_transport=True)):
             with self.subTest(configuration=configuration):
                 self.assertEqual(configuration["java"], {"auth-type": "floodgate"})
                 self.assertEqual(configuration["bedrock"]["address"], "0.0.0.0")

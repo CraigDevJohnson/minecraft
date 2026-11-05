@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "family-2026-10-29-paper-263-no-viaversion",
+  "revision": "family-2026-11-05-paper-263-242-geyser-1288",
   "crafty": {
     "image": "registry.gitlab.com/crafty-controller/crafty-4@sha256:7b6e87514259549647e15ceeaf73d238792e6d77e2c79fc744d5badc8d6e997c",
     "version": "4.11.0"
@@ -11,18 +11,18 @@
     {
       "name": "paper",
       "version": "26.3",
-      "build": 227,
+      "build": 242,
       "path": "paper.jar",
-      "url": "https://fill-data.papermc.io/v1/objects/416b7d105b1d0192df4afa4b29d2800d9dbeda092a82fbc5b511248a54adde15/paper-26.3-227.jar",
-      "sha256": "416b7d105b1d0192df4afa4b29d2800d9dbeda092a82fbc5b511248a54adde15"
+      "url": "https://fill-data.papermc.io/v1/objects/fc704a4510a2744bab90a6770336b202038e60333e37f24af8027ee948935d20/paper-26.3-242.jar",
+      "sha256": "fc704a4510a2744bab90a6770336b202038e60333e37f24af8027ee948935d20"
     },
     {
       "name": "geyser",
       "version": "2.12.1",
-      "build": 1273,
+      "build": 1288,
       "path": "plugins/Geyser-Spigot.jar",
-      "url": "https://download.geysermc.org/v2/projects/geyser/versions/2.12.1/builds/1273/downloads/spigot",
-      "sha256": "218f57088fd7a147f670c489377da2341fc51f1867b2c36ed181f39c9f379b59"
+      "url": "https://download.geysermc.org/v2/projects/geyser/versions/2.12.1/builds/1288/downloads/spigot",
+      "sha256": "6c090fac496d8a8b9f51040eb39dc350a5f4e5384e9c76bc0efdd185ba1c9e67"
     },
     {
       "name": "floodgate",
@@ -66,7 +66,7 @@
       "path": "plugins/Geyser-Spigot/config.yml",
       "format": "canonical-json-v1",
       "content": {
-        "config-version": 11,
+        "config-version": 12,
         "bedrock": {
           "address": "0.0.0.0",
           "port": 19132,
@@ -80,10 +80,15 @@
         "java": {
           "auth-type": "floodgate"
         },
+        "motd": {
+          "primary-motd": "Family Minecraft",
+          "secondary-motd": "Family Minecraft",
+          "max-players": 10
+        },
         "log-player-ip-addresses": false,
         "saved-user-logins": []
       },
-      "sha256": "57054bed2de9fb24327b0b4f07530e704f33d0d3260a40045165d95f28abd035"
+      "sha256": "261b82a68cbdb7054e2071ef290027ca360cb5193d381c017796d97d54e4d5df"
     }
   ],
   "server_properties": {

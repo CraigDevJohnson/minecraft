@@ -867,7 +867,10 @@ def content_manifest(transport: str = "both") -> dict:
     for artifact in manifest["artifacts"]:
         artifact["sha256"] = hashlib.sha256(jar(artifact)).hexdigest()
     geyser = manifest["managed_files"][0]
-    geyser["content"] = crafty._approved_geyser(geyser["content"]["config-version"], dual_transport=transport == "both")
+    version = geyser["content"]["config-version"]
+    if transport == "raknet":  # Geyser has no RakNet alone from configuration version 12
+        version = min(version, crafty.RAKNET_ALONE_LAST_VERSION)
+    geyser["content"] = crafty._approved_geyser(version, dual_transport=transport == "both")
     geyser["sha256"] = hashlib.sha256(crafty._managed_file_bytes(geyser)).hexdigest()
     return manifest
 
@@ -1256,9 +1259,11 @@ class ContentTests(unittest.TestCase):
         del raknet["managed_files"][0]["content"]["bedrock"]["transport"]
         with self.assertRaises(crafty.CraftyError):
             crafty.bedrock_transport(raknet)
-        # Geyser 2.11's version 8 and 2.12's version 11, and no other.
-        for version, accepted in ((7, False), (8, True), (9, False), (10, False), (11, True), (12, False)):
+        # Geyser 2.11's version 8 and 2.12's versions 11 and 12, and no other.
+        for version, accepted in ((7, False), (8, True), (9, False), (10, False), (11, True), (12, True), (13, False)):
             for transport in ("both", "raknet"):
+                if transport == "raknet" and version > crafty.RAKNET_ALONE_LAST_VERSION:
+                    continue
                 with self.subTest(version=version, transport=transport):
                     manifest = content_manifest(transport)
                     manifest["managed_files"][0]["content"] = crafty._approved_geyser(version, dual_transport=transport == "both")
@@ -1267,6 +1272,12 @@ class ContentTests(unittest.TestCase):
                     else:
                         with self.assertRaises(crafty.CraftyError):
                             crafty.bedrock_transport(manifest)
+        # Geyser 2.12.1 build 1280 loads "raknet" as NetherNet alone, so version 12 approves no RakNet alone, nor the
+        # version 11 form relabelled 12.
+        raknet = content_manifest("raknet")
+        raknet["managed_files"][0]["content"]["config-version"] = 12
+        with self.assertRaises(crafty.CraftyError):
+            crafty.bedrock_transport(raknet)
 
     def test_the_cli_start_applies_the_manifest_beside_the_adapter_and_fails_without_it(self):
         path = self.root / "operator.json"
@@ -2224,7 +2235,11 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(manifest["server_properties"]["online-mode"])
         # Craig approved both Bedrock transports with built-in signaling on 2026-10-03 (#30), activated by #26.
         self.assertEqual(crafty.bedrock_transport(manifest), "both")
-        self.assertEqual(manifest["managed_files"][0]["sha256"], "57054bed2de9fb24327b0b4f07530e704f33d0d3260a40045165d95f28abd035")
+        self.assertEqual(manifest["managed_files"][0]["sha256"], "261b82a68cbdb7054e2071ef290027ca360cb5193d381c017796d97d54e4d5df")
+        # Bedrock clients list the family server's own name and limit when Geyser cannot read them from Paper.
+        motd = manifest["managed_files"][0]["content"]["motd"]
+        self.assertEqual(motd["primary-motd"], manifest["server_properties"]["motd"])
+        self.assertEqual(motd["max-players"], manifest["server_properties"]["max-players"])
 
     def test_managed_file_outside_the_server_folder_is_refused(self):
         manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())

@@ -49,7 +49,7 @@ A host whose runtime predates this report sends none, and the output then has no
 
 ## Public hostname
 
-The host takes a new public IPv4 address on every start and releases it on stop. A deployment whose handoff has `public_hostname` and `cloudflare_zone_id` keeps one Cloudflare A record on that address. The recovery rehearsal handoff has neither, so these commands make no DNS call for a rehearsal host and behave and print exactly as before.
+The host takes a new public IPv4 address on every start and releases it on stop. A deployment whose handoff has `public_hostname` and `cloudflare_zone_id` keeps one Cloudflare A record on that address. A handoff without them makes no DNS call.
 
 Craig creates the record once: type A, **DNS only** (not proxied), TTL 60. The commands only update that record. They never create or delete one, and they write only two values: the running host's address, or `192.0.2.1`, an [RFC 5737](https://www.rfc-editor.org/rfc/rfc5737) documentation address that is never routed. Each update forces DNS only and TTL 60. An update is refused unless the exact name has exactly one record and that record is type A: a stray AAAA or CNAME would send some clients elsewhere.
 

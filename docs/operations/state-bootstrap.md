@@ -1,6 +1,6 @@
 # State bootstrap and recovery
 
-`infra/state-bootstrap` owns only the state bucket and its protection settings. `infra` owns the replaceable host, data disk, backup bucket, network, and budget. The two roots use separate state object keys. State storage has no dependency on compute. All commands below are **reviewable operator procedures for issue #7**, requiring Craig's concrete account/bootstrap/plan/apply approval. They are not part of `check`, and have not been executed against AWS.
+`infra/state-bootstrap` owns only the state bucket and its protection settings. `infra` owns the replaceable host, data disk, backup bucket, network, and budget. The two roots use separate state object keys. State storage has no dependency on compute. All commands below are **reviewable operator procedures for issue #7**, requiring Craig's concrete account/bootstrap/plan/apply approval. They are not part of `check`. They ran for [#7](https://github.com/CraigDevJohnson/minecraft/issues/7), which closed on 2026-10-02 with the state bucket protected, the migration verified and the encrypted recovery copy stored; repeat them only to rebuild or refresh that copy.
 
 ## Private configuration
 
