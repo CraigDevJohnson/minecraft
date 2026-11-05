@@ -116,18 +116,17 @@ resource "aws_cloudwatch_log_group" "idle_stop" {
 }
 
 resource "aws_lambda_function" "idle_stop" {
-  count                          = local.idle_stop_count
-  function_name                  = local.idle_stop_name
-  description                    = "Drains and stops the Minecraft host after it has been idle."
-  role                           = aws_iam_role.idle_stop[0].arn
-  runtime                        = "provided.al2023"
-  architectures                  = ["arm64"]
-  handler                        = "bootstrap"
-  filename                       = local.idle_stop_package_path
-  source_code_hash               = filebase64sha256(local.idle_stop_package_path)
-  memory_size                    = 128
-  timeout                        = 60
-  reserved_concurrent_executions = 1
+  count            = local.idle_stop_count
+  function_name    = local.idle_stop_name
+  description      = "Drains and stops the Minecraft host after it has been idle."
+  role             = aws_iam_role.idle_stop[0].arn
+  runtime          = "provided.al2023"
+  architectures    = ["arm64"]
+  handler          = "bootstrap"
+  filename         = local.idle_stop_package_path
+  source_code_hash = filebase64sha256(local.idle_stop_package_path)
+  memory_size      = 128
+  timeout          = 60
   environment {
     variables = {
       HOST_ID                    = aws_instance.host.id

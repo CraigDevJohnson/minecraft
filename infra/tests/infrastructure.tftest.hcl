@@ -428,8 +428,8 @@ run "idle_stop_drains_and_stops_only_this_host" {
   }
 
   assert {
-    condition     = aws_lambda_function.idle_stop[0].architectures == tolist(["arm64"]) && aws_lambda_function.idle_stop[0].runtime == "provided.al2023" && aws_lambda_function.idle_stop[0].timeout == 60 && aws_lambda_function.idle_stop[0].reserved_concurrent_executions == 1
-    error_message = "The function must run the Go ARM64 bootstrap with a bounded timeout and serialized invocations."
+    condition     = aws_lambda_function.idle_stop[0].architectures == tolist(["arm64"]) && aws_lambda_function.idle_stop[0].runtime == "provided.al2023" && aws_lambda_function.idle_stop[0].timeout == 60
+    error_message = "The function must run the Go ARM64 bootstrap with a 60-second timeout, well inside its five-minute schedule."
   }
 
   assert {

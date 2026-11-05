@@ -4,7 +4,7 @@ A forgotten running host keeps billing until it is stopped. The optional idle-st
 
 ## How it decides
 
-An EventBridge rule invokes the Go function in [`lambda/idlestop`](../../lambda/idlestop) every five minutes. It supports one configured instance on Java port 25565. Enabling it with multiple instances is rejected because one status ping cannot prove that every instance is idle. Reserved concurrency is one so invocations cannot overwrite each other's progress. Each invocation does one step:
+An EventBridge rule invokes the Go function in [`lambda/idlestop`](../../lambda/idlestop) every five minutes. It supports one configured instance on Java port 25565. Enabling it with multiple instances is rejected because one status ping cannot prove that every instance is idle. Each invocation does one step and ends within its 60-second limit, well inside the five-minute schedule, so invocations do not overlap; the function reserves no concurrency, because a reservation must leave 100 unreserved executions in the account. Each step:
 
 1. Describe the host. If it is not `running`, finish any pending DNS parking and clear the saved state.
 2. When the [launcher](launcher.md) is deployed, read its state. A stop of the launcher's for this launch of the host, inside its 75-minute deadline, means the host is already being drained: record `launcher-stopping`, clear the idle countdown, and do nothing else this time. A restore of the launcher's for this launch, or one recorded before the host started, inside its 45-minute deadline, keeps the game down while an archive goes in place: record `launcher-restoring` the same way. An unreadable launcher state fails the invocation, like a failed ping. A Member's Stop in the second or two between this read and the save of the idle stop's own drain still lets both begin one ([launcher](launcher.md#rare-overlaps)).
@@ -49,7 +49,7 @@ idle_stop = {}
 
 That takes the defaults: 30 idle minutes, the launcher's token SecureString and the launcher's permissions boundary. Set `idle_minutes` (10 to 240) or `permissions_boundary_arn` inside the braces to change them.
 
-The token SecureString already exists for the launcher; never put the token in deployment inputs, environment variables, source, or user data. Before the first plan, an administrator puts the operator role's updated `launcher` inline policy from [`launcher-operator.json.example`](operator-role/launcher-operator.json.example), the same `put-role-policy` as in the [launcher runbook](launcher.md): it adds the EventBridge schedule rule and the function's reserved concurrency to what the operator may manage. The account must leave at least 11 unreserved concurrent executions, because the function reserves one and Lambda keeps 10 unreserved (`aws lambda get-account-settings` shows `UnreservedConcurrentExecutions`).
+The token SecureString already exists for the launcher; never put the token in deployment inputs, environment variables, source, or user data. Before the first plan, an administrator puts the operator role's updated `launcher` inline policy from [`launcher-operator.json.example`](operator-role/launcher-operator.json.example), the same `put-role-policy` as in the [launcher runbook](launcher.md): it adds the EventBridge schedule rule and its target to what the operator may manage.
 
 Plan and apply through the [Deploy workflow](cloud-controls.md#deploys). Expect creates for the function and its role and inline policy, the state parameter, the log group, the schedule rule, its target and permission, the SNS topic and email subscription, and the alarm. Each launcher also changes in place: its inline policy gains `ReadIdleStopProgress` and its `IDLE_STOP_STATE_PARAMETER` setting names the state parameter. Any other change, and any change to the host, data volume, buckets, or network, is a stop condition. After the approved apply, confirm the SNS subscription email so the alarm can reach you.
 
@@ -67,7 +67,7 @@ The function role allows:
 
 It cannot start instances, run commands on other hosts, or read backups. The host role is unchanged.
 
-The operator creates the `<resource_prefix>-idle-stop` role under the launcher's permissions boundary, which already allows everything above for the project's hosts, parameters and logs, so no boundary of its own is needed. The operator role's `launcher` policy covers the function, its role, logs, alarm, SNS topic and state parameter; the version in [`launcher-operator.json.example`](operator-role/launcher-operator.json.example) adds the schedule rule and the reserved concurrency. Nothing is created by local verification.
+The operator creates the `<resource_prefix>-idle-stop` role under the launcher's permissions boundary, which already allows everything above for the project's hosts, parameters and logs, so no boundary of its own is needed. The operator role's `launcher` policy covers the function, its role, logs, alarm, SNS topic and state parameter; the version in [`launcher-operator.json.example`](operator-role/launcher-operator.json.example) adds the schedule rule and its target. Nothing is created by local verification.
 
 ## Cost
 
