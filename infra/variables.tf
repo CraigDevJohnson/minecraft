@@ -205,18 +205,13 @@ variable "budget_notification_email" {
 }
 
 variable "idle_stop" {
-  description = "Optional scheduled function that drains and stops an idle host. package_path is the zip built by `task lambda:package`, unless package_dir names the directory holding it; null deploys none of its resources."
+  description = "Optional scheduled function that drains and stops an idle host. It parks DNS with the launcher's Cloudflare token SecureString. package_path is the zip built by `task lambda:package`, unless package_dir names the directory holding it; permissions_boundary_arn defaults to the launcher's boundary, which allows everything the function does; null deploys none of its resources."
   type = object({
-    package_path                = optional(string)
-    cloudflare_token_secret_arn = string
-    idle_minutes                = optional(number, 30)
-    permissions_boundary_arn    = optional(string)
+    package_path             = optional(string)
+    idle_minutes             = optional(number, 30)
+    permissions_boundary_arn = optional(string)
   })
   default = null
-  validation {
-    condition     = var.idle_stop == null || try(can(regex("^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$", var.idle_stop.cloudflare_token_secret_arn)) && split(":", var.idle_stop.cloudflare_token_secret_arn)[3] == var.region && split(":", var.idle_stop.cloudflare_token_secret_arn)[4] == var.account_id, false)
-    error_message = "idle_stop.cloudflare_token_secret_arn must name an administrator-owned secret in the deployment account and region."
-  }
   validation {
     condition     = var.idle_stop == null || length(var.instance_ids) == 1
     error_message = "idle_stop supports exactly one game instance on Java port 25565."

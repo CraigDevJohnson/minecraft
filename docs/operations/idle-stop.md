@@ -24,7 +24,7 @@ If the drain fails, reports anything other than every instance stopped with a co
 
 Repair the cause using the normal procedure in [host commands](host-commands.md), then stop the host with the launcher ([cloud controls](cloud-controls.md): the Server control workflow's `stop`, or `task server:stop`). The next launch clears the block automatically. To clear it without a restart, overwrite the parameter with `{}`.
 
-DNS parking retrieves the token at runtime from one administrator-owned Secrets Manager secret. Terraform, Lambda environment variables, state, and logs contain only its ARN. The token is sent only to the fixed HTTPS Cloudflare API, redirects are refused, and response bodies and secret errors are excluded from diagnostics. The token needs DNS edit for the existing Cloudflare zone. The adapter requires exactly one matching A record and never creates or deletes DNS records.
+DNS parking reads the Cloudflare token at runtime from the [launcher](launcher.md)'s SecureString, `/<resource_prefix>/launcher/cloudflare-token` or the launcher's `cloudflare_token_parameter`, so there is one copy of the token. OpenTofu, Lambda environment variables, state, and logs contain only its name. The token is sent only to the fixed HTTPS Cloudflare API, redirects are refused, and response bodies and secret errors are excluded from diagnostics. The token needs DNS edit for the existing Cloudflare zone. The adapter requires exactly one matching A record and never creates or deletes DNS records.
 
 A transient `StopInstances` failure after a verified drain is retried on the next invocation without draining again. A single transient AWS error does not trigger the alarm.
 
@@ -44,13 +44,12 @@ An apply restores the rule's configured `ENABLED` state.
 The Deploy workflow builds `idle-stop.zip` itself (`scripts/package_idle_stop.py`, reproducible with the pinned Go toolchain) and names it through `package_dir`, so the private inputs carry no `package_path`. Add to the private `deployment.tfvars` the Deploy workflow reads from its `DEPLOYMENT_TFVARS` secret:
 
 ```hcl
-idle_stop = {
-  idle_minutes = 30
-  cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef"
-}
+idle_stop = {}
 ```
 
-Have an administrator create the token secret in the deployment account and region before enabling the function. Store a plain SecretString API token using the default AWS-managed encryption key; a custom key needs separately reviewed decrypt permissions that this role does not grant. Never put the token in deployment inputs, environment variables, source, or user data.
+That takes the defaults: 30 idle minutes, the launcher's token SecureString and the launcher's permissions boundary. Set `idle_minutes` (10 to 240) or `permissions_boundary_arn` inside the braces to change them.
+
+The token SecureString already exists for the launcher; never put the token in deployment inputs, environment variables, source, or user data. Before the first plan, an administrator puts the operator role's updated `launcher` inline policy from [`launcher-operator.json.example`](operator-role/launcher-operator.json.example), the same `put-role-policy` as in the [launcher runbook](launcher.md): it adds the EventBridge schedule rule and the function's reserved concurrency to what the operator may manage. The account must leave at least 11 unreserved concurrent executions, because the function reserves one and Lambda keeps 10 unreserved (`aws lambda get-account-settings` shows `UnreservedConcurrentExecutions`).
 
 Plan and apply through the [Deploy workflow](cloud-controls.md#deploys). Expect creates for the function and its role and inline policy, the state parameter, the log group, the schedule rule, its target and permission, the SNS topic and email subscription, and the alarm. Each launcher also changes in place: its inline policy gains `ReadIdleStopProgress` and its `IDLE_STOP_STATE_PARAMETER` setting names the state parameter. Any other change, and any change to the host, data volume, buckets, or network, is a stop condition. After the approved apply, confirm the SNS subscription email so the alarm can reach you.
 
@@ -64,15 +63,15 @@ The function role allows:
 - `ssm:GetCommandInvocation`.
 - `ssm:GetParameter` and `ssm:PutParameter` on its own state parameter.
 - Writing to its own log group.
-- `secretsmanager:GetSecretValue` on exactly the configured token secret ARN.
+- `ssm:GetParameter` on the launcher's Cloudflare token SecureString, and `kms:Decrypt` on the AWS managed `aws/ssm` key through SSM only.
 
 It cannot start instances, run commands on other hosts, or read backups. The host role is unchanged.
 
-The operator role needs permissions it does not have for the host-only deployment: Lambda, EventBridge rules, CloudWatch Logs and alarms, SNS, the state parameter, `iam:PassRole` to `lambda.amazonaws.com`, and creating the `<resource_prefix>-idle-stop` role. If the operator role caps the roles it creates with a host permissions boundary, that boundary does not allow EC2 stop or SSM commands. An administrator then provides a separate boundary for this role, and the operator passes it as `idle_stop.permissions_boundary_arn`. Have an administrator review and grant these before the plan. The function boundary must also allow reading this exact token secret. No secret, function, or permission is created by local verification.
+The operator creates the `<resource_prefix>-idle-stop` role under the launcher's permissions boundary, which already allows everything above for the project's hosts, parameters and logs, so no boundary of its own is needed. The operator role's `launcher` policy covers the function, its role, logs, alarm, SNS topic and state parameter; the version in [`launcher-operator.json.example`](operator-role/launcher-operator.json.example) adds the schedule rule and the reserved concurrency. Nothing is created by local verification.
 
 ## Cost
 
-The function adds Lambda invocations, scheduling, logs, an alarm, an SNS email subscription, and a Secrets Manager secret with runtime retrieval. Review [Lambda pricing](https://aws.amazon.com/lambda/pricing/) and [Secrets Manager pricing](https://aws.amazon.com/secrets-manager/pricing/) with the administrator before enabling it. About 8,900 scheduled invocations run each month, plus retries. Token retrieval occurs when parking is required, rather than on every player-count check.
+The function adds Lambda invocations, scheduling, logs, an alarm and an SNS email subscription: about 8,900 scheduled invocations a month, plus retries, a few cents at most ([Lambda pricing](https://aws.amazon.com/lambda/pricing/)). The token is read only when parking is required, rather than on every player-count check. A host left running by mistake costs about 8 cents an hour.
 
 ## Evidence limits
 

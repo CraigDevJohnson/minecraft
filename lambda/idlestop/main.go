@@ -17,7 +17,6 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
-	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
@@ -40,7 +39,7 @@ func loadConfig(getenv func(string) string) (Config, error) {
 		Instances:                instances,
 		PublicHostname:           getenv("PUBLIC_HOSTNAME"),
 		CloudflareZoneID:         getenv("CLOUDFLARE_ZONE_ID"),
-		CloudflareTokenSecretARN: getenv("CLOUDFLARE_TOKEN_SECRET_ARN"),
+		CloudflareTokenParameter: getenv("CLOUDFLARE_TOKEN_PARAMETER"),
 		LauncherStateParameter:   getenv("LAUNCHER_STATE_PARAMETER"),
 	}
 	if cfg.HostID == "" || cfg.StateParameter == "" {
@@ -49,8 +48,8 @@ func loadConfig(getenv func(string) string) (Config, error) {
 	if cfg.LauncherStateParameter != "" && !parameterName.MatchString(cfg.LauncherStateParameter) {
 		return Config{}, errors.New("LAUNCHER_STATE_PARAMETER must be a parameter name")
 	}
-	if len(cfg.PublicHostname) > 253 || !hostname.MatchString(cfg.PublicHostname) || !cloudflareID.MatchString(cfg.CloudflareZoneID) || !secretARN.MatchString(cfg.CloudflareTokenSecretARN) {
-		return Config{}, errors.New("valid hostname, zone and token secret ARN are required")
+	if len(cfg.PublicHostname) > 253 || !hostname.MatchString(cfg.PublicHostname) || !cloudflareID.MatchString(cfg.CloudflareZoneID) || !parameterName.MatchString(cfg.CloudflareTokenParameter) {
+		return Config{}, errors.New("valid hostname, zone and token parameter are required")
 	}
 	return cfg, nil
 }
@@ -64,11 +63,12 @@ func main() {
 	if err != nil {
 		log.Fatal(fmt.Errorf("load AWS configuration: %w", err))
 	}
-	parker := &DNSParker{Hostname: cfg.PublicHostname, ZoneID: cfg.CloudflareZoneID, SecretARN: cfg.CloudflareTokenSecretARN, Secrets: secretsmanager.NewFromConfig(awsConfig), Client: cloudflareClient()}
+	ssmClient := ssm.NewFromConfig(awsConfig)
+	parker := &DNSParker{Hostname: cfg.PublicHostname, ZoneID: cfg.CloudflareZoneID, TokenParameter: cfg.CloudflareTokenParameter, Parameters: ssmClient, Client: cloudflareClient()}
 	controller := &Controller{
 		Config:  cfg,
 		EC2:     ec2.NewFromConfig(awsConfig),
-		SSM:     ssm.NewFromConfig(awsConfig),
+		SSM:     ssmClient,
 		Ping:    PingPlayers,
 		Now:     time.Now,
 		ParkDNS: parker.Park,

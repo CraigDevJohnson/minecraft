@@ -390,7 +390,7 @@ run "idle_stop_drains_and_stops_only_this_host" {
   command = plan
 
   variables {
-    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef" }
+    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder" }
   }
 
   override_resource {
@@ -415,14 +415,15 @@ run "idle_stop_drains_and_stops_only_this_host" {
       jsonencode({ Sid = "DrainOnlyThisHostWithShellDocument", Effect = "Allow", Action = ["ssm:SendCommand"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0123456789abcdef0", "arn:aws:ssm:us-west-2::document/AWS-RunShellScript"] }),
       jsonencode({ Sid = "FollowDrain", Effect = "Allow", Action = ["ssm:GetCommandInvocation"], Resource = "*" }),
       jsonencode({ Sid = "OwnStateOnly", Effect = "Allow", Action = ["ssm:GetParameter", "ssm:PutParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/idle-stop/state"] }),
-      jsonencode({ Sid = "ReadOnlyCloudflareToken", Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = ["arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef"] }),
+      jsonencode({ Sid = "ReadOnlyCloudflareToken", Effect = "Allow", Action = ["ssm:GetParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/cloudflare-token"] }),
+      jsonencode({ Sid = "DecryptTokenThroughSsmOnly", Effect = "Allow", Action = ["kms:Decrypt"], Resource = ["arn:aws:kms:us-west-2:111122223333:key/*"], Condition = { StringEquals = { "kms:ViaService" = "ssm.us-west-2.amazonaws.com" }, "ForAnyValue:StringEquals" = { "kms:ResourceAliases" = "alias/aws/ssm" } } }),
       jsonencode({ Sid = "OwnLogsOnly", Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = ["arn:aws:logs:us-west-2:111122223333:log-group:/aws/lambda/minecraft-test-idle-stop:*"] }),
     ])
     error_message = "The idle stop may stop and drain only this host, and touch only its own state and logs."
   }
 
   assert {
-    condition     = aws_lambda_function.idle_stop[0].environment[0].variables == tomap({ HOST_ID = "i-0123456789abcdef0", STATE_PARAMETER = "/minecraft-test/idle-stop/state", PUBLIC_HOSTNAME = "mc.example.com", CLOUDFLARE_ZONE_ID = "0123456789abcdef0123456789abcdef", CLOUDFLARE_TOKEN_SECRET_ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef", IDLE_MINUTES = "30", INSTANCES = "survival", LAUNCHER_STATE_PARAMETER = "" })
+    condition     = aws_lambda_function.idle_stop[0].environment[0].variables == tomap({ HOST_ID = "i-0123456789abcdef0", STATE_PARAMETER = "/minecraft-test/idle-stop/state", PUBLIC_HOSTNAME = "mc.example.com", CLOUDFLARE_ZONE_ID = "0123456789abcdef0123456789abcdef", CLOUDFLARE_TOKEN_PARAMETER = "/minecraft-test/launcher/cloudflare-token", IDLE_MINUTES = "30", INSTANCES = "survival", LAUNCHER_STATE_PARAMETER = "" })
     error_message = "The function must target this host, its own state, the game endpoint and the configured instances, with a 30-minute default."
   }
 
@@ -450,7 +451,7 @@ run "idle_stop_drains_and_stops_only_this_host" {
 run "reject_idle_stop_threshold_out_of_range" {
   command = plan
   variables {
-    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef", idle_minutes = 5 }
+    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", idle_minutes = 5 }
   }
   expect_failures = [var.idle_stop]
 }
@@ -458,7 +459,7 @@ run "reject_idle_stop_threshold_out_of_range" {
 run "idle_stop_role_takes_a_configured_boundary" {
   command = plan
   variables {
-    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/idle-stop-boundary" }
+    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/idle-stop-boundary" }
   }
 
   assert {
@@ -470,7 +471,7 @@ run "idle_stop_role_takes_a_configured_boundary" {
 run "reject_idle_stop_boundary_in_another_account" {
   command = plan
   variables {
-    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef", permissions_boundary_arn = "arn:aws:iam::444455556666:policy/idle-stop-boundary" }
+    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", permissions_boundary_arn = "arn:aws:iam::444455556666:policy/idle-stop-boundary" }
   }
   expect_failures = [var.idle_stop]
 }
@@ -551,31 +552,7 @@ run "reject_idle_stop_for_multiple_game_instances" {
   command = plan
   variables {
     instance_ids = ["survival", "creative"]
-    idle_stop    = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef" }
-  }
-  expect_failures = [var.idle_stop]
-}
-
-run "reject_idle_stop_secret_in_another_account" {
-  command = plan
-  variables {
-    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:444455556666:secret:cloudflare-token-abcdef" }
-  }
-  expect_failures = [var.idle_stop]
-}
-
-run "reject_idle_stop_secret_in_another_region" {
-  command = plan
-  variables {
-    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:cloudflare-token-abcdef" }
-  }
-  expect_failures = [var.idle_stop]
-}
-
-run "reject_wildcard_idle_stop_secret_permissions" {
-  command = plan
-  variables {
-    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:*" }
+    idle_stop    = { package_path = "tests/fixtures/idle-stop.placeholder" }
   }
   expect_failures = [var.idle_stop]
 }
@@ -660,7 +637,7 @@ run "launcher_sees_the_idle_stop_drain" {
 
   variables {
     launcher  = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, cloudflare_token_parameter = "/minecraft-test/cloudflare/token", server_name = "Our server", permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
-    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef" }
+    idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder" }
   }
 
   assert {
@@ -681,6 +658,16 @@ run "launcher_sees_the_idle_stop_drain" {
   assert {
     condition     = one([for statement in jsondecode(aws_iam_role_policy.idle_stop[0].policy).Statement : statement if statement.Sid == "ReadLauncherProgress"]) == { Sid = "ReadLauncherProgress", Effect = "Allow", Action = ["ssm:GetParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/state"] } && aws_lambda_function.idle_stop[0].environment[0].variables["LAUNCHER_STATE_PARAMETER"] == "/minecraft-test/launcher/state"
     error_message = "The idle stop may only read the launcher's state, never write it, so it stands aside while the launcher stops the host."
+  }
+
+  assert {
+    condition     = aws_lambda_function.idle_stop[0].environment[0].variables["CLOUDFLARE_TOKEN_PARAMETER"] == "/minecraft-test/cloudflare/token" && one([for statement in jsondecode(aws_iam_role_policy.idle_stop[0].policy).Statement : statement.Resource if statement.Sid == "ReadOnlyCloudflareToken"]) == ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/cloudflare/token"]
+    error_message = "The idle stop must read the same Cloudflare token SecureString as the launcher, so there is one copy of the token."
+  }
+
+  assert {
+    condition     = aws_iam_role.idle_stop[0].permissions_boundary == "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary"
+    error_message = "Without a boundary of its own, the idle-stop role takes the launcher's, which the operator may create roles under."
   }
 }
 
@@ -717,7 +704,7 @@ run "ci_deploys_as_the_operator_without_assuming_it" {
     operator_role_arn = null
     package_dir       = "tests/fixtures/packages"
     launcher          = { sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
-    idle_stop         = { cloudflare_token_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:cloudflare-token-abcdef" }
+    idle_stop         = {}
   }
   assert {
     condition     = output.deployment.operator_role_arn == null && aws_lambda_function.launcher["dev"].filename == "tests/fixtures/packages/launcher.zip" && aws_lambda_function.idle_stop[0].filename == "tests/fixtures/packages/idle-stop.zip"

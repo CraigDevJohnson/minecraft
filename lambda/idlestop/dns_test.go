@@ -10,18 +10,24 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 )
 
-type fakeSecrets struct {
-	value string
-	err   error
-	arn   string
+type fakeTokenParameter struct {
+	value     string
+	err       error
+	name      string
+	decrypted bool
 }
 
-func (f *fakeSecrets) GetSecretValue(_ context.Context, input *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
-	f.arn = aws.ToString(input.SecretId)
-	return &secretsmanager.GetSecretValueOutput{SecretString: aws.String(f.value)}, f.err
+func (f *fakeTokenParameter) GetParameter(_ context.Context, input *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
+	f.name = aws.ToString(input.Name)
+	f.decrypted = aws.ToBool(input.WithDecryption)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &ssm.GetParameterOutput{Parameter: &ssmtypes.Parameter{Value: aws.String(f.value)}}, nil
 }
 
 type roundTripper func(*http.Request) (*http.Response, error)
@@ -40,7 +46,7 @@ func dnsReply(result any) *http.Response {
 }
 
 func TestDNSParksOnlyTheExistingRecordWithRuntimeToken(t *testing.T) {
-	secret := &fakeSecrets{value: "fake-private-token"}
+	secret := &fakeTokenParameter{value: "fake-private-token"}
 	calls := 0
 	client := cloudflareClient()
 	client.Transport = roundTripper(func(req *http.Request) (*http.Response, error) {
@@ -63,9 +69,9 @@ func TestDNSParksOnlyTheExistingRecordWithRuntimeToken(t *testing.T) {
 		}
 		return dnsReply(record(parkedAddress)), nil
 	})
-	parker := &DNSParker{Hostname: "mc.example.com", ZoneID: "0123456789abcdef0123456789abcdef", SecretARN: "fake-secret-arn", Secrets: secret, Client: client}
-	if err := parker.Park(context.Background()); err != nil || calls != 2 || secret.arn != "fake-secret-arn" {
-		t.Fatalf("err=%v calls=%d arn=%s", err, calls, secret.arn)
+	parker := &DNSParker{Hostname: "mc.example.com", ZoneID: "0123456789abcdef0123456789abcdef", TokenParameter: "/minecraft/launcher/cloudflare-token", Parameters: secret, Client: client}
+	if err := parker.Park(context.Background()); err != nil || calls != 2 || secret.name != "/minecraft/launcher/cloudflare-token" || !secret.decrypted {
+		t.Fatalf("err=%v calls=%d parameter=%s decrypted=%v", err, calls, secret.name, secret.decrypted)
 	}
 }
 
@@ -74,7 +80,7 @@ func TestDNSRejectsAmbiguousRecordInventory(t *testing.T) {
 		client := cloudflareClient()
 		calls := 0
 		client.Transport = roundTripper(func(*http.Request) (*http.Response, error) { calls++; return dnsReply(records), nil })
-		parker := &DNSParker{Hostname: "mc.example.com", ZoneID: "0123456789abcdef0123456789abcdef", SecretARN: "fake-arn", Secrets: &fakeSecrets{value: "fake-token"}, Client: client}
+		parker := &DNSParker{Hostname: "mc.example.com", ZoneID: "0123456789abcdef0123456789abcdef", TokenParameter: "/minecraft/launcher/cloudflare-token", Parameters: &fakeTokenParameter{value: "fake-token"}, Client: client}
 		if err := parker.Park(context.Background()); err == nil || calls != 1 {
 			t.Fatalf("invalid inventory must forbid a mutation: err=%v calls=%d", err, calls)
 		}
@@ -84,7 +90,7 @@ func TestDNSRejectsAmbiguousRecordInventory(t *testing.T) {
 func TestDNSErrorsNeverExposeResponseOrSecret(t *testing.T) {
 	for _, mode := range []string{"secret", "network", "response", "redirect", "unconfirmed"} {
 		t.Run(mode, func(t *testing.T) {
-			secret := &fakeSecrets{value: "fake-private-token"}
+			secret := &fakeTokenParameter{value: "fake-private-token"}
 			if mode == "secret" {
 				secret.err = errors.New("fake-private-token")
 			}
@@ -109,7 +115,7 @@ func TestDNSErrorsNeverExposeResponseOrSecret(t *testing.T) {
 					return dnsReply(record("192.0.2.10")), nil
 				}
 			})
-			parker := &DNSParker{Hostname: "mc.example.com", ZoneID: "0123456789abcdef0123456789abcdef", SecretARN: "fake-arn", Secrets: secret, Client: client}
+			parker := &DNSParker{Hostname: "mc.example.com", ZoneID: "0123456789abcdef0123456789abcdef", TokenParameter: "/minecraft/launcher/cloudflare-token", Parameters: secret, Client: client}
 			if err := parker.Park(context.Background()); err == nil || strings.Contains(err.Error(), "private") {
 				t.Fatalf("error must be safe: %v", err)
 			}
@@ -125,7 +131,7 @@ func TestAlreadyParkedDNSDoesNotWrite(t *testing.T) {
 		}
 		return dnsReply([]dnsRecord{record(parkedAddress)}), nil
 	})
-	parker := &DNSParker{Hostname: "mc.example.com", ZoneID: "0123456789abcdef0123456789abcdef", SecretARN: "fake-arn", Secrets: &fakeSecrets{value: "fake-token"}, Client: client}
+	parker := &DNSParker{Hostname: "mc.example.com", ZoneID: "0123456789abcdef0123456789abcdef", TokenParameter: "/minecraft/launcher/cloudflare-token", Parameters: &fakeTokenParameter{value: "fake-token"}, Client: client}
 	if err := parker.Park(context.Background()); err != nil {
 		t.Fatal(err)
 	}

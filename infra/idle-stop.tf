@@ -6,6 +6,11 @@ locals {
   idle_stop_state_arn      = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${local.idle_stop_state_name}"
   idle_stop_log_group_name = "/aws/lambda/${local.idle_stop_name}"
   idle_stop_package_path   = var.package_dir == null ? try(var.idle_stop.package_path, null) : "${var.package_dir}/idle-stop.zip"
+  # The same Cloudflare token SecureString the launcher reads, so there is one copy of the token.
+  idle_stop_token_name = coalesce(local.launcher_token_name, "/${var.resource_prefix}/launcher/cloudflare-token")
+  idle_stop_token_arn  = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${local.idle_stop_token_name}"
+  # The launcher's boundary allows everything the function does on this host, so the operator can create its role.
+  idle_stop_boundary = try(coalesce(var.idle_stop.permissions_boundary_arn, try(var.launcher.permissions_boundary_arn, null)), null)
 }
 
 resource "aws_iam_role" "idle_stop" {
@@ -19,7 +24,7 @@ resource "aws_iam_role" "idle_stop" {
       Principal = { Service = "lambda.amazonaws.com" }
     }]
   })
-  permissions_boundary = var.idle_stop.permissions_boundary_arn
+  permissions_boundary = local.idle_stop_boundary
   tags                 = { Purpose = "idle-stop-credentials" }
 }
 
@@ -63,8 +68,19 @@ resource "aws_iam_role_policy" "idle_stop" {
       {
         Sid      = "ReadOnlyCloudflareToken"
         Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [var.idle_stop.cloudflare_token_secret_arn]
+        Action   = ["ssm:GetParameter"]
+        Resource = [local.idle_stop_token_arn]
+      },
+      {
+        # SecureStrings use the AWS managed aws/ssm key; decrypt only that key, only through SSM.
+        Sid      = "DecryptTokenThroughSsmOnly"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = ["arn:aws:kms:${var.region}:${var.account_id}:key/*"]
+        Condition = {
+          StringEquals               = { "kms:ViaService" = "ssm.${var.region}.amazonaws.com" }
+          "ForAnyValue:StringEquals" = { "kms:ResourceAliases" = "alias/aws/ssm" }
+        }
       },
       {
         Sid      = "OwnLogsOnly"
@@ -114,14 +130,14 @@ resource "aws_lambda_function" "idle_stop" {
   reserved_concurrent_executions = 1
   environment {
     variables = {
-      HOST_ID                     = aws_instance.host.id
-      STATE_PARAMETER             = aws_ssm_parameter.idle_stop_state[0].name
-      PUBLIC_HOSTNAME             = var.public_hostname
-      CLOUDFLARE_ZONE_ID          = var.cloudflare_zone_id
-      CLOUDFLARE_TOKEN_SECRET_ARN = var.idle_stop.cloudflare_token_secret_arn
-      IDLE_MINUTES                = tostring(var.idle_stop.idle_minutes)
-      INSTANCES                   = join(",", sort(tolist(var.instance_ids)))
-      LAUNCHER_STATE_PARAMETER    = var.launcher == null ? "" : local.launcher_state_name
+      HOST_ID                    = aws_instance.host.id
+      STATE_PARAMETER            = aws_ssm_parameter.idle_stop_state[0].name
+      PUBLIC_HOSTNAME            = var.public_hostname
+      CLOUDFLARE_ZONE_ID         = var.cloudflare_zone_id
+      CLOUDFLARE_TOKEN_PARAMETER = local.idle_stop_token_name
+      IDLE_MINUTES               = tostring(var.idle_stop.idle_minutes)
+      INSTANCES                  = join(",", sort(tolist(var.instance_ids)))
+      LAUNCHER_STATE_PARAMETER   = var.launcher == null ? "" : local.launcher_state_name
     }
   }
   logging_config {

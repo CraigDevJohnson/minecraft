@@ -17,7 +17,7 @@ Report suspected vulnerabilities using the [security policy](SECURITY.md).
 - [Server operations design](docs/superpowers/specs/2026-09-07-server-operations-design.md)
 - [Infrastructure ownership, setup, costs, and handoff](docs/operations/infrastructure.md)
 - [State bootstrap and recovery](docs/operations/state-bootstrap.md)
-- [Optional idle stop](docs/operations/idle-stop.md)
+- [Idle stop: an empty server stops itself](docs/operations/idle-stop.md)
 - [Launcher backend for The Lobby](docs/operations/launcher.md)
 - [Cloud controls: stop, start, restore, allowlist and deploy from anywhere](docs/operations/cloud-controls.md)
 - [Family device joins, console rollback, and play acceptance](docs/operations/family-device-validation.md)
