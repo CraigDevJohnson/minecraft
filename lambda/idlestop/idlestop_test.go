@@ -527,7 +527,7 @@ func TestUnreadableLauncherStateFailsTheCheckWithoutDraining(t *testing.T) {
 }
 
 func TestLoadConfig(t *testing.T) {
-	env := map[string]string{"HOST_ID": hostID, "STATE_PARAMETER": "/p", "IDLE_MINUTES": "30", "INSTANCES": "survival", "PUBLIC_HOSTNAME": "mc.example.com", "CLOUDFLARE_ZONE_ID": "0123456789abcdef0123456789abcdef", "CLOUDFLARE_TOKEN_SECRET_ARN": "arn:aws:secretsmanager:us-west-2:111122223333:secret:token-abcdef"}
+	env := map[string]string{"HOST_ID": hostID, "STATE_PARAMETER": "/p", "IDLE_MINUTES": "30", "INSTANCES": "survival", "PUBLIC_HOSTNAME": "mc.example.com", "CLOUDFLARE_ZONE_ID": "0123456789abcdef0123456789abcdef", "CLOUDFLARE_TOKEN_PARAMETER": "/p/launcher/cloudflare-token"}
 	cfg, err := loadConfig(func(key string) string { return env[key] })
 	if err != nil || cfg.IdleAfter != 30*time.Minute || len(cfg.Instances) != 1 {
 		t.Fatalf("cfg=%+v err=%v", cfg, err)
@@ -543,7 +543,7 @@ func TestLoadConfig(t *testing.T) {
 	if cfg, err := loadConfig(func(key string) string { return withLauncher[key] }); err != nil || cfg.LauncherStateParameter != "/p/launcher/state" {
 		t.Fatalf("cfg=%+v err=%v", cfg, err)
 	}
-	for key, value := range map[string]string{"IDLE_MINUTES": "5", "INSTANCES": "Survival", "HOST_ID": "", "CLOUDFLARE_TOKEN_SECRET_ARN": "", "PUBLIC_HOSTNAME": "https://mc.example.com", "CLOUDFLARE_ZONE_ID": "bad", "LAUNCHER_STATE_PARAMETER": "launcher state"} {
+	for key, value := range map[string]string{"IDLE_MINUTES": "5", "INSTANCES": "Survival", "HOST_ID": "", "CLOUDFLARE_TOKEN_PARAMETER": "", "PUBLIC_HOSTNAME": "https://mc.example.com", "CLOUDFLARE_ZONE_ID": "bad", "LAUNCHER_STATE_PARAMETER": "launcher state"} {
 		broken := map[string]string{}
 		for k, v := range env {
 			broken[k] = v
@@ -553,14 +553,14 @@ func TestLoadConfig(t *testing.T) {
 			t.Fatalf("%s=%q must be rejected", key, value)
 		}
 	}
-	for _, arn := range []string{"arn:aws:secretsmanager:us-west-2:111122223333:secret:*", "arn:aws:secretsmanager:us-west-2:111122223333:secret:token"} {
+	for _, name := range []string{"p/launcher/cloudflare-token", "/p/launcher/*", "arn:aws:ssm:us-west-2:111122223333:parameter/p/launcher/cloudflare-token"} {
 		if _, err := loadConfig(func(key string) string {
-			if key == "CLOUDFLARE_TOKEN_SECRET_ARN" {
-				return arn
+			if key == "CLOUDFLARE_TOKEN_PARAMETER" {
+				return name
 			}
 			return env[key]
 		}); err == nil {
-			t.Fatal("wildcard or partial secret ARN must be rejected")
+			t.Fatalf("token parameter %q must be rejected: it must be a plain parameter name", name)
 		}
 	}
 	if _, err := ParseInstances("survival,survival"); err == nil {

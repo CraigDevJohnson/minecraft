@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
 const cloudflareAPI = "https://api.cloudflare.com/client/v4"
@@ -20,19 +20,19 @@ const parkedAddress = "192.0.2.1"
 
 var cloudflareID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 var hostname = regexp.MustCompile(`^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
-var secretARN = regexp.MustCompile(`^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$`)
 var apiToken = regexp.MustCompile(`^[\x21-\x7e]+$`)
 
-type SecretsAPI interface {
-	GetSecretValue(context.Context, *secretsmanager.GetSecretValueInput, ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error)
+// TokenParameterAPI reads one SecureString: the launcher's Cloudflare token, the only way the function sees it.
+type TokenParameterAPI interface {
+	GetParameter(context.Context, *ssm.GetParameterInput, ...func(*ssm.Options)) (*ssm.GetParameterOutput, error)
 }
 
 type DNSParker struct {
-	Hostname  string
-	ZoneID    string
-	SecretARN string
-	Secrets   SecretsAPI
-	Client    *http.Client
+	Hostname       string
+	ZoneID         string
+	TokenParameter string
+	Parameters     TokenParameterAPI
+	Client         *http.Client
 }
 
 type dnsRecord struct {
@@ -51,11 +51,11 @@ func cloudflareClient() *http.Client {
 }
 
 func (p *DNSParker) Park(ctx context.Context) error {
-	secret, err := p.Secrets.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{SecretId: aws.String(p.SecretARN)})
-	if err != nil || secret == nil || !apiToken.MatchString(aws.ToString(secret.SecretString)) {
+	parameter, err := p.Parameters.GetParameter(ctx, &ssm.GetParameterInput{Name: aws.String(p.TokenParameter), WithDecryption: aws.Bool(true)})
+	if err != nil || parameter == nil || parameter.Parameter == nil || !apiToken.MatchString(aws.ToString(parameter.Parameter.Value)) {
 		return errors.New("cannot retrieve the Cloudflare token")
 	}
-	token := aws.ToString(secret.SecretString)
+	token := aws.ToString(parameter.Parameter.Value)
 	path := "/zones/" + p.ZoneID + "/dns_records"
 	var records []dnsRecord
 	if err := p.request(ctx, token, "GET", path+"?"+url.Values{"name.exact": {p.Hostname}}.Encode(), nil, &records); err != nil {

@@ -70,7 +70,7 @@ type Config struct {
 	Instances                []string
 	PublicHostname           string
 	CloudflareZoneID         string
-	CloudflareTokenSecretARN string
+	CloudflareTokenParameter string
 	// LauncherStateParameter names the launcher's state, when the launcher is deployed, so a stop or restore
 	// it is running is left to it; empty, the idle stop never looks.
 	LauncherStateParameter string
