@@ -1,10 +1,10 @@
 # Unattended read-only Minecraft health
 
-Status: reviewed and approved for publication and exact IAM activation. Deployed OIDC and GitHub-to-AWS validation remain separate evidence; passing local tests do not establish them.
+Status: active. The role and workflow went live in October 2026, and runs such as [40831180366](https://github.com/CraigDevJohnson/minecraft/actions/runs/40831180366) and [41188216657](https://github.com/CraigDevJohnson/minecraft/actions/runs/41188216657) proved the GitHub-to-AWS path. The activation steps below are the record of how it was set up.
 
 ## First scope
 
-The proposed [workflow](../../.github/workflows/minecraft-health.yml) supports only manual dispatch from `main`. After activation, an agent can dispatch one check through the existing authorized GitHub connection without interactive AWS SSO. It has no recurring schedule, push trigger or PR trigger. The job has a five-minute timeout, uses the existing GitHub-hosted Ubuntu runner pattern, and requests 900-second AWS credentials through the existing GitHub OIDC provider. It provisions no worker or infrastructure. The repository is public, and standard GitHub-hosted runners are free for public repositories.
+The [workflow](../../.github/workflows/minecraft-health.yml) supports only manual dispatch from `main`. An agent can dispatch one check through the existing authorized GitHub connection without interactive AWS SSO. It has no recurring schedule, push trigger or PR trigger. The job has a five-minute timeout, uses the existing GitHub-hosted Ubuntu runner pattern, and requests 900-second AWS credentials through the existing GitHub OIDC provider. It provisions no worker or infrastructure. The repository is public, and standard GitHub-hosted runners are free for public repositories.
 
 Standard GitHub-hosted runners cost nothing for this public repository; see [official pricing](https://docs.github.com/en/billing/reference/actions-runner-pricing) and [billing rules](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
 
