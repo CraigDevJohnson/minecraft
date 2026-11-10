@@ -46,19 +46,3 @@ jobs:
         env:
           MODRINTH_VERSION: ${{ inputs.modrinth_version }}
         run: python3 scripts/check_pins.py --modrinth-version "$MODRINTH_VERSION"
-      # Temporary, for this pull request only: learn the pins of the mods it is about to add.
-      - name: Resolve the starter mods
-        if: ${{ github.event_name == 'pull_request' }}
-        run: |
-          cat > "$RUNNER_TEMP/starter.json" <<'STARTER'
-          {"mods": {
-            "fawe": {"url": "https://github.com/IntellectualSites/FastAsyncWorldEdit/releases/download/2.16.2/FastAsyncWorldEdit-Paper-2.16.2.jar", "sha256": "a74219fa660c782c9779e6740867cde395a24d1381dcba6c4f8022e4e9c3f87d"},
-            "auraskills": {"url": "https://github.com/Archy-X/AuraSkills/releases/download/2.4.0/AuraSkills-2.4.0.jar", "sha256": "de54cbd2e33d65e8b1704751ae4121ed2f5b466ba89c63a1aadf3a3e629d6a40"},
-            "decentholograms": {"url": "https://github.com/DecentSoftware-eu/DecentHolograms/releases/download/2.10.2/DecentHolograms-2.10.2.jar", "sha256": "99bc2b7b0af7846cc45d5800ea0acfae6846d479e048b8e5995c5afa53df27be"},
-            "gsit": {"url": "https://github.com/Gecolay/GSit/releases/download/3.8.0/GSit-3.8.0.jar", "sha256": "669820b42047eac476ec754142c682dca4f396e0b84f178e7959cf236e64cc4a"}
-          }}
-          STARTER
-          status=0
-          python3 scripts/check_pins.py --manifest "$RUNNER_TEMP/starter.json" || status=1
-          python3 scripts/check_pins.py --modrinth-version MtwPHMAS || status=1
-          exit "$status"
