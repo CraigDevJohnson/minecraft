@@ -2,7 +2,7 @@
 
 Each world runs on an EC2 host of its own ([ADR 0009](../adr/0009-one-host-per-world.md)). [`runtime/crafty/server.json`](../../runtime/crafty/server.json) names the worlds and pins everything they run, and OpenTofu makes one host per world from that list. This runbook covers what the file holds, how to add a mod or a world, the first Deploy, the proof run for a world, and the record of the old family host's retirement. Day-to-day starts and stops are in [cloud controls](cloud-controls.md).
 
-Status: built and checked offline on 2026-11-10. Nothing below has run against AWS, Cloudflare or a real host yet. Record each world's proof run on its issue when it is done.
+Status: the first Deploy ran on 2026-11-11 (Deploy runs 42983546750 and 42985094870), and the same day every world started, passed the Minecraft health check (run 42993895587), took Java and Bedrock joins, idle-stopped with an archive and a parked address, started again, and switched a mod off and on. Which plugins each server loaded has not been read on a host.
 
 ## What the pinned content holds
 
