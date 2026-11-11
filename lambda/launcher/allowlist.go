@@ -208,8 +208,8 @@ func (w *Worlds) whitelist(ctx context.Context) ([]byte, error) {
 }
 
 // allowlistLive runs the adapter's allowlist action on this world's server while its game answers, and reports
-// what became of the server's own list: updated or unchanged. A world in any other state is left alone and
-// reports nothing, since its next start carries the list.
+// what became of the server's own list: updated or unchanged. A starting world fails the change; a world in
+// any other state is left alone and reports nothing, since its next start carries the list.
 func (l *Launcher) allowlistLive(ctx context.Context, request AllowlistRequest, player Player, byName bool) (string, error) {
 	h, err := l.describeHost(ctx)
 	if err != nil {
@@ -220,8 +220,16 @@ func (l *Launcher) allowlistLive(ctx context.Context, request AllowlistRequest, 
 		return "", err
 	}
 	state, err := l.decide(ctx, h, session)
-	if err != nil || state != Ready {
+	switch {
+	case err != nil:
 		return "", err
+	case state == Starting && session.Phase != Restoring:
+		// The start already holds the list it read, and nothing sends a later change once the game answers, so
+		// the change fails here: the record keeps it, and asking again once the world is ready finishes it. A
+		// restore's start has not read the list yet.
+		return "", errors.New("the world is starting; ask again once it is ready")
+	case state != Ready:
+		return "", nil
 	}
 	id, err := l.sendCommand(ctx, l.onHost(allowlistScript(l.Config.Instance, request, player)), "minecraft launcher allowlist", allowlistExecutionSeconds)
 	if err != nil {

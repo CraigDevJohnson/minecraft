@@ -480,6 +480,16 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual((folder / "level.dat").read_bytes(), b"first session")
         self.assertEqual(host.clock - started, 10)
 
+    def test_restore_refuses_a_world_host_that_has_not_finished_its_first_start(self):
+        self.played_server()
+        self.marker.unlink()
+        api = FakeAPI(running=False)
+        adapter, host = self.adapter(api)
+        key = "instances/family/crafty/20261010T180000Z.tar.gz"
+        with self.assertRaisesRegex(crafty.CraftyError, "^start the world once before restoring an archive into it$"):
+            adapter.restore("family", key)
+        self.assertNotIn(("s3", "cp-down", key), host.calls)
+
     def test_restore_refuses_while_the_host_is_draining(self):
         folder = self.played_server()
         api = FakeAPI(running=True)

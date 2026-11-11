@@ -779,6 +779,10 @@ class Adapter:
         under crafty/staging: until the next restore when its world is in S3, otherwise until the operator
         deletes it."""
         with self.lifecycle():
+            # A host that has not finished its first start has no server to restore into, and that start would
+            # then restore the newest archive over this one.
+            if not self.provisioned(instance).exists():
+                raise CraftyError("start the world once before restoring an archive into it")
             return self._restore(instance, key)
 
     def _restore(self, instance: str, key: str) -> dict:

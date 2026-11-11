@@ -94,7 +94,7 @@ Run it once for each world after the first Deploy, and again for a new world. Us
 8. **Switch a mod** off with `mod-off`, stop and start the world, and check with `plugins` that it is gone; then switch it back on the same way.
 9. **Leave it empty** for the idle time once, and see the idle stop take it to `stopped` with a new archive.
 
-The restore on a rebuilt host is proven the first time a Deploy replaces the world hosts, which any change to the first-boot script causes: after that apply, start the world and check that it is the world from its last stop, not a fresh one.
+Restoring an older archive by hand needs a world host that has finished its first start; on a rebuilt host, start the world once (it restores the newest archive), stop it, then restore. The restore on a rebuilt host is proven the first time a Deploy replaces the world hosts, which any change to the first-boot script causes: after that apply, start the world and check that it is the world from its last stop, not a fresh one.
 
 ## Retire the family host
 

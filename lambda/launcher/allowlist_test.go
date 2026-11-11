@@ -142,9 +142,6 @@ func TestAllowlistWorksWithEveryWorldStopped(t *testing.T) {
 			r.ec2.states, r.ec2.launch = []ec2types.InstanceStateName{ec2types.InstanceStateNameRunning}, now.Add(-time.Hour)
 		}},
 		{"stopping", func(r *rig) { r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameStopping} }},
-		{"starting", func(r *rig) {
-			r.ec2.states, r.ec2.launch = []ec2types.InstanceStateName{ec2types.InstanceStateNameRunning}, now.Add(-time.Minute)
-		}},
 	} {
 		w := newWorlds(t)
 		tc.rig(w.survival)
@@ -337,6 +334,21 @@ func TestAllowlistReportsAnAdapterRefusalOrAnUnconfirmedChange(t *testing.T) {
 		if err != nil || result.Allowlist != "updated" || !slices.Equal(result.Worlds, []string{"survival"}) {
 			t.Fatalf("%s, asked again: result=%+v err=%v", tc.name, result, err)
 		}
+	}
+}
+
+func TestAllowlistFailsWhileAWorldIsStartingButKeepsTheChange(t *testing.T) {
+	w := newWorlds(t)
+	w.survival.ec2.states, w.survival.ec2.launch = []ec2types.InstanceStateName{ec2types.InstanceStateNameRunning}, now.Add(-time.Minute)
+	_, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "bedrock", Name: "Sample Player"})
+	if err == nil || !strings.Contains(err.Error(), "world survival: the world is starting") {
+		t.Fatalf("err=%v; the start already read its list, so the change must fail until the world is ready", err)
+	}
+	if w.record() != `[{"edition":"bedrock","uuid":"00000000-0000-0000-0009-01eed05d1009","name":"Sample Player"}]` {
+		t.Fatalf("record %s; the record keeps the change so asking again finishes it", w.record())
+	}
+	if len(w.survival.ssm.commands) != 0 {
+		t.Fatal("nothing may be sent to a world whose game does not answer yet")
 	}
 }
 
