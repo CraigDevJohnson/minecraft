@@ -25,7 +25,7 @@ MODRINTH_API = "https://api.modrinth.com/v2/version/"
 MODRINTH_FILES = "cdn.modrinth.com"
 MODRINTH_VERSION = re.compile(r"[A-Za-z0-9]{8}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
-# The largest pinned file is Paper, under 100 MiB. Nothing a pin names should come near this.
+# The largest pinned file is a mod of a few MiB. Nothing a pin names should come near this.
 DOWNLOAD_LIMIT = 512 * 1024 * 1024
 
 

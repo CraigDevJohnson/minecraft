@@ -56,7 +56,7 @@ class FakeAPI:
         self.no_servers = False
         self.console = []
         self.on_console = None
-        self.command = "java -Xms1024M -Xmx5120M -jar paper.jar nogui"
+        self.command = "java -Xms1024M -Xmx5120M -jar fabric-server-launch.jar nogui"
         self.patches = []
         self.keeps_patches = True
         self.log = []
@@ -908,16 +908,17 @@ def jar(artifact: dict) -> bytes:
 def pinned_manifest(transport: str = "both") -> dict:
     """The repository's manifest with stand-in jars, and the Geyser configuration of transport."""
     manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())
-    for artifact in manifest["base"]["artifacts"]:
-        artifact["sha256"] = hashlib.sha256(jar(artifact)).hexdigest()
+    for loader in manifest["loaders"].values():
+        for artifact in loader["artifacts"]:
+            artifact["sha256"] = hashlib.sha256(jar(artifact)).hexdigest()
+        geyser = loader["managed_files"][0]
+        version = geyser["content"]["config-version"]
+        if transport == "raknet":  # Geyser has no RakNet alone from configuration version 12
+            version = min(version, crafty.RAKNET_ALONE_LAST_VERSION)
+        geyser["content"] = crafty._approved_geyser(version, dual_transport=transport == "both")
+        geyser["sha256"] = hashlib.sha256(crafty._managed_file_bytes(geyser)).hexdigest()
     for name, mod in manifest["mods"].items():  # a world's content names a mod's jar by the mod's id
         mod["sha256"] = hashlib.sha256(jar(mod | {"name": name})).hexdigest()
-    geyser = manifest["base"]["managed_files"][0]
-    version = geyser["content"]["config-version"]
-    if transport == "raknet":  # Geyser has no RakNet alone from configuration version 12
-        version = min(version, crafty.RAKNET_ALONE_LAST_VERSION)
-    geyser["content"] = crafty._approved_geyser(version, dual_transport=transport == "both")
-    geyser["sha256"] = hashlib.sha256(crafty._managed_file_bytes(geyser)).hexdigest()
     return manifest
 
 
@@ -952,7 +953,9 @@ INSTALLED_COMPOSE = """services:
         max-file: "3"
 """
 
-ADVERTISED = "java -Xms1024M -Xmx5120M -DgeyserAdvertiseAddresses=34.212.10.20 -jar paper.jar nogui"
+# Where the Fabric worlds' Geyser keeps its configuration; the tests run the survival world.
+GEYSER_CONFIG = "config/Geyser-Fabric/config.yml"
+ADVERTISED = "java -Xms1024M -Xmx5120M -DgeyserAdvertiseAddresses=34.212.10.20 -jar fabric-server-launch.jar nogui"
 
 
 class ContentTests(unittest.TestCase):
@@ -968,10 +971,11 @@ class ContentTests(unittest.TestCase):
         self.raknet = content_manifest("raknet")
         # The server as the first import staged it: the RakNet release's jars, with the survival world's mods, and
         # its Geyser configuration.
-        (self.server / "plugins" / "Geyser-Spigot").mkdir(parents=True)
+        (self.server / "mods").mkdir()
+        (self.server / "config" / "Geyser-Fabric").mkdir(parents=True)
         for artifact in self.raknet["artifacts"]:
             (self.server / artifact["path"]).write_bytes(jar(artifact))
-        (self.server / crafty.GEYSER_CONFIG).write_bytes(crafty._managed_file_bytes(self.raknet["managed_files"][0]))
+        (self.server / GEYSER_CONFIG).write_bytes(crafty._managed_file_bytes(self.raknet["managed_files"][0]))
         provisioned(self.root)
 
     def tearDown(self):
@@ -987,7 +991,7 @@ class ContentTests(unittest.TestCase):
         return crafty.Adapter(config(self.root), api, host, manifest or self.manifest), api, host
 
     def geyser_config(self) -> bytes:
-        return (self.server / crafty.GEYSER_CONFIG).read_bytes()
+        return (self.server / GEYSER_CONFIG).read_bytes()
 
     def changes(self, host) -> list:
         return [call for call in host.calls if call[0] in ("imds", "fetch", "compose")]
@@ -1009,17 +1013,17 @@ class ContentTests(unittest.TestCase):
         adapter, api, host = self.adapter()
         adapter.start("family")
         api.is_running = False
-        config_inode = (self.server / crafty.GEYSER_CONFIG).stat().st_ino
+        config_inode = (self.server / GEYSER_CONFIG).stat().st_ino
         host.calls.clear()
         api.log.clear()
         adapter.start("family")
         self.assertEqual(self.changes(host), [("imds",)])
         self.assertEqual(api.log, ["start_server"])
-        self.assertEqual((self.server / crafty.GEYSER_CONFIG).stat().st_ino, config_inode)
+        self.assertEqual((self.server / GEYSER_CONFIG).stat().st_ino, config_inode)
 
     def test_a_new_address_replaces_the_one_crafty_launched_with(self):
         api = FakeAPI()
-        api.command = "java -Xms1024M -Xmx5120M -DgeyserAdvertiseAddresses=34.1.2.3 -jar paper.jar nogui"
+        api.command = "java -Xms1024M -Xmx5120M -DgeyserAdvertiseAddresses=34.1.2.3 -jar fabric-server-launch.jar nogui"
         adapter, api, host = self.adapter(api)
         adapter.start("family")
         self.assertEqual(api.command, ADVERTISED)
@@ -1039,7 +1043,7 @@ class ContentTests(unittest.TestCase):
         api.command = ADVERTISED
         adapter, api, host = self.adapter(api, self.raknet)
         adapter.start("family")
-        self.assertEqual(api.command, "java -Xms1024M -Xmx5120M -jar paper.jar nogui")
+        self.assertEqual(api.command, "java -Xms1024M -Xmx5120M -jar fabric-server-launch.jar nogui")
         # The installed Compose file is the one wanted; Docker confirms it once, and the record says so after.
         self.assertEqual(self.changes(host), [("compose", "up")])
         api.is_running = False
@@ -1047,22 +1051,22 @@ class ContentTests(unittest.TestCase):
         adapter.start("family")
         self.assertEqual(self.changes(host), [])
 
-    def test_a_new_paper_needs_the_world_archived_as_it_is(self):
+    def test_a_new_loader_needs_the_world_archived_as_it_is(self):
         manifest = content_manifest()
         paper = manifest["artifacts"][0]
-        self.assertEqual(paper["name"], "paper")
-        installed = jar(paper)  # the Paper the server folder holds, from the repository's own pin
+        self.assertEqual(paper["name"], "fabric")
+        installed = jar(paper)  # the loader the server folder holds, from the repository's own pin
         paper["version"] += ".1"
         paper["sha256"] = hashlib.sha256(jar(paper)).hexdigest()
         adapter, api, host = self.adapter(manifest=manifest)
         with self.assertRaisesRegex(crafty.CraftyError, "archive"):
             adapter.start("family")
-        self.assertEqual((self.server / "paper.jar").read_bytes(), installed)
+        self.assertEqual((self.server / "fabric-server-launch.jar").read_bytes(), installed)
         self.assertEqual(self.changes(host), [("imds",)])
-        # Once the last archive holds the folder as it is, the new Paper goes in, before anything else.
+        # Once the last archive holds the folder as it is, the new loader goes in, before anything else.
         adapter.record("family", backup="complete", fingerprint=crafty.fingerprint(self.server))
         adapter.start("family")
-        self.assertEqual((self.server / "paper.jar").read_bytes(), jar(paper))
+        self.assertEqual((self.server / "fabric-server-launch.jar").read_bytes(), jar(paper))
         self.assertEqual(api.actions, ["start_server"])
 
     def test_plugin_jars_this_start_does_not_want_go_and_everything_else_stays(self):
@@ -1071,25 +1075,25 @@ class ContentTests(unittest.TestCase):
         outside = self.root / "outside.jar"
         outside.write_bytes(b"keep")
         for name in ("Old.jar", "Unmanaged.jar"):
-            (self.server / "plugins" / name).write_bytes(b"old")
-        (self.server / "plugins" / "Linked.jar").symlink_to(outside)
+            (self.server / "mods" / name).write_bytes(b"old")
+        (self.server / "mods" / "Linked.jar").symlink_to(outside)
         # A plugin's data folder, even one named like a jar, a file that is no jar, and jars deeper down stay.
-        (self.server / "plugins" / "Old").mkdir()
-        (self.server / "plugins" / "Old" / "data.yml").write_bytes(b"data")
-        (self.server / "plugins" / "Folder.jar").mkdir()
-        (self.server / "plugins" / "notes.txt").write_bytes(b"notes")
-        (self.server / "plugins" / "Old" / "library.jar").write_bytes(b"library")
+        (self.server / "mods" / "Old").mkdir()
+        (self.server / "mods" / "Old" / "data.yml").write_bytes(b"data")
+        (self.server / "mods" / "Folder.jar").mkdir()
+        (self.server / "mods" / "notes.txt").write_bytes(b"notes")
+        (self.server / "mods" / "Old" / "library.jar").write_bytes(b"library")
         (self.server / "extra.jar").write_bytes(b"extra")
         adapter, api, host = self.adapter()
         adapter.start("family")
-        self.assertEqual(sorted(path.name for path in (self.server / "plugins").iterdir() if path.suffix == ".jar" and path.is_file()),
+        self.assertEqual(sorted(path.name for path in (self.server / "mods").iterdir() if path.suffix == ".jar" and path.is_file()),
                          sorted(Path(artifact["path"]).name for artifact in self.manifest["artifacts"][1:]))
-        self.assertFalse(os.path.lexists(self.server / "plugins" / "Linked.jar"))
+        self.assertFalse(os.path.lexists(self.server / "mods" / "Linked.jar"))
         self.assertEqual(outside.read_bytes(), b"keep")
-        self.assertEqual((self.server / "plugins" / "Old" / "data.yml").read_bytes(), b"data")
-        self.assertTrue((self.server / "plugins" / "Folder.jar").is_dir())
-        self.assertEqual((self.server / "plugins" / "notes.txt").read_bytes(), b"notes")
-        self.assertEqual((self.server / "plugins" / "Old" / "library.jar").read_bytes(), b"library")
+        self.assertEqual((self.server / "mods" / "Old" / "data.yml").read_bytes(), b"data")
+        self.assertTrue((self.server / "mods" / "Folder.jar").is_dir())
+        self.assertEqual((self.server / "mods" / "notes.txt").read_bytes(), b"notes")
+        self.assertEqual((self.server / "mods" / "Old" / "library.jar").read_bytes(), b"library")
         self.assertEqual((self.server / "extra.jar").read_bytes(), b"extra")
         self.assertEqual(self.changes(host), [("imds",), ("compose", "write"), ("compose", "up")])  # nothing was downloaded
 
@@ -1097,33 +1101,33 @@ class ContentTests(unittest.TestCase):
         adapter, api, host = self.adapter(manifest=self.raknet)
         adapter.start("family")
         manifest = content_manifest("raknet")
-        gsit = next(artifact for artifact in manifest["artifacts"] if artifact["name"] == "gsit")
-        old = self.server / gsit["path"]
-        gsit["path"], gsit["version"] = "plugins/GSit-3.9.0.jar", "3.9.0"
-        gsit["sha256"] = hashlib.sha256(jar(gsit)).hexdigest()
+        sit = next(artifact for artifact in manifest["artifacts"] if artifact["name"] == "sit")
+        old = self.server / sit["path"]
+        sit["path"], sit["version"] = "mods/sit-2.1.0.jar", "2.1.0"
+        sit["sha256"] = hashlib.sha256(jar(sit)).hexdigest()
         api.is_running = False
         adapter, api, host = self.adapter(api, manifest)
         adapter.start("family")
         self.assertFalse(old.exists())
-        self.assertEqual((self.server / "plugins" / "GSit-3.9.0.jar").read_bytes(), jar(gsit))
+        self.assertEqual((self.server / "mods" / "sit-2.1.0.jar").read_bytes(), jar(sit))
 
     def test_a_mod_that_is_off_loses_its_jar_and_keeps_its_files(self):
-        claims = self.server / "plugins" / "GriefPreventionData" / "config.yml"
+        claims = self.server / "config" / "flan" / "flan_config.json"
         jars = {artifact["name"]: self.server / artifact["path"] for artifact in self.manifest["artifacts"]}
         adapter, api, host = self.adapter()
         adapter.start("family")
         # The survival world's defaults: both of its mods, and the claims configuration GriefPrevention ships.
         managed = {item["path"]: item for item in self.manifest["managed_files"]}
-        self.assertEqual(claims.read_bytes(), crafty._managed_file_bytes(managed["plugins/GriefPreventionData/config.yml"]))
-        self.assertTrue(jars["griefprevention"].exists() and jars["gsit"].exists())
+        self.assertEqual(claims.read_bytes(), crafty._managed_file_bytes(managed["config/flan/flan_config.json"]))
+        self.assertTrue(jars["flan"].exists() and jars["sit"].exists())
         # Switched off, the mod's jar goes; the file it shipped and the data it wrote stay for when it is on again.
         (claims.parent / "ClaimData").mkdir()
         claims.write_bytes(b"edited while the mod was off")
         api.is_running = False
-        adapter, api, host = self.adapter(api, content_manifest(mods=["gsit"]))
+        adapter, api, host = self.adapter(api, content_manifest(mods=["sit"]))
         adapter.start("family")
-        self.assertFalse(jars["griefprevention"].exists())
-        self.assertTrue(jars["gsit"].exists())
+        self.assertFalse(jars["flan"].exists())
+        self.assertTrue(jars["sit"].exists())
         self.assertEqual(claims.read_bytes(), b"edited while the mod was off")
         self.assertTrue((claims.parent / "ClaimData").is_dir())
         self.assertEqual([call for call in host.calls if call[0] == "fetch"], [])
@@ -1131,29 +1135,29 @@ class ContentTests(unittest.TestCase):
         api.is_running = False
         adapter, api, host = self.adapter(api)
         adapter.start("family")
-        self.assertEqual(jars["griefprevention"].read_bytes(), b"griefprevention 16.18.8")
-        self.assertEqual(claims.read_bytes(), crafty._managed_file_bytes(managed["plugins/GriefPreventionData/config.yml"]))
+        self.assertEqual(jars["flan"].read_bytes(), b"flan 1.12.8.b")
+        self.assertEqual(claims.read_bytes(), crafty._managed_file_bytes(managed["config/flan/flan_config.json"]))
         self.assertEqual([call for call in host.calls if call[0] == "fetch"],
-                         [("fetch", "https://cdn.modrinth.com/data/O4o4mKaq/versions/MtwPHMAS/GriefPrevention.jar")])
+                         [("fetch", "https://cdn.modrinth.com/data/Si383TIH/versions/dAcEMeRZ/flan-26.3-1.12.8.b-fabric.jar")])
 
     def test_a_failed_download_changes_nothing_in_the_server_folder(self):
         manifest = content_manifest()
         for artifact in manifest["artifacts"]:
-            if artifact["name"] in ("geyser", "floodgate"):
+            if artifact["name"] in ("geyser-fabric", "floodgate-fabric"):
                 artifact["version"] += "-next"
                 artifact["sha256"] = hashlib.sha256(jar(artifact)).hexdigest()
         adapter, api, host = self.adapter(manifest=manifest)
         host.failing_downloads = {manifest["artifacts"][2]["url"]}
         with self.assertRaises(crafty.CraftyError):
             adapter.start("family")
-        self.assertEqual((self.server / "plugins" / "Geyser-Spigot.jar").read_bytes(), b"geyser 2.12.1")
+        self.assertEqual((self.server / "mods" / "Geyser-Fabric.jar").read_bytes(), b"geyser-fabric 2.12.1")
         self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.raknet["managed_files"][0]))
         self.assertEqual(list((self.root / "crafty" / "staging").iterdir()), [])
         self.assertEqual(api.log, [])
 
     def test_a_server_started_during_the_downloads_keeps_its_jars(self):
         manifest = content_manifest()
-        geyser = manifest["artifacts"][1]
+        geyser = manifest["artifacts"][2]
         geyser["version"] += "-next"
         geyser["sha256"] = hashlib.sha256(jar(geyser)).hexdigest()
         adapter, api, host = self.adapter(manifest=manifest)
@@ -1161,7 +1165,7 @@ class ContentTests(unittest.TestCase):
         host.fetch = lambda *args: (fetch(*args), setattr(api, "is_running", True))
         with self.assertRaisesRegex(crafty.CraftyError, "while its content was downloading"):
             adapter.start("family")
-        self.assertEqual((self.server / "plugins" / "Geyser-Spigot.jar").read_bytes(), b"geyser 2.12.1")
+        self.assertEqual((self.server / "mods" / "Geyser-Fabric.jar").read_bytes(), b"geyser-fabric 2.12.1")
         self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.raknet["managed_files"][0]))
         self.assertEqual(api.log, [])
 
@@ -1173,7 +1177,7 @@ class ContentTests(unittest.TestCase):
 
     def test_downloaded_jars_keep_the_owner_and_mode_of_the_ones_they_replace(self):
         manifest = content_manifest()
-        geyser = manifest["artifacts"][1]
+        geyser = manifest["artifacts"][2]
         geyser["version"] += "-next"
         geyser["sha256"] = hashlib.sha256(jar(geyser)).hexdigest()
         target = self.server / geyser["path"]
@@ -1182,15 +1186,15 @@ class ContentTests(unittest.TestCase):
         adapter.start("family")
         self.assertEqual(target.read_bytes(), jar(geyser))
         self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o664)
-        self.assertEqual([name for name in os.listdir(self.server / "plugins") if name.startswith(".")], [])
+        self.assertEqual([name for name in os.listdir(self.server / "mods") if name.startswith(".")], [])
 
     def test_a_link_planted_for_a_pinned_file_is_replaced_never_followed(self):
         outside = self.root / "outside"
         outside.write_bytes(b"keep")
-        config_path = self.server / crafty.GEYSER_CONFIG
+        config_path = self.server / GEYSER_CONFIG
         config_path.unlink()
         config_path.symlink_to(outside)
-        jar_path = self.server / "plugins" / "Geyser-Spigot.jar"
+        jar_path = self.server / "mods" / "Geyser-Fabric.jar"
         jar_path.unlink()
         jar_path.symlink_to(outside)
         adapter, api, host = self.adapter()
@@ -1199,16 +1203,16 @@ class ContentTests(unittest.TestCase):
         self.assertFalse(config_path.is_symlink())
         self.assertEqual(config_path.read_bytes(), crafty._managed_file_bytes(self.manifest["managed_files"][0]))
         self.assertFalse(jar_path.is_symlink())
-        self.assertEqual(jar_path.read_bytes(), b"geyser 2.12.1")
+        self.assertEqual(jar_path.read_bytes(), b"geyser-fabric 2.12.1")
 
     def test_a_folder_swapped_for_a_link_fails_the_start(self):
         elsewhere = self.root / "elsewhere"
-        (self.server / "plugins").rename(elsewhere)
-        (self.server / "plugins").symlink_to(elsewhere)
+        (self.server / "config").rename(elsewhere)
+        (self.server / "config").symlink_to(elsewhere)
         adapter, api, host = self.adapter()
         with self.assertRaises(crafty.CraftyError):
             adapter.start("family")
-        self.assertEqual((elsewhere / "Geyser-Spigot" / "config.yml").read_bytes(),
+        self.assertEqual((elsewhere / "Geyser-Fabric" / "config.yml").read_bytes(),
                          crafty._managed_file_bytes(self.raknet["managed_files"][0]))
         self.assertEqual(api.log, [])
 
@@ -1251,12 +1255,12 @@ class ContentTests(unittest.TestCase):
 
     def test_staged_downloads_never_take_their_names_from_the_manifest(self):
         manifest = content_manifest()
-        geyser = manifest["artifacts"][1]
+        geyser = manifest["artifacts"][2]
         geyser["name"], geyser["version"] = "../../escape", geyser["version"] + "-next"
         geyser["sha256"] = hashlib.sha256(jar(geyser)).hexdigest()
         adapter, api, host = self.adapter(manifest=manifest)
         adapter.start("family")
-        self.assertEqual((self.server / "plugins" / "Geyser-Spigot.jar").read_bytes(), jar(geyser))
+        self.assertEqual((self.server / "mods" / "Geyser-Fabric.jar").read_bytes(), jar(geyser))
         self.assertFalse((self.root / "crafty" / "escape.jar").exists())
         self.assertEqual([path.name for path in self.root.rglob("escape*")], [])
 
@@ -1308,15 +1312,88 @@ class ContentTests(unittest.TestCase):
         self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.raknet["managed_files"][0]))
 
     def test_the_launch_command_carries_one_address_before_the_jar(self):
-        self.assertEqual(crafty.launch_command("java -Xmx5G -jar paper.jar nogui", "34.212.10.20"),
-                         "java -Xmx5G -DgeyserAdvertiseAddresses=34.212.10.20 -jar paper.jar nogui")
-        self.assertEqual(crafty.launch_command("java -jar paper.jar -DgeyserAdvertiseAddresses=1.1.1.1 nogui", None),
-                         "java -jar paper.jar nogui")
-        for command, address in (("java paper.jar", "34.212.10.20"), ("java -jar a.jar -jar b.jar", "34.212.10.20"),
-                                 ("java -jar paper.jar", "10.0.0.5"), ("java -jar paper.jar", "203.0.113.9"),
-                                 ("java -jar paper.jar", "34.212.10.20 -Devil=1")):
+        self.assertEqual(crafty.launch_command("java -Xmx5G -jar fabric-server-launch.jar nogui", "34.212.10.20"),
+                         "java -Xmx5G -DgeyserAdvertiseAddresses=34.212.10.20 -jar fabric-server-launch.jar nogui")
+        self.assertEqual(crafty.launch_command("java -jar fabric-server-launch.jar -DgeyserAdvertiseAddresses=1.1.1.1 nogui", None),
+                         "java -jar fabric-server-launch.jar nogui")
+        for command, address in (("java fabric-server-launch.jar", "34.212.10.20"), ("java -jar a.jar -jar b.jar", "34.212.10.20"),
+                                 ("java -jar fabric-server-launch.jar", "10.0.0.5"), ("java -jar fabric-server-launch.jar", "203.0.113.9"),
+                                 ("java -jar fabric-server-launch.jar", "34.212.10.20 -Devil=1")):
             with self.assertRaises(crafty.CraftyError):
                 crafty.launch_command(command, address)
+
+    def test_the_launch_command_launches_the_loader_s_jar(self):
+        self.assertEqual(crafty.launch_command("java -Xmx5G -jar paper.jar nogui", "34.212.10.20", "server.jar"),
+                         "java -Xmx5G -DgeyserAdvertiseAddresses=34.212.10.20 -jar server.jar nogui")
+        self.assertEqual(crafty.launch_command("java -Xmx5G -jar paper.jar nogui", None, "fabric-server-launch.jar"),
+                         "java -Xmx5G -jar fabric-server-launch.jar nogui")
+        for command in ("java paper.jar nogui", "java -jar a.jar -jar b.jar"):
+            with self.assertRaises(crafty.CraftyError):
+                crafty.launch_command(command, None, "server.jar")
+
+    def test_a_server_imported_as_paper_moves_to_its_loader_and_keeps_its_world(self):
+        # The server as Paper left it: its jar and plugins, no loader jar, and Crafty still launching Paper.
+        (self.server / "fabric-server-launch.jar").unlink()
+        (self.server / "paper.jar").write_bytes(b"paper")
+        (self.server / "plugins").mkdir()
+        (self.server / "plugins" / "Old.jar").write_bytes(b"old")
+        # Paper keeps the world's seed, game rules and weather with its overworld; the game keeps them in data/.
+        papers = self.server / "survival" / "dimensions" / "minecraft" / "overworld" / "data" / "minecraft"
+        papers.mkdir(parents=True)
+        for name in crafty.PAPER_WORLD_FILES:
+            (papers / name).write_bytes(name.encode())
+        (papers / "raids.dat").write_bytes(b"the overworld's own")
+        games = self.server / "survival" / "data" / "minecraft"
+        games.mkdir(parents=True)
+        (games / "weather.dat").write_bytes(b"already here")
+        api = FakeAPI()
+        api.command = "java -Xms1024M -Xmx5120M -jar paper.jar nogui"
+        adapter, api, host = self.adapter(api)
+        # The loader is new to the folder, so the last archive must hold the world as Paper left it.
+        with self.assertRaisesRegex(crafty.CraftyError, "archive"):
+            adapter.start("family")
+        self.assertFalse((self.server / "fabric-server-launch.jar").exists())
+        self.assertTrue((papers / "world_gen_settings.dat").exists())
+        adapter.record("family", backup="complete", fingerprint=crafty.fingerprint(self.server))
+        adapter.start("family")
+        self.assertEqual(api.command, "java -Xms1024M -Xmx5120M -DgeyserAdvertiseAddresses=34.212.10.20 -jar fabric-server-launch.jar nogui")
+        self.assertEqual((self.server / "fabric-server-launch.jar").read_bytes(), jar(self.manifest["artifacts"][0]))
+        # Nothing of Paper's is removed, and the world is where it was.
+        self.assertEqual((self.server / "survival" / "level.dat").read_bytes(), b"world")
+        self.assertEqual((self.server / "plugins" / "Old.jar").read_bytes(), b"old")
+        self.assertEqual((self.server / "paper.jar").read_bytes(), b"paper")
+        # The world's settings are where the loader reads them; a file already there and the overworld's own stay.
+        for name in crafty.PAPER_WORLD_FILES:
+            self.assertEqual((games / name).read_bytes(), b"already here" if name == "weather.dat" else name.encode())
+        self.assertEqual(sorted(path.name for path in papers.iterdir()), ["raids.dat", "weather.dat"])
+
+    def test_a_new_neoforge_installer_runs_at_the_next_launch(self):
+        manifest = content_manifest(world="adventure")
+        (self.server / "run.sh").write_bytes(b"an earlier install")
+        adapter, api, host = self.adapter(manifest=manifest)
+        adapter.record("family", backup="complete", fingerprint=crafty.fingerprint(self.server))
+        adapter.start("family")
+        # The starter jar runs the installer beside it only when it finds no run script.
+        self.assertFalse((self.server / "run.sh").exists())
+        self.assertLess(api.log.index("patch"), api.log.index("start_server"))
+        self.assertEqual((self.server / "neoforge-installer.jar").read_bytes(), jar(manifest["artifacts"][1]))
+        self.assertEqual(api.command, "java -Xms1024M -Xmx5120M -DgeyserAdvertiseAddresses=34.212.10.20 -jar server.jar nogui")
+        self.assertEqual(sorted(path.name for path in (self.server / "mods").iterdir()),
+                         ["Floodgate-Neoforge.jar", "Geyser-NeoForge.jar", "flan-26.3-1.12.8-neoforge.jar"])
+        # With the installer in place, the run script it wrote stays.
+        (self.server / "run.sh").write_bytes(b"this install")
+        api.is_running = False
+        adapter, api, host = self.adapter(api, manifest)
+        adapter.start("family")
+        self.assertEqual((self.server / "run.sh").read_bytes(), b"this install")
+
+    def test_neoforge_s_log_lines_answer_the_allowlist_commands(self):
+        prefix = "[11Nov2026 12:00:00.000] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: "
+        self.assertTrue(crafty.RELOADED.fullmatch(prefix + "Reloaded the whitelist"))
+        self.assertEqual(crafty.LISTED.fullmatch(prefix + "There are 2 whitelisted player(s): A, B").group(1), "A, B")
+        # Chat and /say put their sender after the colon, on NeoForge as elsewhere.
+        for said in ("<Sample_Java> Reloaded the whitelist", "[Sample_Java] Reloaded the whitelist"):
+            self.assertIsNone(crafty.RELOADED.fullmatch(prefix + said))
 
     def test_a_raknet_compose_file_is_the_one_installed_before_nethernet(self):
         self.assertEqual(crafty.render_compose(self.raknet, Path("/srv/minecraft/crafty")), INSTALLED_COMPOSE.encode())
@@ -1379,23 +1456,23 @@ class ContentTests(unittest.TestCase):
         self.assertEqual(api.log, ["patch", "start_server"])
 
     def plugins(self) -> list:
-        return sorted(path.name for path in (self.server / "plugins").iterdir() if path.suffix == ".jar")
+        return sorted(path.name for path in (self.server / "mods").iterdir() if path.suffix == ".jar")
 
     def test_the_cli_start_turns_on_the_mods_it_names_and_the_world_s_defaults_without_any(self):
-        base = ["Geyser-Spigot.jar", "floodgate-spigot.jar"]
-        code, _, api, host = self.cli_start("--mods=gsit")
-        self.assertEqual((code, self.plugins()), (0, sorted([*base, "GSit-3.8.0.jar"])))
+        base = ["Floodgate-Fabric.jar", "Geyser-Fabric.jar", "fabric-api.jar"]
+        code, _, api, host = self.cli_start("--mods=sit")
+        self.assertEqual((code, self.plugins()), (0, sorted([*base, "sit-2.0.0.jar"])))
         code, _, api, host = self.cli_start("--mods=")
         self.assertEqual((code, self.plugins()), (0, base))
         self.assertEqual([call for call in host.calls if call[0] == "fetch"], [])
         # Without the flag, the mods the manifest turns on for the world: both come back.
         code, _, api, host = self.cli_start()
-        self.assertEqual((code, self.plugins()), (0, sorted([*base, "GSit-3.8.0.jar", "GriefPrevention-16.18.8.jar"])))
+        self.assertEqual((code, self.plugins()), (0, sorted([*base, "sit-2.0.0.jar", "flan-26.3-1.12.8.b-fabric.jar"])))
 
     def test_the_cli_start_refuses_a_mod_or_a_world_the_manifest_does_not_list_before_anything_changes(self):
-        (self.server / "plugins" / "Old.jar").write_bytes(b"old")
+        (self.server / "mods" / "Old.jar").write_bytes(b"old")
         # FastAsyncWorldEdit is in the catalog, but the manifest lists it for the creative world only.
-        for flag in ("--mods=gsit,fawe", "--mods=no-such-mod", "--mods=../gsit"):
+        for flag in ("--mods=sit,fawe", "--mods=no-such-mod", "--mods=../sit"):
             with self.subTest(flag=flag):
                 code, answer, api, host = self.cli_start(flag)
                 self.assertEqual((code, answer), (1, {"error": "the pinned server content lists no such mod for this world"}))
@@ -1403,7 +1480,7 @@ class ContentTests(unittest.TestCase):
         code, answer, api, host = self.cli_start(world="family")
         self.assertEqual((code, answer), (1, {"error": "the pinned server content has no such world"}))
         self.assertEqual((host.calls, api.log), ([], []))
-        self.assertTrue((self.server / "plugins" / "Old.jar").exists())
+        self.assertTrue((self.server / "mods" / "Old.jar").exists())
 
     def allowlist_file(self, value, mode=0o600) -> Path:
         path = self.root / "allowlist.json"
@@ -2237,8 +2314,8 @@ class ProvisionTests(unittest.TestCase):
 
     def archive(self, stamp: str, level: bytes, verified: bool = True) -> str:
         """Store an archive of the world as an earlier host's stop stored it, with a jar no start wants any more."""
-        members = [member("survival", tarfile.DIRTYPE), member("survival/paper.jar", data=b"an older paper"),
-                   member("survival/plugins", tarfile.DIRTYPE), member("survival/plugins/Old.jar", data=b"old"),
+        members = [member("survival", tarfile.DIRTYPE), member("survival/fabric-server-launch.jar", data=b"an older paper"),
+                   member("survival/plugins", tarfile.DIRTYPE), member("survival/mods/Old.jar", data=b"old"),
                    member("survival/survival", tarfile.DIRTYPE), member("survival/survival/level.dat", data=level)]
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
@@ -2290,8 +2367,8 @@ class ProvisionTests(unittest.TestCase):
         properties = (self.server / "server.properties").read_text()
         self.assertIn("level-name=survival\n", properties)
         self.assertIn("white-list=true\n", properties)
-        self.assertEqual(sorted(path.name for path in (self.server / "plugins").glob("*.jar")),
-                         ["GSit-3.8.0.jar", "Geyser-Spigot.jar", "GriefPrevention-16.18.8.jar", "floodgate-spigot.jar"])
+        self.assertEqual(sorted(path.name for path in (self.server / "mods").glob("*.jar")),
+                         ["Floodgate-Fabric.jar", "Geyser-Fabric.jar", "fabric-api.jar", "flan-26.3-1.12.8.b-fabric.jar", "sit-2.0.0.jar"])
         # S3 held nothing for the world, so nothing was restored, and the marker went last.
         self.assertFalse(any(call[:2] == ("s3", "cp-down") for call in self.host.calls))
         self.assertEqual(json.loads(self.marker.read_text()), {"restored": None})
@@ -2315,8 +2392,8 @@ class ProvisionTests(unittest.TestCase):
         # The server created for the import held no play, so nothing of it is kept.
         self.assertEqual(list((self.root / "crafty" / "staging").iterdir()), [])
         # The start then applies the pinned content and the allowlist to the restored world as to any other.
-        self.assertEqual((self.server / "paper.jar").read_bytes(), jar(self.manifest["artifacts"][0]))
-        self.assertFalse((self.server / "plugins" / "Old.jar").exists())
+        self.assertEqual((self.server / "fabric-server-launch.jar").read_bytes(), jar(self.manifest["artifacts"][0]))
+        self.assertFalse((self.server / "mods" / "Old.jar").exists())
         self.assertEqual(json.loads((self.server / "whitelist.json").read_text()), [JAVA])
         self.assertEqual(len(self.api.created), 1)
 
@@ -2613,46 +2690,61 @@ class ConfigTests(unittest.TestCase):
 
 
 MANIFEST = ROOT / "runtime" / "crafty" / "server.json"
+# All an import asks of a world's content: the jar Crafty launches.
+LAUNCHES = {"jar": "fabric-server-launch.jar"}
 
 
 class ManifestTests(unittest.TestCase):
     def test_repository_manifest_is_valid_and_pinned(self):
         manifest = crafty.load_manifest(MANIFEST)
-        self.assertEqual({artifact["name"] for artifact in manifest["base"]["artifacts"]}, {"paper", "geyser", "floodgate"})
+        fabric, neoforge = manifest["loaders"]["fabric"], manifest["loaders"]["neoforge"]
+        self.assertEqual([artifact["name"] for artifact in fabric["artifacts"]], ["fabric", "fabric-api", "geyser-fabric", "floodgate-fabric"])
+        self.assertEqual([artifact["name"] for artifact in neoforge["artifacts"]],
+                         ["neoforge-starter", "neoforge", "geyser-neoforge", "floodgate-neoforge"])
+        # The starter runs the first file beside it whose name ends in installer.jar.
+        self.assertEqual((fabric["jar"], neoforge["jar"], neoforge["artifacts"][1]["path"]),
+                         ("fabric-server-launch.jar", "server.jar", "neoforge-installer.jar"))
         self.assertEqual(manifest["minecraft_version"], "26.3")
         self.assertTrue(manifest["base"]["server_properties"]["white-list"])
         self.assertTrue(manifest["base"]["server_properties"]["online-mode"])
         # Craig approved both Bedrock transports with built-in signaling on 2026-10-03 (#30), activated by #26.
-        self.assertEqual(crafty.bedrock_transport(manifest["base"]), "both")
-        self.assertEqual(manifest["base"]["managed_files"][0]["sha256"], "261b82a68cbdb7054e2071ef290027ca360cb5193d381c017796d97d54e4d5df")
-        # Bedrock clients list the family server's own limit when Geyser cannot read it from Paper.
-        self.assertEqual(manifest["base"]["managed_files"][0]["content"]["motd"]["max-players"], manifest["base"]["server_properties"]["max-players"])
+        for loader in (fabric, neoforge):
+            self.assertEqual(crafty.bedrock_transport(loader), "both")
+            self.assertEqual(loader["managed_files"][0]["sha256"], "261b82a68cbdb7054e2071ef290027ca360cb5193d381c017796d97d54e4d5df")
+            # Bedrock clients list the family server's own limit when Geyser cannot read it from the server.
+            self.assertEqual(loader["managed_files"][0]["content"]["motd"]["max-players"], manifest["base"]["server_properties"]["max-players"])
+        self.assertEqual([world["loader"] for world in manifest["worlds"]], ["fabric", "fabric", "neoforge"])
         # One host per world (ADR 0009): the first is the default, and each has the mods it starts with.
         self.assertEqual([world["id"] for world in manifest["worlds"]], ["survival", "creative", "adventure"])
         self.assertEqual({world["id"]: sorted(name for name, default in world["mods"].items() if default) for world in manifest["worlds"]},
-                         {"survival": ["griefprevention", "gsit"], "creative": ["fawe", "griefprevention"],
-                          "adventure": ["auraskills", "decentholograms", "griefprevention"]})
+                         {"survival": ["flan", "sit"], "creative": ["flan", "worldedit"], "adventure": ["flan-neoforge"]})
         # Multiverse left with the worlds' own hosts.
         self.assertFalse([path for path in (mod["path"] for mod in manifest["mods"].values()) if "multiverse" in path.lower()])
 
     def test_a_world_s_content_is_the_base_with_its_own_properties_and_the_mods_that_are_on(self):
         manifest = crafty.load_manifest(MANIFEST)
-        base = manifest["base"]
+        base, fabric, neoforge = manifest["base"], manifest["loaders"]["fabric"], manifest["loaders"]["neoforge"]
+        loader = [artifact["name"] for artifact in fabric["artifacts"]]
         creative = crafty.world_content(manifest, "creative")
-        self.assertEqual([artifact["name"] for artifact in creative["artifacts"]], ["paper", "geyser", "floodgate", "fawe", "griefprevention"])
+        self.assertEqual([artifact["name"] for artifact in creative["artifacts"]], [*loader, "flan", "worldedit"])
         self.assertEqual([item["path"] for item in creative["managed_files"]],
-                         [crafty.GEYSER_CONFIG, "permissions.yml", "plugins/GriefPreventionData/config.yml"])
+                         [GEYSER_CONFIG, "config/flan/flan_config.json", "config/worldedit/worldedit.properties"])
+        # WorldEdit reads Java properties, and lets players in creative mode use it: nobody is an operator.
+        self.assertEqual(crafty._managed_file_bytes(creative["managed_files"][2]), b"use-in-creative=true\n")
+        self.assertEqual(creative["jar"], "fabric-server-launch.jar")
         self.assertEqual(creative["server_properties"], {**base["server_properties"], "level-name": "creative", "gamemode": "creative",
                                                          "force-gamemode": True, "motd": "Creative"})
         self.assertEqual(creative["crafty"], manifest["crafty"])
         # The mods named replace the defaults, and none leaves the base alone.
-        self.assertEqual([artifact["name"] for artifact in crafty.world_content(manifest, "creative", ["griefprevention"])["artifacts"]],
-                         ["paper", "geyser", "floodgate", "griefprevention"])
+        self.assertEqual([artifact["name"] for artifact in crafty.world_content(manifest, "creative", ["flan"])["artifacts"]],
+                         [*loader, "flan"])
+        # The adventure world runs NeoForge: its own loader's jars and Geyser configuration.
         bare = crafty.world_content(manifest, "adventure", [])
-        self.assertEqual((bare["artifacts"], bare["managed_files"]), (base["artifacts"], base["managed_files"]))
+        self.assertEqual((bare["jar"], bare["artifacts"], bare["managed_files"]), ("server.jar", neoforge["artifacts"], neoforge["managed_files"]))
+        self.assertEqual(bare["managed_files"][0]["path"], "config/Geyser-NeoForge/config.yml")
         self.assertEqual(bare["server_properties"]["gamemode"], "survival")
         # Only a mod the manifest lists for the world can be on there, and only a world it holds.
-        for world, mods in (("survival", ["fawe"]), ("survival", ["gsit", "worldedit"]), ("family", None)):
+        for world, mods in (("survival", ["worldedit"]), ("survival", ["sit", "worldedit"]), ("family", None)):
             with self.subTest(world=world, mods=mods), self.assertRaises(crafty.CraftyError):
                 crafty.world_content(manifest, world, mods)
         self.assertEqual(manifest, json.loads(MANIFEST.read_text()))  # the manifest itself is left as loaded
@@ -2667,44 +2759,68 @@ class ManifestTests(unittest.TestCase):
                 crafty.load_manifest(Path(handle.name))
 
     def test_managed_file_outside_the_server_folder_is_refused(self):
-        self.refused(lambda manifest: manifest["base"]["managed_files"][0].update(path="../../etc/cron.d/x"), "plain relative paths")
-        self.refused(lambda manifest: manifest["mods"]["fawe"]["managed_files"][0].update(path="/etc/cron.d/x"), "plain relative paths")
+        self.refused(lambda manifest: manifest["loaders"]["fabric"]["managed_files"][0].update(path="../../etc/cron.d/x"), "plain relative paths")
+        self.refused(lambda manifest: manifest["mods"]["worldedit"]["managed_files"][0].update(path="/etc/cron.d/x"), "plain relative paths")
 
     def test_a_mod_s_managed_file_must_match_its_checksum(self):
-        self.refused(lambda manifest: manifest["mods"]["fawe"]["managed_files"][0]["content"].update(extra={"default": True}),
+        self.refused(lambda manifest: manifest["mods"]["flan"]["managed_files"][0]["content"].update(extra={"default": True}),
                      "checksum mismatch")
 
     def test_an_artifact_name_that_is_not_a_plain_word_is_refused(self):
-        self.refused(lambda manifest: manifest["base"]["artifacts"].append(
-            dict(manifest["base"]["artifacts"][2], name="../../servers/x", path="plugins/Extra.jar")), "plain unique name")
+        self.refused(lambda manifest: manifest["loaders"]["fabric"]["artifacts"].append(
+            dict(manifest["loaders"]["fabric"]["artifacts"][2], name="../../servers/x", path="mods/Extra.jar")), "plain unique name")
 
     def test_unpinned_image_is_refused(self):
         self.refused(lambda manifest: manifest["crafty"].update(image="registry.gitlab.com/crafty-controller/crafty-4:latest"),
                      "pin the Crafty image by digest")
 
     def test_an_earlier_schema_is_refused(self):
-        self.refused(lambda manifest: manifest.update(schema_version=1), "schema 2")
+        self.refused(lambda manifest: manifest.update(schema_version=2), "schema 3")
         self.refused(lambda manifest: manifest.update(base=None, **manifest["base"]), "base content")
+        self.refused(lambda manifest: manifest.pop("loaders"), "the loaders")
 
-    def test_the_base_must_hold_paper_geyser_and_floodgate(self):
-        self.refused(lambda manifest: manifest["base"]["artifacts"].pop(2), "Paper, Geyser and Floodgate")
+    def test_a_loader_must_hold_the_jar_it_launches_geyser_and_floodgate(self):
+        for loader in ("fabric", "neoforge"):
+            with self.subTest(loader=loader):
+                self.refused(lambda manifest: manifest["loaders"][loader]["artifacts"].pop(2), "Geyser and Floodgate")
+                self.refused(lambda manifest: manifest["loaders"][loader].update(jar="other.jar"), "the jar it launches")
+                self.refused(lambda manifest: manifest["loaders"][loader].update(jar="mods/fabric-api.jar"), "the jar it launches")
 
-    def test_a_mod_is_a_pinned_jar_in_plugins_from_an_allowed_host(self):
-        mod = lambda change: lambda manifest: manifest["mods"]["gsit"].update(change)  # noqa: E731
-        self.refused(mod({"path": "GSit-3.8.0.jar"}), "a jar in plugins/")
-        self.refused(mod({"path": "plugins/GSit/GSit-3.8.0.jar"}), "jar path")
-        self.refused(mod({"path": "plugins/floodgate-spigot.jar"}), "unique")
-        self.refused(mod({"url": "https://mods.example.net/GSit-3.8.0.jar"}), "exact HTTPS URL")
+    def test_every_loader_selects_the_same_bedrock_transport(self):
+        def raknet(manifest):
+            geyser = manifest["loaders"]["neoforge"]["managed_files"][0]
+            geyser["content"] = crafty._approved_geyser(11)
+            geyser["sha256"] = hashlib.sha256(crafty._managed_file_bytes(geyser)).hexdigest()
+        self.refused(raknet, "the same Bedrock transport")
+
+    def test_a_properties_file_holds_simple_pairs(self):
+        managed = {"format": "properties-v1", "content": {"use-in-creative": True, "max-radius": 64, "name": "a b"}}
+        self.assertEqual(crafty._managed_file_bytes(managed), b"max-radius=64\nname=a b\nuse-in-creative=true\n")
+        for content in ({"Key": 1}, {"key": "a\nb=c"}, {"key": "a=b"}):
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                crafty._managed_file_bytes({"format": "properties-v1", "content": content})
+
+    def test_a_mod_is_a_pinned_jar_in_mods_from_an_allowed_host(self):
+        mod = lambda change: lambda manifest: manifest["mods"]["sit"].update(change)  # noqa: E731
+        self.refused(mod({"path": "sit-2.0.0.jar"}), "a jar in mods/")
+        self.refused(mod({"path": "mods/sit/sit-2.0.0.jar"}), "jar path")
+        self.refused(mod({"path": "mods/Floodgate-Fabric.jar"}), "unique")
+        self.refused(mod({"url": "https://mods.example.net/sit-2.0.0.jar"}), "exact HTTPS URL")
         self.refused(mod({"url": "https://github.com/Gecolay/GSit/releases/latest/download/GSit.jar"}), "exact HTTPS URL")
         self.refused(mod({"sha256": "unchecked"}), "SHA-256")
-        self.refused(lambda manifest: manifest["mods"].update({"G Sit": manifest["mods"].pop("gsit")}), "plain unique name")
-        self.refused(lambda manifest: manifest["mods"].update({"0gsit": manifest["mods"].pop("gsit")}), "an id of the kind a world has")
-        self.refused(lambda manifest: manifest["mods"].update(geyser=manifest["mods"].pop("gsit")), "unique")
+        self.refused(lambda manifest: manifest["mods"].update({"G Sit": manifest["mods"].pop("sit")}), "plain unique name")
+        self.refused(lambda manifest: manifest["mods"].update({"0gsit": manifest["mods"].pop("sit")}), "an id of the kind a world has")
+        self.refused(lambda manifest: manifest["mods"].update({"geyser-fabric": manifest["mods"].pop("sit")}), "unique")
+        # A mod names the loaders it runs on, and a world lists only mods for its own loader.
+        self.refused(mod({"loaders": []}), "the loaders it runs on")
+        self.refused(mod({"loaders": ["paper"]}), "the loaders it runs on")
+        self.refused(lambda manifest: manifest["worlds"][2]["mods"].update(flan=True), "run on its loader")
+        self.refused(lambda manifest: manifest["worlds"][2].update(loader="paper"), "every world needs")
 
     def test_a_world_has_a_unique_id_its_own_properties_and_mods_from_the_catalog(self):
         world = lambda change: lambda manifest: manifest["worlds"][1].update(change)  # noqa: E731
-        for change in ({"id": "survival"}, {"id": "Creative"}, {"id": "../creative"}, {"name": ""}, {"mods": {"worldedit": True}},
-                       {"mods": {"fawe": "on"}}, {"mods": ["fawe"]}, {"server_properties": None}):
+        for change in ({"id": "survival"}, {"id": "Creative"}, {"id": "../creative"}, {"name": ""}, {"mods": {"multiverse": True}},
+                       {"mods": {"worldedit": "on"}}, {"mods": ["worldedit"]}, {"server_properties": None}):
             with self.subTest(change=change):
                 self.refused(world(change), "every world needs")
         # What every world shares stays the base's: the port Crafty publishes and who may join.
@@ -2730,7 +2846,7 @@ class ManifestTests(unittest.TestCase):
             properties = (destination / "server.properties").read_text()
             self.assertIn("white-list=true\n", properties)
             self.assertIn("level-name=survival\n", properties)
-            self.assertTrue((destination / "plugins" / "Geyser-Spigot" / "config.yml").is_file())
+            self.assertTrue((destination / "config" / "Geyser-Fabric" / "config.yml").is_file())
             with self.assertRaises(crafty.CraftyError):
                 crafty.stage_import(manifest, destination, fetch=fetch)
 
@@ -2765,7 +2881,7 @@ class ManifestTests(unittest.TestCase):
                                 archive=archive)
             with zipfile.ZipFile(archive) as bundle:
                 names = set(bundle.namelist())
-            self.assertLessEqual({"paper.jar", "eula.txt", "server.properties", "plugins/Geyser-Spigot/config.yml"}, names)
+            self.assertLessEqual({"fabric-server-launch.jar", "eula.txt", "server.properties", "config/Geyser-Fabric/config.yml"}, names)
 
     def test_stage_import_refuses_a_planted_archive_link(self):
         manifest = crafty.world_content(crafty.load_manifest(MANIFEST), "survival")
@@ -2792,7 +2908,7 @@ class ManifestTests(unittest.TestCase):
             api = FakeAPI()
             api.no_servers = True
             host = FakeHost(api)
-            adapter = crafty.Adapter(config(Path(directory)), api, host)
+            adapter = crafty.Adapter(config(Path(directory)), api, host, LAUNCHES)
             folder = Path(directory) / "crafty" / "servers" / SERVER_ID
             waits, sleep = [], host.sleep
 
@@ -2801,7 +2917,7 @@ class ManifestTests(unittest.TestCase):
                 sleep(seconds)
                 if len(waits) == 2:
                     folder.mkdir(parents=True)
-                    (folder / "paper.jar").write_bytes(b"jar")
+                    (folder / "fabric-server-launch.jar").write_bytes(b"jar")
 
             host.sleep = unpack_later
             self.assertEqual(adapter.import_server("family", "family.zip", 5), {"instance": "family", "server_id": SERVER_ID})
@@ -2810,13 +2926,13 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(body["name"], "family")
             imported = body["minecraft_java_create_data"]["import_server_create_data"]
             self.assertEqual((imported["archive_name"], imported["jarfile"], imported["mem_max"], imported["server_properties_port"]),
-                             ("family.zip", "paper.jar", 5, 25565))
+                             ("family.zip", "fabric-server-launch.jar", 5, 25565))
 
     def test_import_server_fails_when_crafty_never_unpacks_the_archive(self):
         with tempfile.TemporaryDirectory() as directory:
             api = FakeAPI()
             api.no_servers = True
-            adapter = crafty.Adapter(config(Path(directory)), api, FakeHost(api))
+            adapter = crafty.Adapter(config(Path(directory)), api, FakeHost(api), LAUNCHES)
             with self.assertRaises(crafty.CraftyError):
                 adapter.import_server("family", "family.zip", 5)
 
@@ -2824,14 +2940,14 @@ class ManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             api = FakeAPI()  # the server record exists, but its files are not unpacked yet
             host = FakeHost(api)
-            adapter = crafty.Adapter(config(Path(directory)), api, host)
+            adapter = crafty.Adapter(config(Path(directory)), api, host, LAUNCHES)
             folder = Path(directory) / "crafty" / "servers" / SERVER_ID
             sleep = host.sleep
 
             def unpack_later(seconds):
                 sleep(seconds)
                 folder.mkdir(parents=True, exist_ok=True)
-                (folder / "paper.jar").write_bytes(b"jar")
+                (folder / "fabric-server-launch.jar").write_bytes(b"jar")
 
             host.sleep = unpack_later
             self.assertEqual(adapter.import_server("family", "family.zip", 5), {"instance": "family", "server_id": SERVER_ID})
@@ -2840,10 +2956,10 @@ class ManifestTests(unittest.TestCase):
     def test_import_server_refuses_an_existing_server_or_a_path(self):
         with tempfile.TemporaryDirectory() as directory:
             api = FakeAPI()
-            adapter = crafty.Adapter(config(Path(directory)), api, FakeHost(api))
+            adapter = crafty.Adapter(config(Path(directory)), api, FakeHost(api), LAUNCHES)
             folder = Path(directory) / "crafty" / "servers" / SERVER_ID
             folder.mkdir(parents=True)
-            (folder / "paper.jar").write_bytes(b"jar")
+            (folder / "fabric-server-launch.jar").write_bytes(b"jar")
             with self.assertRaises(crafty.CraftyError):
                 adapter.import_server("family", "family.zip", 5)
             api.no_servers = True

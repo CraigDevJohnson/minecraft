@@ -1,6 +1,6 @@
 {
-  "schema_version": 2,
-  "revision": "worlds-2026-11-10",
+  "schema_version": 3,
+  "revision": "loaders-2026-11-11",
   "crafty": {
     "image": "registry.gitlab.com/crafty-controller/crafty-4@sha256:7b6e87514259549647e15ceeaf73d238792e6d77e2c79fc744d5badc8d6e997c",
     "version": "4.11.0"
@@ -8,62 +8,6 @@
   "minecraft_version": "26.3",
   "java_version": "25",
   "base": {
-    "artifacts": [
-      {
-        "name": "paper",
-        "version": "26.3",
-        "build": 242,
-        "path": "paper.jar",
-        "url": "https://fill-data.papermc.io/v1/objects/fc704a4510a2744bab90a6770336b202038e60333e37f24af8027ee948935d20/paper-26.3-242.jar",
-        "sha256": "fc704a4510a2744bab90a6770336b202038e60333e37f24af8027ee948935d20"
-      },
-      {
-        "name": "geyser",
-        "version": "2.12.1",
-        "build": 1288,
-        "path": "plugins/Geyser-Spigot.jar",
-        "url": "https://download.geysermc.org/v2/projects/geyser/versions/2.12.1/builds/1288/downloads/spigot",
-        "sha256": "6c090fac496d8a8b9f51040eb39dc350a5f4e5384e9c76bc0efdd185ba1c9e67"
-      },
-      {
-        "name": "floodgate",
-        "version": "2.2.5",
-        "build": 141,
-        "path": "plugins/floodgate-spigot.jar",
-        "url": "https://download.geysermc.org/v2/projects/floodgate/versions/2.2.5/builds/141/downloads/spigot",
-        "sha256": "21570aff9ce17d6983928e8552777760e1ede5050026b04c686b0ae112e6fd7e"
-      }
-    ],
-    "managed_files": [
-      {
-        "path": "plugins/Geyser-Spigot/config.yml",
-        "format": "canonical-json-v1",
-        "content": {
-          "config-version": 12,
-          "bedrock": {
-            "address": "0.0.0.0",
-            "port": 19132,
-            "clone-remote-port": false,
-            "transport": "both",
-            "webrtc-port": 19133,
-            "signaling": {
-              "mode": "builtin"
-            }
-          },
-          "java": {
-            "auth-type": "floodgate"
-          },
-          "motd": {
-            "primary-motd": "Family Minecraft",
-            "secondary-motd": "Family Minecraft",
-            "max-players": 10
-          },
-          "log-player-ip-addresses": false,
-          "saved-user-logins": []
-        },
-        "sha256": "261b82a68cbdb7054e2071ef290027ca360cb5193d381c017796d97d54e4d5df"
-      }
-    ],
     "server_properties": {
       "server-port": 25565,
       "difficulty": "normal",
@@ -80,121 +24,243 @@
       "pvp": false
     }
   },
+  "loaders": {
+    "fabric": {
+      "name": "Fabric",
+      "jar": "fabric-server-launch.jar",
+      "artifacts": [
+        {
+          "name": "fabric",
+          "version": "0.20.1",
+          "path": "fabric-server-launch.jar",
+          "url": "https://meta.fabricmc.net/v2/versions/loader/26.3/0.20.1/1.1.2/server/jar",
+          "sha256": "70446947655b4f8f286aba896aa4c19a255e8ca8a730636ef2a6017ae4415d95"
+        },
+        {
+          "name": "fabric-api",
+          "version": "0.166.2+26.3",
+          "path": "mods/fabric-api.jar",
+          "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/Zns5SSRA/fabric-api-0.166.2%2B26.3.jar",
+          "sha256": "e8acacc7836f39237c83c2a664b039647ee36f93822797acc40cda44666002ea"
+        },
+        {
+          "name": "geyser-fabric",
+          "version": "2.12.1",
+          "build": 1288,
+          "path": "mods/Geyser-Fabric.jar",
+          "url": "https://download.geysermc.org/v2/projects/geyser/versions/2.12.1/builds/1288/downloads/fabric",
+          "sha256": "b7a607e89f8608938bbccabd15a470f9b8f3f7ec4c1a6b98db27ef671cf89bb6"
+        },
+        {
+          "name": "floodgate-fabric",
+          "version": "2.2.7-b69",
+          "path": "mods/Floodgate-Fabric.jar",
+          "url": "https://cdn.modrinth.com/data/bWrNNfkb/versions/m9eO07Zi/Floodgate-Fabric-2.2.7-b69.jar",
+          "sha256": "e647b71803734ce0462139844a204b557dc2b76843e11236eaac90c9e28f20bd"
+        }
+      ],
+      "managed_files": [
+        {
+          "path": "config/Geyser-Fabric/config.yml",
+          "format": "canonical-json-v1",
+          "content": {
+            "config-version": 12,
+            "bedrock": {
+              "address": "0.0.0.0",
+              "port": 19132,
+              "clone-remote-port": false,
+              "transport": "both",
+              "webrtc-port": 19133,
+              "signaling": {
+                "mode": "builtin"
+              }
+            },
+            "java": {
+              "auth-type": "floodgate"
+            },
+            "motd": {
+              "primary-motd": "Family Minecraft",
+              "secondary-motd": "Family Minecraft",
+              "max-players": 10
+            },
+            "log-player-ip-addresses": false,
+            "saved-user-logins": []
+          },
+          "sha256": "261b82a68cbdb7054e2071ef290027ca360cb5193d381c017796d97d54e4d5df"
+        }
+      ]
+    },
+    "neoforge": {
+      "name": "NeoForge",
+      "jar": "server.jar",
+      "artifacts": [
+        {
+          "name": "neoforge-starter",
+          "version": "0.1.35",
+          "path": "server.jar",
+          "url": "https://github.com/neoforged/ServerStarterJar/releases/download/0.1.35/server.jar",
+          "sha256": "d019d815868d451e57bdb965174b8443ec361336e84e9c41abc41a6c627bacd1"
+        },
+        {
+          "name": "neoforge",
+          "version": "26.3.0.102",
+          "path": "neoforge-installer.jar",
+          "url": "https://maven.neoforged.net/releases/net/neoforged/neoforge/26.3.0.102/neoforge-26.3.0.102-installer.jar",
+          "sha256": "e26e42b0414da4f68840835b4d637928b971a01852b32b6424747290f84e9f1c"
+        },
+        {
+          "name": "geyser-neoforge",
+          "version": "2.12.1",
+          "build": 1288,
+          "path": "mods/Geyser-NeoForge.jar",
+          "url": "https://download.geysermc.org/v2/projects/geyser/versions/2.12.1/builds/1288/downloads/neoforge",
+          "sha256": "7871694f22808de7e663c78dbe8b3f296cecb4da1d868ed3bacb454eaeb0479d"
+        },
+        {
+          "name": "floodgate-neoforge",
+          "version": "2.2.7-b69",
+          "path": "mods/Floodgate-Neoforge.jar",
+          "url": "https://cdn.modrinth.com/data/bWrNNfkb/versions/9mryDssz/Floodgate-Neoforge-2.2.7-b69.jar",
+          "sha256": "f5f1d27b8787c150eec7778d990d6d70593ac4ad5487d84ce21f738e3bccec1b"
+        }
+      ],
+      "managed_files": [
+        {
+          "path": "config/Geyser-NeoForge/config.yml",
+          "format": "canonical-json-v1",
+          "content": {
+            "config-version": 12,
+            "bedrock": {
+              "address": "0.0.0.0",
+              "port": 19132,
+              "clone-remote-port": false,
+              "transport": "both",
+              "webrtc-port": 19133,
+              "signaling": {
+                "mode": "builtin"
+              }
+            },
+            "java": {
+              "auth-type": "floodgate"
+            },
+            "motd": {
+              "primary-motd": "Family Minecraft",
+              "secondary-motd": "Family Minecraft",
+              "max-players": 10
+            },
+            "log-player-ip-addresses": false,
+            "saved-user-logins": []
+          },
+          "sha256": "261b82a68cbdb7054e2071ef290027ca360cb5193d381c017796d97d54e4d5df"
+        }
+      ]
+    }
+  },
   "mods": {
-    "griefprevention": {
-      "name": "GriefPrevention",
-      "version": "16.18.8",
-      "path": "plugins/GriefPrevention-16.18.8.jar",
-      "url": "https://cdn.modrinth.com/data/O4o4mKaq/versions/MtwPHMAS/GriefPrevention.jar",
-      "sha256": "83d199575808ddbab49de36990b99ed1e5549a8c4e844a9906ac30e90fe51701",
-      "summary": "Claim land with a golden shovel so only the people you trust can build or break there.",
+    "flan": {
+      "name": "Flan",
+      "version": "1.12.8.b",
+      "loaders": [
+        "fabric"
+      ],
+      "path": "mods/flan-26.3-1.12.8.b-fabric.jar",
+      "url": "https://cdn.modrinth.com/data/Si383TIH/versions/dAcEMeRZ/flan-26.3-1.12.8.b-fabric.jar",
+      "sha256": "d73838c52457efc5d3d9e87ef8321b8a0e6534f3a0a95c44246e3f179d25c871",
+      "summary": "Claim land with a golden hoe so only the people you trust can build or break there.",
       "bedrock": "Not yet tried on Bedrock.",
       "managed_files": [
         {
-          "path": "plugins/GriefPreventionData/config.yml",
+          "path": "config/flan/flan_config.json",
           "format": "canonical-json-v1",
           "content": {
-            "GriefPrevention": {
-              "Claims": {
-                "Mode": {
-                  "survival": "Survival",
-                  "survival_nether": "Survival",
-                  "survival_the_end": "Survival",
-                  "creative": "Survival",
-                  "creative_nether": "Survival",
-                  "creative_the_end": "Survival",
-                  "adventure": "Survival",
-                  "adventure_nether": "Survival",
-                  "adventure_the_end": "Survival"
-                },
-                "InitialBlocks": 10000,
-                "Expiration": {
-                  "ChestClaimDays": 0,
-                  "AllClaims": {
-                    "DaysInactive": 0
-                  }
-                }
-              },
-              "Spam": {
-                "Enabled": false
-              }
-            }
+            "configVersion": 7,
+            "startingBlocks": 10000,
+            "maxClaimBlocks": 20000
           },
-          "sha256": "e73e434a0ab7cf8497f510f50cedc928d557aae7ab5ae70ba227ae19c1253b90"
+          "sha256": "bba9cd2bb5b75a889f1d7e801d901ad0c273e92b88b6e6a1aecda1c5c63dda1e"
         }
       ]
     },
-    "fawe": {
-      "name": "FastAsyncWorldEdit",
-      "version": "2.16.2",
-      "path": "plugins/FastAsyncWorldEdit-Paper-2.16.2.jar",
-      "url": "https://github.com/IntellectualSites/FastAsyncWorldEdit/releases/download/2.16.2/FastAsyncWorldEdit-Paper-2.16.2.jar",
-      "sha256": "a74219fa660c782c9779e6740867cde395a24d1381dcba6c4f8022e4e9c3f87d",
-      "summary": "Bulk building tools: copy, paste, fill and brushes, inside land you have claimed.",
-      "bedrock": "Commands and the wand work. Command suggestions do not show.",
+    "flan-neoforge": {
+      "name": "Flan",
+      "version": "1.12.8",
+      "loaders": [
+        "neoforge"
+      ],
+      "path": "mods/flan-26.3-1.12.8-neoforge.jar",
+      "url": "https://cdn.modrinth.com/data/Si383TIH/versions/1Bik8U9i/flan-26.3-1.12.8-neoforge.jar",
+      "sha256": "5a181b4230579b3dc80902a93a253349978cd9198bab5af32a513e89ad1a2962",
+      "summary": "Claim land with a golden hoe so only the people you trust can build or break there.",
+      "bedrock": "Not yet tried on Bedrock.",
       "managed_files": [
         {
-          "path": "permissions.yml",
+          "path": "config/flan/flan_config.json",
           "format": "canonical-json-v1",
           "content": {
-            "family.worldedit": {
-              "description": "FastAsyncWorldEdit's basic editing for every player, inside claims they own or are trusted in.",
-              "default": true,
-              "children": {
-                "fawe.permpack.basic": true,
-                "fawe.griefprevention": true
-              }
-            }
+            "configVersion": 7,
+            "startingBlocks": 10000,
+            "maxClaimBlocks": 20000
           },
-          "sha256": "45036371a38f2dd79280a5f5e61cd530149540e181ade47a3026f512f566d897"
+          "sha256": "bba9cd2bb5b75a889f1d7e801d901ad0c273e92b88b6e6a1aecda1c5c63dda1e"
         }
       ]
     },
-    "auraskills": {
-      "name": "AuraSkills",
-      "version": "2.4.0",
-      "path": "plugins/AuraSkills-2.4.0.jar",
-      "url": "https://github.com/Archy-X/AuraSkills/releases/download/2.4.0/AuraSkills-2.4.0.jar",
-      "sha256": "de54cbd2e33d65e8b1704751ae4121ed2f5b466ba89c63a1aadf3a3e629d6a40",
-      "summary": "Skills that level up as you play, with stats and abilities.",
-      "bedrock": "Not yet tried on Bedrock."
+    "worldedit": {
+      "name": "WorldEdit",
+      "version": "7.4.6",
+      "loaders": [
+        "fabric",
+        "neoforge"
+      ],
+      "path": "mods/worldedit-mod-7.4.6.jar",
+      "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/ByRNkO83/worldedit-mod-7.4.6.jar",
+      "sha256": "24f2338ac9d5e7205f15cdb4a118924c5d9cbd48ab0cabf8ba36b07b7d64c22b",
+      "summary": "Bulk building tools: copy, paste, fill and brushes, for players in creative mode.",
+      "bedrock": "Not yet tried on Bedrock.",
+      "managed_files": [
+        {
+          "path": "config/worldedit/worldedit.properties",
+          "format": "properties-v1",
+          "content": {
+            "use-in-creative": true
+          },
+          "sha256": "90743d39f383fcf09eaaef20280d8aa587c85a88d890bfe0f031cc0694610f6f"
+        }
+      ]
     },
-    "decentholograms": {
-      "name": "DecentHolograms",
-      "version": "2.10.2",
-      "path": "plugins/DecentHolograms-2.10.2.jar",
-      "url": "https://github.com/DecentSoftware-eu/DecentHolograms/releases/download/2.10.2/DecentHolograms-2.10.2.jar",
-      "sha256": "99bc2b7b0af7846cc45d5800ea0acfae6846d479e048b8e5995c5afa53df27be",
-      "summary": "Floating text labels.",
+    "sit": {
+      "name": "Sit",
+      "version": "2.0.0",
+      "loaders": [
+        "fabric",
+        "neoforge"
+      ],
+      "path": "mods/sit-2.0.0.jar",
+      "url": "https://cdn.modrinth.com/data/tFLdoQMh/versions/UlPgR7YT/sit-2.0.0.jar",
+      "sha256": "39e0c27e8d40f529057ea28e11705998517acee12af874ce3e824cb2cbc207d2",
+      "summary": "Sit on stairs with a click.",
       "bedrock": "Not yet tried on Bedrock."
-    },
-    "gsit": {
-      "name": "GSit",
-      "version": "3.8.0",
-      "path": "plugins/GSit-3.8.0.jar",
-      "url": "https://github.com/Gecolay/GSit/releases/download/3.8.0/GSit-3.8.0.jar",
-      "sha256": "669820b42047eac476ec754142c682dca4f396e0b84f178e7959cf236e64cc4a",
-      "summary": "Sit on stairs and slabs, lie down and crawl.",
-      "bedrock": "Sitting works with a click or /sit. Not yet tried on Bedrock."
     }
   },
   "worlds": [
     {
       "id": "survival",
       "name": "Survival",
+      "loader": "fabric",
       "server_properties": {
         "level-name": "survival",
         "gamemode": "survival",
         "motd": "Survival"
       },
       "mods": {
-        "griefprevention": true,
-        "gsit": true
+        "flan": true,
+        "sit": true
       }
     },
     {
       "id": "creative",
       "name": "Creative",
+      "loader": "fabric",
       "server_properties": {
         "level-name": "creative",
         "gamemode": "creative",
@@ -202,22 +268,23 @@
         "motd": "Creative"
       },
       "mods": {
-        "griefprevention": true,
-        "fawe": true
+        "flan": true,
+        "worldedit": true
       }
     },
     {
       "id": "adventure",
       "name": "Adventure",
+      "loader": "neoforge",
       "server_properties": {
         "level-name": "adventure",
         "gamemode": "survival",
         "motd": "Adventure"
       },
       "mods": {
-        "griefprevention": true,
-        "auraskills": true,
-        "decentholograms": true
+        "flan-neoforge": true,
+        "sit": false,
+        "worldedit": false
       }
     }
   ]
