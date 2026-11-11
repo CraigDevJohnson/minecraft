@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed-target, read-only observations; stdout contains only sanitized health JSON."""
+"""Fixed-target, read-only observations of each world's host; stdout contains only sanitized health JSON."""
 from __future__ import annotations
 
 import io
@@ -24,15 +24,18 @@ NETWORK_TIMEOUT = 5
 MAX_STATUS_BYTES = 16 * 1024
 MAX_DISCOVERY_BYTES = 4096
 MAX_SIGNALING_BYTES = 16 * 1024
-# The pinned server content of the checked-out main, which says whether the server also offers NetherNet.
+# The pinned server content of the checked-out main, which names the worlds and says whether their servers
+# also offer NetherNet.
 MANIFEST = Path(__file__).resolve().parents[1] / "runtime" / "crafty" / "server.json"
 RAKNET_MAGIC = bytes.fromhex("00ffff00fefefefefdfdfdfd12345678")
+WORLD_ID = r"[a-z][a-z0-9-]{0,31}"
 HOST_STATES = {"pending", "running", "stopping", "stopped", "shutting-down"}
 AWS_READS = {
     "identity": ["sts", "get-caller-identity", "--query", "Account"],
+    # A world's host carries its world's id; the old family host carries none, so it is never read as one.
     "hosts": ["ec2", "describe-instances", "--filters",
               "Name=tag:Project,Values=minecraft", "Name=tag:Environment,Values=family",
-              "Name=tag:Name,Values=minecraft-family-host",
+              "Name=tag:Purpose,Values=replaceable-host",
               "Name=instance-state-name,Values=pending,running,stopping,stopped,shutting-down",
               "--max-items", "2", "--query",
               "{hosts:Reservations[].Instances[].{instance_id:InstanceId,state:State.Name,public_ipv4:PublicIpAddress},next_token:NextToken}"],
@@ -45,10 +48,15 @@ class HealthError(Exception):
     """Only fixed, authored error codes may be published."""
 
 
-def aws_read(kind: str, instance_id: str | None = None):
-    if kind not in AWS_READS or (kind == "checks") != (instance_id is not None):
+def aws_read(kind: str, instance_id: str | None = None, world: str | None = None):
+    if (kind not in AWS_READS or (kind == "checks") != (instance_id is not None)
+            or (kind == "hosts") != (world is not None)):
         raise HealthError("invalid_read_request")
     command = ["aws", *AWS_READS[kind]]
+    if world is not None:
+        if not re.fullmatch(WORLD_ID, world):
+            raise HealthError("invalid_read_request")
+        command[4:4] = [f"Name=tag:World,Values={world}", f"Name=tag:Name,Values=minecraft-family-{world}"]
     if instance_id is not None:
         if not re.fullmatch(r"i-(?:[0-9a-f]{8}|[0-9a-f]{17})", instance_id):
             raise HealthError("invalid_host_metadata")
@@ -78,13 +86,13 @@ def public_address(value) -> str:
         raise HealthError("invalid_public_address") from None
 
 
-def require_dns_match(address: str) -> None:
+def require_dns_match(hostname: str, address: str) -> None:
     # getaddrinfo has no portable timeout. A daemon resolver cannot keep this process alive.
     result = queue.Queue(maxsize=1)
 
     def resolve():
         try:
-            result.put(socket.getaddrinfo(HOSTNAME, 25565, socket.AF_INET, socket.SOCK_STREAM))
+            result.put(socket.getaddrinfo(hostname, 25565, socket.AF_INET, socket.SOCK_STREAM))
         except Exception:
             result.put(None)
 
@@ -140,7 +148,7 @@ def safe_status(version, protocol, online, limit) -> dict:
     return status
 
 
-def java_status(address: str) -> dict:
+def java_status(hostname: str, address: str) -> dict:
     deadline = time.monotonic() + NETWORK_TIMEOUT
     try:
         with socket.create_connection((address, 25565), timeout=NETWORK_TIMEOUT) as client:
@@ -154,7 +162,7 @@ def java_status(address: str) -> dict:
                     received.extend(part)
                 return bytes(received)
 
-            hostname = HOSTNAME.encode("ascii")
+            hostname = hostname.encode("ascii")
             # Protocol -1 requests generic status; next state 1 never attempts login or play.
             handshake = varint(0) + varint(-1) + varint(len(hostname)) + hostname + struct.pack(">H", 25565) + varint(1)
             client.settimeout(remaining_timeout(deadline))
@@ -199,13 +207,17 @@ def bedrock_discovery(address: str) -> dict:
         raise HealthError("bedrock_discovery_failed") from None
 
 
-def nethernet_selected() -> bool:
-    """Whether the pinned Geyser configuration adds NetherNet's built-in signaling and WebRTC to RakNet."""
+def pinned_content() -> tuple[list[str], bool]:
+    """The worlds the pinned content names, in its order, and whether its Geyser configuration, which every
+    world shares, adds NetherNet's built-in signaling and WebRTC to RakNet."""
     try:
         manifest = json.loads(MANIFEST.read_text())
-        [bedrock] = [item["content"]["bedrock"] for item in manifest["managed_files"]
+        worlds = [world["id"] for world in manifest["worlds"]]
+        [bedrock] = [item["content"]["bedrock"] for item in manifest["base"]["managed_files"]
                      if item["path"] == "plugins/Geyser-Spigot/config.yml"]
-        return bedrock.get("transport") == "both"
+        if not worlds or not all(isinstance(world, str) and re.fullmatch(WORLD_ID, world) for world in worlds):
+            raise ValueError
+        return worlds, bedrock.get("transport") == "both"
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         raise HealthError("manifest_unreadable") from None
 
@@ -252,10 +264,10 @@ def http_response(data: bytes, closed: bool) -> tuple[str, dict, bytes] | None:
     return (status, headers, rest) if closed else None
 
 
-def nethernet_signaling(address: str) -> dict:
+def nethernet_signaling(hostname: str, address: str) -> dict:
     """Ask NetherNet's built-in signaling on TCP 19132 for its discovery answer. The GET admits no one."""
     deadline = time.monotonic() + NETWORK_TIMEOUT
-    request = f"GET /v1/join HTTP/1.1\r\nHost: {HOSTNAME}:19132\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    request = f"GET /v1/join HTTP/1.1\r\nHost: {hostname}:19132\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     try:
         with socket.create_connection((address, 19132), timeout=NETWORK_TIMEOUT) as client:
             client.settimeout(remaining_timeout(deadline))
@@ -280,11 +292,10 @@ def nethernet_signaling(address: str) -> dict:
         raise HealthError("nethernet_signaling_failed") from None
 
 
-def observe(report: dict) -> None:
-    if aws_read("identity") != ACCOUNT:
-        raise HealthError("account_mismatch")
-    report["identity_verified"] = True
-    inventory = aws_read("hosts")
+def observe_world(world: str, nethernet: bool, report: dict) -> None:
+    """One world's host, and its game when the host is running, at <world>.<HOSTNAME>."""
+    hostname = f"{world}.{HOSTNAME}"
+    inventory = aws_read("hosts", world=world)
     if not isinstance(inventory, dict) or not isinstance(inventory.get("hosts"), list):
         raise HealthError("invalid_host_metadata")
     hosts = inventory["hosts"]
@@ -313,36 +324,56 @@ def observe(report: dict) -> None:
         raise HealthError("ec2_checks_failed")
     report["ec2_checks_passed"] = True
     report["dns_matches_host"] = False
-    require_dns_match(address)
+    require_dns_match(hostname, address)
     report["dns_matches_host"] = True
     report["java_status_ok"] = False
-    report["java"] = java_status(address)
+    report["java"] = java_status(hostname, address)
     report["java_status_ok"] = True
     report["bedrock_discovery_ok"] = False
     report["bedrock"] = bedrock_discovery(address)
     report["bedrock_discovery_ok"] = True
-    if nethernet_selected():
+    if nethernet:
         report["nethernet_signaling_ok"] = False
-        report["nethernet"] = nethernet_signaling(address)
+        report["nethernet"] = nethernet_signaling(hostname, address)
         report["nethernet_signaling_ok"] = True
     report.update(game_ready=True, status="healthy")
 
 
-def main(arguments: list[str] | None = None) -> int:
-    report = {"state": "unknown", "status": "failed", "identity_verified": False,
-              "ec2_checks_passed": None, "dns_matches_host": None, "java_status_ok": None,
-              "bedrock_discovery_ok": None, "nethernet_signaling_ok": None, "game_ready": False}
-    try:
-        supplied_arguments = arguments if arguments is not None else sys.argv[1:]
-        if supplied_arguments:
+def observe(report: dict, arguments: list[str]) -> None:
+    """Every world the pinned content names, or the one world named as the only argument. One world's failure
+    is recorded under that world and the others are still observed."""
+    worlds, nethernet = pinned_content()
+    if arguments:
+        if len(arguments) > 1 or arguments[0] not in worlds:
             raise HealthError("unsupported_arguments")
-        observe(report)
+        worlds = arguments
+    if aws_read("identity") != ACCOUNT:
+        raise HealthError("account_mismatch")
+    report["identity_verified"] = True
+    for world in worlds:
+        observed = report["worlds"][world] = {
+            "state": "unknown", "status": "failed", "ec2_checks_passed": None, "dns_matches_host": None,
+            "java_status_ok": None, "bedrock_discovery_ok": None, "nethernet_signaling_ok": None, "game_ready": False}
+        try:
+            observe_world(world, nethernet, observed)
+        except HealthError as error:
+            observed["failure"] = str(error)
+        except Exception:
+            observed["failure"] = "observation_failed"
+    statuses = {observed["status"] for observed in report["worlds"].values()}
+    report["status"] = next(status for status in ("failed", "healthy", "idle") if status in statuses)
+
+
+def main(arguments: list[str] | None = None) -> int:
+    report = {"status": "failed", "identity_verified": False, "worlds": {}}
+    try:
+        observe(report, arguments if arguments is not None else sys.argv[1:])
     except HealthError as error:
         report["failure"] = str(error)
     except Exception:
         report["failure"] = "observation_failed"
     print(json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False))
-    return 1 if "failure" in report else 0
+    return 1 if report["status"] == "failed" else 0
 
 
 if __name__ == "__main__":

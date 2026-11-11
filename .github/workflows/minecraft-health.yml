@@ -2,6 +2,12 @@ name: Minecraft health
 
 on:
   workflow_dispatch:
+    inputs:
+      world:
+        description: The world to check
+        type: choice
+        options: [all, survival, creative, adventure]
+        default: all
 
 permissions:
   contents: read
@@ -12,7 +18,7 @@ concurrency:
 
 jobs:
   health:
-    name: Read-only family health
+    name: Read-only world health
     if: >-
       github.repository == 'CraigDevJohnson/minecraft' &&
       github.repository_id == '1359070973' &&
@@ -55,13 +61,18 @@ jobs:
           mask-aws-account-id: true
           retry-max-attempts: 2
           action-timeout-s: 60
-      - name: Observe host and public game listeners
+      - name: Observe each world's host and public game listeners
         env:
           AWS_EC2_METADATA_DISABLED: 'true'
           AWS_MAX_ATTEMPTS: '1'
           AWS_PAGER: ''
+          WORLD: ${{ inputs.world }}
         run: |
-          python3 scripts/minecraft_health.py > "$RUNNER_TEMP/minecraft-health.json"
+          # Without a world the script checks every world the pinned content names.
+          if [[ "$WORLD" == all ]]; then
+            WORLD=""
+          fi
+          python3 scripts/minecraft_health.py ${WORLD:+"$WORLD"} > "$RUNNER_TEMP/minecraft-health.json"
       - name: Publish sanitized observation
         if: always()
         run: |

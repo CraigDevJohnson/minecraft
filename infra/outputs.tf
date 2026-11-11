@@ -23,6 +23,14 @@ output "deployment" {
     data_filesystem_uuid  = var.data_filesystem_uuid
     backup_bucket_name    = aws_s3_bucket.backups.bucket
     mount_path            = "/srv/minecraft"
+    # Each world's own host (ADR 0009) and the address its players use.
+    worlds = {
+      for id in local.world_ids : id => {
+        host_id       = aws_instance.world[id].id
+        hostname      = "${id}.${var.public_hostname}"
+        backup_prefix = "instances/${id}/"
+      }
+    }
     instances = {
       for id in sort(tolist(var.instance_ids)) : id => {
         data_path     = "/srv/minecraft/instances/${id}/data"

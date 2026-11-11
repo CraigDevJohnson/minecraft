@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,60 +18,82 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 )
 
-const allowlistOutput = `{"instance": "family", "edition": "java", "operation": "add", "allowlist": "updated"}`
+var (
+	steve = Player{UUID: "069a79f4-44e9-4726-a5be-fca90e38aaf5", Name: "Steve"}
+	// sample is a Bedrock player as the lookup answers: the Floodgate UUID and the gamertag itself.
+	sample = Player{UUID: "00000000-0000-0000-0009-01eed05d1009", Name: "Sample Player"}
+	// renamed is the entry the record still holds for a Java account whose name Mojang no longer knows.
+	renamed = Player{UUID: "853c80ef-3c37-49fd-aa49-938b674adae6", Name: "Old_Name"}
+)
 
-var steve = Player{UUID: "069a79f4-44e9-4726-a5be-fca90e38aaf5", Name: "Steve"}
-
-// allowlistRig is a ready server whose adapter answers the one allowlist command it gets.
-func allowlistRig(t *testing.T) (*rig, *[]string) {
-	t.Helper()
-	r := newRig(ec2types.InstanceStateNameRunning, time.Hour)
-	r.gameUp = true
-	r.ssm.invocation = []ssm.GetCommandInvocationOutput{{Status: ssmtypes.CommandInvocationStatusInProgress}, success(allowlistOutput)}
-	looked := []string{}
-	r.launcher.LookupPlayer = func(_ context.Context, edition, name string) (Player, error) {
-		looked = append(looked, edition+":"+name)
-		if name == "Nobody" {
-			return Player{}, ErrPlayerNotFound
-		}
-		if name == "Linked Player" {
-			return Player{}, ErrLinkedAccount
-		}
-		if name == "Outage" {
-			return Player{}, errors.New("Mojang answered 503")
-		}
-		if name == "Old_Name" {
-			return Player{}, ErrPlayerNotFound
-		}
-		return steve, nil
+// lookedUp stands in for Mojang and GeyserMC, which find a name whatever its case.
+func lookedUp(name string) (Player, error) {
+	switch strings.ToLower(name) {
+	case "nobody", "old_name":
+		return Player{}, ErrPlayerNotFound
+	case "linked player":
+		return Player{}, ErrLinkedAccount
+	case "outage":
+		return Player{}, errors.New("Mojang answered 503")
+	case "sample player":
+		return sample, nil
 	}
-	return r, &looked
+	return steve, nil
 }
 
-func TestAllowlistRunsTheAdapterWithThePlayersIdentity(t *testing.T) {
-	r, looked := allowlistRig(t)
-	result, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"})
-	if err != nil || result != (AllowlistResult{Instance: "family", Edition: "java", Operation: "add", Allowlist: "updated"}) {
+// allowlisted is the adapter's answer to an allowlist change on a world's server.
+func allowlisted(world, operation, verdict string) ssm.GetCommandInvocationOutput {
+	return success(`{"instance": "` + world + `", "edition": "java", "operation": "` + operation + `", "allowlist": "` + verdict + `"}`)
+}
+
+// allowlistRig has the survival world ready, its adapter answering the one allowlist command it gets, and the
+// creative world stopped.
+func allowlistRig(t *testing.T) *worldsRig {
+	t.Helper()
+	w := newWorlds(t)
+	w.running(w.survival)
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{{Status: ssmtypes.CommandInvocationStatusInProgress}, allowlisted("survival", "add", "updated")}
+	return w
+}
+
+// running has a world's host up for an hour with its game answering.
+func (w *worldsRig) running(r *rig) {
+	r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameRunning}
+	r.ec2.launch = now.Add(-time.Hour)
+	r.gameUp = true
+}
+
+// record answers the allowlist of record as the parameter holds it.
+func (w *worldsRig) record() string { return w.shared.params[allowlistName] }
+
+func TestAllowlistChangesTheRecordAndEachRunningWorld(t *testing.T) {
+	w := allowlistRig(t)
+	result, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"})
+	if err != nil || result.Edition != "java" || result.Operation != "add" || result.Allowlist != "updated" || !slices.Equal(result.Worlds, []string{"survival"}) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	if len(*looked) != 1 || (*looked)[0] != "java:Steve" {
-		t.Fatalf("looked up %v", *looked)
+	if len(w.looked) != 1 || w.looked[0] != "java:Steve" {
+		t.Fatalf("looked up %v", w.looked)
 	}
-	if len(r.ssm.commands) != 1 {
-		t.Fatalf("commands %v", r.ssm.commands)
+	// The record holds the account the lookup found, which is what every later start carries.
+	if w.record() != `[{"edition":"java","uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Steve"}]` {
+		t.Fatalf("record %s", w.record())
+	}
+	if len(w.survival.ssm.commands) != 1 || len(w.creative.ssm.commands) != 0 {
+		t.Fatalf("commands %v and %v; only a running world is changed live", w.survival.ssm.commands, w.creative.ssm.commands)
 	}
 	// Four Crafty calls of up to 30 seconds, the 60-second verification and the install must all fit.
-	if len(r.ssm.limits) != 1 || r.ssm.limits[0] != "240" {
-		t.Fatalf("execution limits %v", r.ssm.limits)
+	if len(w.survival.ssm.limits) != 1 || w.survival.ssm.limits[0] != "240" {
+		t.Fatalf("execution limits %v", w.survival.ssm.limits)
 	}
-	script := r.ssm.commands[0]
+	script := w.survival.ssm.commands[0]
 	encoded, _ := json.Marshal(steve)
 	for _, want := range []string{
 		"set -eu",
 		`player="$(mktemp)"`,
 		`trap 'rm -f "$player"' EXIT`,
 		"printf '%s' '" + base64.StdEncoding.EncodeToString(encoded) + "' | base64 -d > \"$player\"",
-		remoteCommand + ` allowlist family add --edition java --player-file "$player"`,
+		remoteCommand + ` allowlist survival add --edition java --player-file "$player"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script lacks %q:\n%s", want, script)
@@ -81,91 +104,180 @@ func TestAllowlistRunsTheAdapterWithThePlayersIdentity(t *testing.T) {
 	}
 }
 
-func TestAllowlistRefusesUnlessTheServerIsReady(t *testing.T) {
+func TestAllowlistReachesEveryRunningWorld(t *testing.T) {
+	w := allowlistRig(t)
+	w.running(w.creative)
+	w.creative.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("creative", "add", "updated")}
+	result, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"})
+	if err != nil || result.Allowlist != "updated" || !slices.Equal(result.Worlds, []string{"survival", "creative"}) {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(w.creative.ssm.commands) != 1 || !strings.Contains(w.creative.ssm.commands[0], remoteCommand+` allowlist creative add --edition java --player-file "$player"`) {
+		t.Fatalf("creative's commands %q", w.creative.ssm.commands)
+	}
+	// Asked again, the record and both servers already hold the player.
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("survival", "add", "unchanged")}
+	w.creative.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("creative", "add", "unchanged")}
+	before := w.record()
+	result, err = w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"})
+	if err != nil || result.Allowlist != "unchanged" || len(result.Worlds) != 2 || w.record() != before {
+		t.Fatalf("result=%+v err=%v record=%s", result, err, w.record())
+	}
+	// A removal takes the player off the record and off both servers.
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("survival", "remove", "updated")}
+	w.creative.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("creative", "remove", "updated")}
+	result, err = w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "remove", Edition: "java", Name: "Steve"})
+	if err != nil || result.Allowlist != "updated" || len(result.Worlds) != 2 || w.record() != "[]" {
+		t.Fatalf("result=%+v err=%v record=%s", result, err, w.record())
+	}
+}
+
+func TestAllowlistWorksWithEveryWorldStopped(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		rig   func(t *testing.T) *rig
-		state string
+		name string
+		rig  func(r *rig)
 	}{
-		{"stopped", func(t *testing.T) *rig {
-			r, _ := allowlistRig(t)
-			r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameStopped}
-			return r
-		}, Stopped},
-		{"game down", func(t *testing.T) *rig { r, _ := allowlistRig(t); r.gameUp = false; return r }, Maintenance},
-		{"stopping", func(t *testing.T) *rig {
-			r, _ := allowlistRig(t)
-			r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameStopping}
-			return r
-		}, Stopping},
+		{"stopped", func(r *rig) {}},
+		{"game down", func(r *rig) {
+			r.ec2.states, r.ec2.launch = []ec2types.InstanceStateName{ec2types.InstanceStateNameRunning}, now.Add(-time.Hour)
+		}},
+		{"stopping", func(r *rig) { r.ec2.states = []ec2types.InstanceStateName{ec2types.InstanceStateNameStopping} }},
+		{"starting", func(r *rig) {
+			r.ec2.states, r.ec2.launch = []ec2types.InstanceStateName{ec2types.InstanceStateNameRunning}, now.Add(-time.Minute)
+		}},
 	} {
-		r := tc.rig(t)
-		_, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"})
-		var notReady ErrServerNotReady
-		if !errors.As(err, &notReady) || notReady.State != tc.state {
-			t.Fatalf("%s: err=%v", tc.name, err)
+		w := newWorlds(t)
+		tc.rig(w.survival)
+		result, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "bedrock", Name: "Sample Player"})
+		if err != nil || result.Allowlist != "updated" || result.Worlds == nil || len(result.Worlds) != 0 {
+			t.Fatalf("%s: result=%+v err=%v", tc.name, result, err)
 		}
-		if len(r.ssm.commands) != 0 {
-			t.Fatalf("%s: nothing may be sent to a server that is not ready", tc.name)
+		if w.record() != `[{"edition":"bedrock","uuid":"00000000-0000-0000-0009-01eed05d1009","name":"Sample Player"}]` {
+			t.Fatalf("%s: record %s", tc.name, w.record())
+		}
+		if len(w.survival.ssm.commands) != 0 || len(w.creative.ssm.commands) != 0 {
+			t.Fatalf("%s: nothing may be sent to a world that is not ready; its next start carries the list", tc.name)
 		}
 	}
 }
 
-func TestAllowlistNeverSendsAnUnknownPlayer(t *testing.T) {
-	r, _ := allowlistRig(t)
-	if _, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "remove", Edition: "bedrock", Name: "Nobody"}); !errors.Is(err, ErrPlayerNotFound) {
+func TestEachStartCarriesTheAllowlistAsTheServersOwnFile(t *testing.T) {
+	w := newWorlds(t)
+	for _, request := range []AllowlistRequest{{Operation: "add", Edition: "java", Name: "Steve"}, {Operation: "add", Edition: "bedrock", Name: "Sample Player"}} {
+		if _, err := w.worlds.Allowlist(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// whitelist.json's own format. Floodgate writes a Bedrock player as a dot and the gamertag with underscores.
+	whitelist := `[{"uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Steve"},{"uuid":"00000000-0000-0000-0009-01eed05d1009","name":".Sample_Player"}]`
+	r := w.creative
+	if err := finishStart(t, r); err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"set -eu",
+		`allowlist="$(mktemp)"`,
+		`trap 'rm -f "$allowlist"' EXIT`,
+		"printf '%s' '" + base64.StdEncoding.EncodeToString([]byte(whitelist)) + "' | base64 -d > \"$allowlist\"",
+		remoteCommand + ` start creative --mods=fawe --allowlist-file "$allowlist"`,
+	}, "\n")
+	if len(r.ssm.commands) != 1 || r.ssm.commands[0] != want {
+		t.Fatalf("commands %q", r.ssm.commands)
+	}
+	if strings.Contains(r.ssm.commands[0], "Steve") || strings.Contains(r.ssm.commands[0], steve.UUID) {
+		t.Fatal("the list must travel encoded, never as shell text")
+	}
+}
+
+func TestAStartFailsWhenItsAllowlistCannotBeRead(t *testing.T) {
+	w := newWorlds(t)
+	w.shared.params[allowlistName] = "Steve"
+	r := w.survival
+	if err := finishStart(t, r); err == nil || strings.Contains(err.Error(), "Steve") {
+		t.Fatalf("err=%v; a start never opens the game to a list it could not read, and never repeats what it read", err)
+	}
+	if session := r.session(t); session.Phase != Failed || len(r.ssm.commands) != 0 {
+		t.Fatalf("session %+v commands %v", session, r.ssm.commands)
+	}
+}
+
+func TestAllowlistNeverRecordsOrSendsAnUnknownPlayer(t *testing.T) {
+	w := allowlistRig(t)
+	if _, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "remove", Edition: "bedrock", Name: "Nobody"}); !errors.Is(err, ErrPlayerNotFound) {
 		t.Fatalf("err=%v", err)
 	}
-	if _, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Outage"}); err == nil || errors.Is(err, ErrPlayerNotFound) || !strings.Contains(err.Error(), "look up player") {
+	if _, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Outage"}); err == nil || errors.Is(err, ErrPlayerNotFound) || !strings.Contains(err.Error(), "look up player") {
 		t.Fatalf("err=%v", err)
 	}
 	for _, operation := range []string{"add", "remove"} {
-		if _, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: operation, Edition: "bedrock", Name: "Linked Player"}); !errors.Is(err, ErrLinkedAccount) {
+		if _, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: operation, Edition: "bedrock", Name: "Linked Player"}); !errors.Is(err, ErrLinkedAccount) {
 			t.Fatalf("%s: err=%v; a linked gamertag's own entry would not change who may join", operation, err)
 		}
 	}
-	if len(r.ssm.commands) != 0 {
-		t.Fatal("a failed lookup must send nothing")
+	if len(w.survival.ssm.commands) != 0 || w.record() != "[]" {
+		t.Fatal("a failed lookup must record and send nothing")
 	}
 }
 
-func TestAllowlistRemovesARenamedJavaPlayerByTheNameTheServerHolds(t *testing.T) {
-	removal := AllowlistRequest{Operation: "remove", Edition: "java", Name: "Old_Name"}
-	r, _ := allowlistRig(t)
-	r.ssm.invocation = []ssm.GetCommandInvocationOutput{success(`{"instance": "family", "edition": "java", "operation": "remove", "allowlist": "updated"}`)}
-	result, err := r.launcher.Allowlist(context.Background(), removal)
-	if err != nil || result.Allowlist != "updated" {
+func TestAllowlistRemovesARenamedJavaPlayerByTheNameTheRecordHolds(t *testing.T) {
+	removal := AllowlistRequest{Operation: "remove", Edition: "java", Name: "old_name"}
+	held, _ := json.Marshal([]Listed{{Edition: "java", Player: steve}, {Edition: "java", Player: renamed}})
+	w := allowlistRig(t)
+	w.shared.params[allowlistName] = string(held)
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("survival", "remove", "updated")}
+	result, err := w.worlds.Allowlist(context.Background(), removal)
+	if err != nil || result.Allowlist != "updated" || !slices.Equal(result.Worlds, []string{"survival"}) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	encoded := base64.StdEncoding.EncodeToString([]byte(`{"name":"Old_Name"}`))
-	if len(r.ssm.commands) != 1 || !strings.Contains(r.ssm.commands[0], "printf '%s' '"+encoded+"'") {
-		t.Fatalf("the adapter must get the name alone, with no UUID: %v", r.ssm.commands)
+	if w.record() != `[{"edition":"java","uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Steve"}]` {
+		t.Fatalf("record %s", w.record())
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte(`{"name":"old_name"}`))
+	if len(w.survival.ssm.commands) != 1 || !strings.Contains(w.survival.ssm.commands[0], "printf '%s' '"+encoded+"'") {
+		t.Fatalf("the adapter must get the name alone, with no UUID: %v", w.survival.ssm.commands)
 	}
 
-	// The server holding no entry under that name is the same answer as Mojang not knowing it.
-	r, _ = allowlistRig(t)
-	r.ssm.invocation = []ssm.GetCommandInvocationOutput{success(`{"instance": "family", "edition": "java", "operation": "remove", "allowlist": "not-listed"}`)}
-	if _, err := r.launcher.Allowlist(context.Background(), removal); !errors.Is(err, ErrPlayerNotFound) {
+	// A running server that holds no entry under that name leaves the record's removal standing.
+	w = allowlistRig(t)
+	w.shared.params[allowlistName] = string(held)
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("survival", "remove", "not-listed")}
+	if result, err := w.worlds.Allowlist(context.Background(), removal); err != nil || result.Allowlist != "updated" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	// A removal whose first try reached the record but not the server is finished by asking again.
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("survival", "remove", "updated")}
+	if result, err := w.worlds.Allowlist(context.Background(), removal); err != nil || result.Allowlist != "updated" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+
+	// Neither the record nor a running server holding the name is the same answer as Mojang not knowing it.
+	w = allowlistRig(t)
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("survival", "remove", "not-listed")}
+	if _, err := w.worlds.Allowlist(context.Background(), removal); !errors.Is(err, ErrPlayerNotFound) {
 		t.Fatalf("err=%v", err)
+	}
+	w = newWorlds(t)
+	if _, err := w.worlds.Allowlist(context.Background(), removal); !errors.Is(err, ErrPlayerNotFound) {
+		t.Fatalf("with every world stopped: err=%v", err)
 	}
 
 	// An add needs the account's UUID, and the adapter's not-listed answers only a removal by name.
-	r, _ = allowlistRig(t)
-	if _, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Old_Name"}); !errors.Is(err, ErrPlayerNotFound) || len(r.ssm.commands) != 0 {
-		t.Fatalf("err=%v commands=%v", err, r.ssm.commands)
+	w = allowlistRig(t)
+	if _, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Old_Name"}); !errors.Is(err, ErrPlayerNotFound) || len(w.survival.ssm.commands) != 0 || w.record() != "[]" {
+		t.Fatalf("err=%v commands=%v", err, w.survival.ssm.commands)
 	}
-	r, _ = allowlistRig(t)
-	r.ssm.invocation = []ssm.GetCommandInvocationOutput{success(`{"instance": "family", "edition": "java", "operation": "add", "allowlist": "not-listed"}`)}
-	if _, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"}); err == nil || errors.Is(err, ErrPlayerNotFound) {
+	w = allowlistRig(t)
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("survival", "add", "not-listed")}
+	if _, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"}); err == nil || errors.Is(err, ErrPlayerNotFound) {
 		t.Fatalf("err=%v", err)
 	}
 }
 
 func TestAllowlistPassesOnTheAdaptersReason(t *testing.T) {
-	r, _ := allowlistRig(t)
-	r.ssm.invocation = []ssm.GetCommandInvocationOutput{{Status: ssmtypes.CommandInvocationStatusFailed, ResponseCode: 1, StandardOutputContent: aws.String(`{"error": "the server is draining"}` + "\n")}}
-	_, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"})
-	if err == nil || !strings.HasSuffix(err.Error(), "ended with status Failed: the server is draining") {
+	w := allowlistRig(t)
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{{Status: ssmtypes.CommandInvocationStatusFailed, ResponseCode: 1, StandardOutputContent: aws.String(`{"error": "the server is draining"}` + "\n")}}
+	_, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"})
+	if err == nil || !strings.HasPrefix(err.Error(), "world survival: ") || !strings.HasSuffix(err.Error(), "ended with status Failed: the server is draining") {
 		t.Fatalf("err=%v", err)
 	}
 	for _, output := range []string{"", "Traceback (most recent call last):", `{"error": "` + strings.Repeat("x", 201) + `"}`} {
@@ -176,7 +288,7 @@ func TestAllowlistPassesOnTheAdaptersReason(t *testing.T) {
 }
 
 func TestAllowlistRejectsBadRequestsBeforeLookingAnythingUp(t *testing.T) {
-	r, looked := allowlistRig(t)
+	w := allowlistRig(t)
 	for _, request := range []AllowlistRequest{
 		{Operation: "ban", Edition: "java", Name: "Steve"},
 		{Operation: "add", Edition: "pocket", Name: "Steve"},
@@ -187,12 +299,12 @@ func TestAllowlistRejectsBadRequestsBeforeLookingAnythingUp(t *testing.T) {
 		{Operation: "add", Edition: "bedrock", Name: "SeventeenCharacters"},
 		{Operation: "add", Edition: "bedrock", Name: ""},
 	} {
-		if _, err := r.launcher.Allowlist(context.Background(), request); !errors.Is(err, ErrBadAllowlistRequest) {
+		if _, err := w.worlds.Allowlist(context.Background(), request); !errors.Is(err, ErrBadAllowlistRequest) {
 			t.Fatalf("%+v: err=%v", request, err)
 		}
 	}
-	if len(*looked) != 0 || len(r.ssm.commands) != 0 {
-		t.Fatal("a bad request must neither look up nor send anything")
+	if len(w.looked) != 0 || len(w.survival.ssm.commands) != 0 || w.record() != "[]" {
+		t.Fatal("a bad request must neither look up, record nor send anything")
 	}
 	for _, name := range []string{"Sample Player", "Player4Ever", "Underscore_", "Ångström 42"} {
 		if err := ValidateAllowlistRequest(AllowlistRequest{Operation: "remove", Edition: "bedrock", Name: name}); err != nil {
@@ -208,24 +320,46 @@ func TestAllowlistReportsAnAdapterRefusalOrAnUnconfirmedChange(t *testing.T) {
 	}{
 		{"refused", ssm.GetCommandInvocationOutput{Status: ssmtypes.CommandInvocationStatusSuccess, ResponseCode: 2, StandardOutputContent: aws.String("")}},
 		{"failed", ssm.GetCommandInvocationOutput{Status: ssmtypes.CommandInvocationStatusFailed}},
-		{"another change", success(`{"instance": "family", "edition": "java", "operation": "remove", "allowlist": "updated"}`)},
-		{"another instance", success(`{"instance": "other", "edition": "java", "operation": "add", "allowlist": "updated"}`)},
-		{"no verdict", success(`{"instance": "family", "edition": "java", "operation": "add"}`)},
+		{"another change", allowlisted("survival", "remove", "updated")},
+		{"another world", allowlisted("creative", "add", "updated")},
+		{"no verdict", success(`{"instance": "survival", "edition": "java", "operation": "add"}`)},
 		{"not json", success("allowlist: updated")},
 	} {
-		r, _ := allowlistRig(t)
-		r.ssm.invocation = []ssm.GetCommandInvocationOutput{tc.answer}
-		result, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"})
-		if err == nil || result != (AllowlistResult{}) {
+		w := allowlistRig(t)
+		w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{tc.answer}
+		result, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"})
+		if err == nil || result.Allowlist != "" || result.Worlds != nil {
 			t.Fatalf("%s: result=%+v err=%v", tc.name, result, err)
+		}
+		// The record keeps the change, so the same request finishes it on the running world.
+		w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("survival", "add", "updated")}
+		result, err = w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"})
+		if err != nil || result.Allowlist != "updated" || !slices.Equal(result.Worlds, []string{"survival"}) {
+			t.Fatalf("%s, asked again: result=%+v err=%v", tc.name, result, err)
 		}
 	}
 }
 
-func TestAllowlistNeedsAServer(t *testing.T) {
-	r, _ := allowlistRig(t)
-	r.launcher.Config.HostID = ""
-	if _, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"}); !errors.Is(err, ErrNoServer) {
+func TestAllowlistFailsWhenARunningWorldCannotBeRead(t *testing.T) {
+	w := allowlistRig(t)
+	w.creative.ec2.err = errors.New("throttled")
+	if _, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"}); err == nil || !strings.Contains(err.Error(), "world creative: ") {
+		t.Fatalf("err=%v; a world that may be running without the change must fail the request", err)
+	}
+}
+
+func TestAllowlistNeverPutsThePlayerInAnError(t *testing.T) {
+	// Errors are logged, and a refused write may repeat the list it was given.
+	w := newWorlds(t)
+	w.shared.putErr = errors.New("ValidationException: Value '[{\"name\":\"Steve\"}]' failed to satisfy constraint")
+	_, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"})
+	if err == nil || strings.Contains(err.Error(), "Steve") {
+		t.Fatalf("err=%v", err)
+	}
+	w = newWorlds(t)
+	w.shared.params[allowlistName] = `[{"edition":"java","uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Steve"}`
+	_, err = w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "remove", Edition: "java", Name: "Steve"})
+	if err == nil || strings.Contains(err.Error(), "Steve") {
 		t.Fatalf("err=%v", err)
 	}
 }

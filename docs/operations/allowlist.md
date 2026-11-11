@@ -1,18 +1,28 @@
 # Instance allowlist changes
 
-From anywhere, add or remove a player with the [Server control workflow](cloud-controls.md#the-server-control-workflow) (`allowlist-add` or `allowlist-remove` with the edition and the name) or `task server:allowlist OP=add EDITION=java PLAYER=<name>`. Both ask the [launcher](launcher.md#allowlist-changes), which looks the player up and runs the host command below on the live server; nothing runs where you run it. The rest of this page describes that host command, for the launcher's benefit and for a hands-on emergency.
+The family has one allowlist for every world: the allowlist of record, which the [launcher](launcher.md#allowlist-changes) keeps in the SSM parameter `/<resource_prefix>/launcher/allowlist` ([ADR 0009](../adr/0009-one-host-per-world.md)). From anywhere, add or remove a player with the [Server control workflow](cloud-controls.md#the-server-control-workflow) (`allowlist-add` or `allowlist-remove` with the edition and the name) or `task server:allowlist OP=add EDITION=java PLAYER=<name>`. Both ask the launcher, and neither takes a world. The launcher looks the player up, changes the record, and runs the host command below on each world that is running. A stopped world needs nothing: every start writes the record over that world's `whitelist.json` before the game starts, so the record always wins over what a server or a restored archive held. The answer names the running worlds the change reached.
 
-The host command is the Crafty adapter's `allowlist` action. It needs the configured instance (`family`) running with its Java port answering, holds the adapter's lifecycle lock, and refuses while the host is draining. The launcher installs the adapter it carries before it runs this command, so the host always has the version the launcher was deployed with ([ADR 0007](../adr/0007-the-launcher-carries-the-host-adapter.md)). The archive taken at the next stop includes `whitelist.json` with the rest of the server folder.
+A change therefore works with every world stopped, and one change covers all three worlds. After the first Deploy the worlds are fresh and the record is empty: add each player once ([worlds](worlds.md#the-first-deploy)). The record is the only list to edit. A `whitelist add` typed into a world's console lasts until that world's next start.
+
+The rest of this page describes the host command, for the launcher's benefit and for a hands-on emergency.
+
+The host command is the Crafty adapter's `allowlist` action. It needs the host's instance, which is its world's id, running with its Java port answering, holds the adapter's lifecycle lock, and refuses while the host is draining. The launcher installs the adapter it carries before it runs this command, so the host always has the version the launcher was deployed with ([ADR 0007](../adr/0007-the-launcher-carries-the-host-adapter.md)). The archive taken at the next stop includes `whitelist.json` with the rest of the server folder.
+
+## The list a start carries
+
+A start's `--allowlist-file` is a private regular file in `whitelist.json`'s own format: a JSON list of objects, each with exactly a canonical `uuid` and a `name` of 1 to 32 characters. The launcher writes it from the record, with a Java entry under the account's name and a Bedrock entry under the name Floodgate writes, a dot and the gamertag with its spaces as underscores. The adapter checks the file before anything changes and writes it over the stopped server's `whitelist.json`, owned like the file it replaces. A start without the flag leaves `whitelist.json` alone. Whether Floodgate admits a Bedrock player from an entry written this way is shown by the first Bedrock join of a player added while the world was stopped ([proof run](worlds.md#the-proof-run-for-a-world)); no test can show it.
+
+## The live change
 
 Provide one player's verified identity in a private JSON file owned by the user running the command, with mode `0600`. The object has `uuid` and `name` fields: use the actual server UUID in canonical lowercase hyphenated form, and the verified Java account name or unprefixed Bedrock gamertag. The file must refer to the same account in both fields. Identity verification remains required for each access change; test fixtures do not establish those identities. Craig resolved the console and family testing requirements on 2026-10-03; see the [current acceptance record](family-device-validation.md).
 
 ```sh
-sudo /usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json allowlist family add --edition java --player-file /private/java-player.json
-sudo /usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json allowlist family add --edition bedrock --player-file /private/bedrock-player.json
-sudo /usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json allowlist family remove --edition bedrock --player-file /private/bedrock-player.json
+sudo /usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json allowlist survival add --edition java --player-file /private/java-player.json
+sudo /usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json allowlist survival add --edition bedrock --player-file /private/bedrock-player.json
+sudo /usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json allowlist survival remove --edition bedrock --player-file /private/bedrock-player.json
 ```
 
-The adapter sends each console command through Crafty's API (`POST /api/v2/servers/<id>/stdin`), because the server has RCON off. Crafty writes every console command, with the name in it, to its audit log on the data disk and to its container log under `/var/lib/docker` on the encrypted root disk, and the game writes the change to `logs/latest.log`. A removal by name also has the game log the whole allowlist, by name. Crafty's two logs stay on the host; the server folder's `logs/`, like its `whitelist.json`, goes into the archive taken at the next stop.
+The adapter sends each console command through Crafty's API (`POST /api/v2/servers/<id>/stdin`), because the server has RCON off. Crafty writes every console command, with the name in it, to its audit log under `/srv/minecraft/crafty/` and to its container log under `/var/lib/docker`, both on the host's encrypted root disk, and the game writes the change to `logs/latest.log`. A removal by name also has the game log the whole allowlist, by name. Crafty's two logs stay on the host; the server folder's `logs/`, like its `whitelist.json`, goes into the archive taken at the next stop.
 
 Java changes use the server's `whitelist add/remove` command. This operator interface accepts 3–16 ASCII letters, digits, and underscores for Java names. Bedrock changes use Floodgate's `fwhitelist add/remove` command with the gamertag, without the configured Floodgate username prefix. The [Floodgate documentation](https://geysermc.org/wiki/floodgate/features/) defines that command routing.
 

@@ -58,10 +58,11 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
         # reads associate_public_ip_address=false. Without ignore_changes every plan taken
         # while the host is stopped, which is most of the time, would replace it.
         hosts = {
-            "infra": resource_blocks(INFRA)["aws_instance.host"],
+            "family": resource_blocks(INFRA)["aws_instance.host"],
+            "world": resource_blocks(INFRA)["aws_instance.world"],
         }
-        for root, body in hosts.items():
-            with self.subTest(root=root):
+        for host, body in hosts.items():
+            with self.subTest(host=host):
                 self.assertRegex(body, r"associate_public_ip_address\s*=\s*true")
                 self.assertRegex(body, r"lifecycle\s*\{[^}]*ignore_changes\s*=\s*\[\s*associate_public_ip_address\s*\]")
 
@@ -76,8 +77,9 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
     def test_host_launch_waits_for_its_internet_route(self):
         # The address exists from first boot, so cloud-init reaches packages and SSM at once;
         # the Elastic IP association used to order this after the route.
-        host = resource_blocks(INFRA)["aws_instance.host"]
-        self.assertRegex(host, r"depends_on\s*=\s*\[[^\]]*\baws_route\.internet\b[^\]]*\baws_route_table_association\.public\b")
+        for name in ("aws_instance.host", "aws_instance.world"):
+            with self.subTest(resource=name):
+                self.assertRegex(resource_blocks(INFRA)[name], r"depends_on\s*=\s*\[[^\]]*\baws_route\.internet\b[^\]]*\baws_route_table_association\.public\b")
 
     def test_storage_identity_has_no_dependency_on_replaceable_compute(self):
         for directory in [INFRA, INFRA / "state-bootstrap"]:
@@ -98,6 +100,32 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
         self.assertNotRegex(host, r"\binstance_market_options\s*\{")
         self.assertNotRegex(host, r"\bkey_name\s*=")
         self.assertNotIn("aws_ebs_volume", (INFRA / "network.tf").read_text())
+
+    def test_a_world_host_keeps_its_world_on_its_own_root_disk(self):
+        # A world host has no data disk (ADR 0009): the family host's retained disk stays the only one declared.
+        blocks = resource_blocks(INFRA)
+        world = blocks["aws_instance.world"]
+        self.assertNotRegex(world, r"\bebs_block_device\s*\{")
+        self.assertNotRegex(world, r"\binstance_market_options\s*\{")
+        self.assertNotRegex(world, r"\bkey_name\s*=")
+        self.assertRegex(world, r'instance_initiated_shutdown_behavior\s*=\s*"stop"')
+        self.assertEqual(
+            {name for name in blocks if name.startswith(("aws_ebs_volume.", "aws_volume_attachment."))},
+            {"aws_ebs_volume.data", "aws_volume_attachment.data"},
+        )
+        self.assertRegex(blocks["aws_volume_attachment.data"], r"instance_id\s*=\s*aws_instance\.host\.id\b")
+
+    def test_a_world_host_boots_the_family_ami_and_holds_nothing_of_the_server_content(self):
+        # Its user data carries the world's id, the bucket, the region and the AWS CLI installer only, so a
+        # change to the pinned server content never replaces a host.
+        world = resource_blocks(INFRA)["aws_instance.world"]
+        self.assertRegex(world, r"ami\s*=\s*data\.aws_ami\.host\.id")
+        self.assertRegex(world, r"user_data_base64\s*=\s*base64gzip\(templatefile\(")
+        self.assertIn("../scripts/world-bootstrap.sh.tftpl", world)
+        self.assertIn("../scripts/install_aws_cli.sh", world)
+        self.assertNotIn("server.json", world)
+        self.assertNotIn("minecraft_storage", world)
+        self.assertNotRegex(world, r"\bdata_volume_id\b|\bdata_filesystem_uuid\b")
 
     def test_only_separate_game_rules_can_introduce_ingress(self):
         blocks = resource_blocks(INFRA)

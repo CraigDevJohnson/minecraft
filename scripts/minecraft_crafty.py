@@ -6,7 +6,9 @@ workstation's minecraft_host.py keep sending the same `start`, `host-drain`, `ho
 `allowlist` requests. Crafty remains the only process manager: this adapter only asks Crafty's local
 API to start or stop the server or to run one console command, then makes a cold archive of the
 stopped server directory and stores it in S3. Before each start it brings the stopped server to the
-pinned content in server.json beside it (docs/adr/0008-the-adapter-applies-the-pinned-server-content.md).
+pinned content in server.json beside it (docs/adr/0008-the-adapter-applies-the-pinned-server-content.md):
+the base every world shares, then the host's own world and the mods that are on for it. The first start on
+a new or replaced host sets Crafty and the server up first and brings back the world's newest archive.
 In a Session Manager shell on the host, the operator also sends console lines with `console` and, on a
 freshly installed Crafty, creates the adapter's API key with `setup-api-key`.
 """
@@ -44,9 +46,11 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from minecraft_content import RAKNET_ALONE_LAST_VERSION, _approved_geyser, _managed_file_bytes  # noqa: E402  (approved Geyser configs and their bytes)
 
-# The pinned server content the launcher installs beside the adapter, and the Compose file install_crafty.sh wrote.
+# The pinned server content the launcher installs beside the adapter, and the Compose file each start renders from it.
 MANIFEST = Path(__file__).resolve().parent / "server.json"
 COMPOSE = Path("/opt/minecraft-crafty/compose.yaml")
+# What a world host's user data writes last, once Docker, the folders and minecraft-crafty.service are in place.
+BOOTSTRAPPED = Path("/var/lib/minecraft/bootstrapped")
 GEYSER_CONFIG = "plugins/Geyser-Spigot/config.yml"
 # Geyser 2.11 reads config version 8; 2.12, the first with Bedrock 26.60, adds keys the family server leaves at their
 # defaults and would rewrite an older file, so a manifest pins the version its Geyser build writes: 11 until 2.12.1
@@ -62,7 +66,11 @@ JAVA_NAME = re.compile(r"[A-Za-z0-9_]{3,16}")
 # A Crafty session or API token: it goes into an Authorization header, so one printable word.
 TOKEN = re.compile(r"[\x21-\x7e]{16,4096}")
 CONTAINER_SERVERS = "/crafty/servers/"
-ARTIFACT_HOSTS = {"fill-data.papermc.io", "download.geysermc.org", "github.com"}
+ARTIFACT_HOSTS = {"fill-data.papermc.io", "download.geysermc.org", "github.com", "cdn.modrinth.com"}
+# What every world takes from the base: the port Crafty publishes, and who may join and how the server is reached.
+SHARED_PROPERTIES = {"server-port", "online-mode", "white-list", "enforce-whitelist", "enable-rcon", "enable-query"}
+# The most memory a server Crafty creates may use, of an m7g.large host's 8 GiB.
+MAX_MEMORY_GB = 5
 STATE_DIR = "state"
 KEEP_ARCHIVES = 14
 STORAGE_FIELDS = ("size_bytes", "available_bytes", "used_percent")
@@ -278,6 +286,7 @@ class Host:
             raise CraftyError("AWS download failed")
 
     compose = COMPOSE
+    bootstrapped = BOOTSTRAPPED
 
     def read_compose(self) -> bytes | None:
         try:
@@ -289,15 +298,22 @@ class Host:
         write_durably(self.compose, content, mode=0o644)
 
     def compose_up(self) -> None:
-        """Have Docker bring Crafty's container in line with the Compose file and wait until it is up. Its own
-        output goes to standard error, so standard output stays the adapter's JSON answer."""
-        command = ["docker", "compose", "-f", str(self.compose), "up", "--detach", "--wait"]
+        """Have Docker bring Crafty's container in line with the Compose file and wait until it is up."""
+        self._run(["docker", "compose", "-f", str(self.compose), "up", "--detach", "--wait"], "docker compose did not bring Crafty up")
+
+    def start_service(self) -> None:
+        """Start minecraft-crafty.service, which brings Crafty up from the Compose file and drains before the host
+        shuts down. On a new host nothing has started it yet; started already, this changes nothing."""
+        self._run(["systemctl", "start", "minecraft-crafty.service"], "minecraft-crafty.service did not start")
+
+    def _run(self, command: list, failure: str) -> None:
+        # The command's own output goes to standard error, so standard output stays the adapter's JSON answer.
         try:
             result = subprocess.run(command, stdout=sys.stderr, timeout=600, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise CraftyError("docker compose could not run") from exc
+            raise CraftyError(failure) from exc
         if result.returncode:
-            raise CraftyError("docker compose did not bring Crafty up")
+            raise CraftyError(failure)
 
     def public_ipv4(self) -> str:
         """The host's current public IPv4 from IMDSv2: never through a proxy, and a redirect is refused."""
@@ -421,10 +437,17 @@ class Adapter:
         self.host = host or Host()
         self.root = Path(config["data_root"])
         self.timeouts = {"start": 300, "stop": 300, **config.get("timeouts", {})}
-        # The pinned server content a start applies first; without it a start leaves the content as it is.
+        # The pinned content of this host's world (world_content), which a start applies first; without it a start
+        # leaves the content as it is.
         self.manifest = manifest
 
     # Crafty lookups -------------------------------------------------------------------------
+
+    def created(self, instance: str) -> bool:
+        """Whether Crafty has a server of the instance's name, imported or still importing."""
+        name = self.config["instances"][instance]["server_name"]
+        servers = self.api.request("GET", "/api/v2/servers").get("data")
+        return any(isinstance(server, dict) and server.get("server_name") == name for server in servers or [])
 
     def server(self, instance: str) -> dict:
         name = self.config["instances"][instance]["server_name"]
@@ -459,8 +482,7 @@ class Adapter:
             raise CraftyError("archive name must be a plain .zip file name in Crafty's import/upload folder")
         if type(max_memory_gb) is not int or not 1 <= max_memory_gb <= 64:
             raise CraftyError("maximum memory must be a whole number of GB from 1 through 64")
-        servers = self.api.request("GET", "/api/v2/servers").get("data")
-        if any(isinstance(server, dict) and server.get("server_name") == settings["server_name"] for server in servers or []):
+        if self.created(instance):
             # A rerun after a slow import resumes the wait; a finished server is never imported twice.
             server = self.server(instance)
             if (self.server_dir(server) / "paper.jar").is_file() and not self._importing(server):
@@ -584,6 +606,11 @@ class Adapter:
     def record(self, instance: str, **fields) -> None:
         write_durably(self.state_path(instance), fields)
 
+    def provisioned(self, instance: str) -> Path:
+        """The marker a start writes last when it has set this host's server up (provision). Until it is there no
+        game has run here, so the host holds nothing to archive."""
+        return self.root / "crafty" / STATE_DIR / f"{instance}-provisioned"
+
     # Drain barrier: once a drain starts, no session may start again until the host reboots,
     # so a caller that drained can stop EC2 without racing a new start.
 
@@ -609,6 +636,9 @@ class Adapter:
             self.host.sleep(5)
 
     def status(self, instance: str) -> dict:
+        if not self.provisioned(instance).exists():
+            # A host no start has finished setting up answers without Crafty, which may not be up or hold a server yet.
+            return {"instance": instance, "application": "stopped", "backup": "not-required", "ready": False}
         server = self.server(instance)
         port = self.config["instances"][instance]["java_port"]
         running = self.running(server)
@@ -630,13 +660,65 @@ class Adapter:
         except CraftyError:
             return False
 
-    def start(self, instance: str) -> dict:
+    def start(self, instance: str, allowlist: list | None = None) -> dict:
         with self.lifecycle():
             if self.draining():
                 raise CraftyError("host is draining; finish stopping the host before starting another session")
-            return self._start(instance)
+            if self.manifest is not None and not self.provisioned(instance).exists():
+                self.provision(instance)
+            return self._start(instance, allowlist)
 
-    def _start(self, instance: str) -> dict:
+    def provision(self, instance: str) -> None:
+        """Set Crafty and the server up on a new or replaced host, by the steps docs/operations/crafty.md once gave
+        for doing it by hand, and bring back the world's newest archive when S3 holds one. Every step first checks
+        whether an earlier start did it, so a start that ran out of time is carried on by the next. The marker
+        goes last: until then no game starts here and a drain archives nothing."""
+        # The first start may arrive while the host's user data is still installing Docker and the service.
+        self.wait(self.host.bootstrapped.exists, 600, "the host's setup did not finish")
+        compose = render_compose(self.manifest, self.root / "crafty")
+        if self.host.read_compose() != compose:
+            self.host.write_compose(compose)
+        self.host.start_service()
+        token_file, creds = Path(self.config["token_file"]), self.root / "crafty" / "config" / "default-creds.txt"
+
+        def keyed() -> bool:
+            try:
+                self.setup_api_key()
+            except CraftyError:
+                # Crafty is still starting and has not written or does not yet accept its first login, or an
+                # earlier start made the key already.
+                return os.path.lexists(token_file) and not os.path.lexists(creds)
+            return True
+
+        self.wait(keyed, self.timeouts["start"], "Crafty's API key could not be set up; check minecraft-crafty.service")
+        self.wait(self.api_ready, self.timeouts["start"], "Crafty's API did not come up; check minecraft-crafty.service")
+        staged = self.root / "crafty" / "import" / instance
+        archive = staged.parent / "upload" / f"{instance}.zip"
+
+        def clear() -> None:
+            shutil.rmtree(staged, ignore_errors=True)
+            archive.unlink(missing_ok=True)
+
+        if self.created(instance):
+            self._await_import(instance, self.server(instance))
+        else:
+            clear()  # what a start cut off before Crafty took them left
+            stage_import(self.manifest, staged, fetch=self.host.fetch, archive=archive)
+            self.import_server(instance, archive.name, MAX_MEMORY_GB)
+        clear()
+        present, keys = self.stored(self.config["backup"], f"instances/{instance}/crafty/")
+        verified = [key for key in keys if f"{key}.sha256" in present]
+        if not verified and present:
+            raise CraftyError("S3 holds objects for this world but no archive with its SHA-256; a fresh world is not started over them")
+        if verified:
+            # The folder set aside is the server just created, or what an earlier start restored from S3: nobody
+            # has played in it, because no game starts before the marker.
+            replaced = self._restore(instance, verified[-1])["replaced"]
+            if replaced:
+                shutil.rmtree(replaced, ignore_errors=True)
+        write_durably(self.provisioned(instance), {"restored": verified[-1] if verified else None})
+
+    def _start(self, instance: str, allowlist: list | None = None) -> dict:
         # Right after an EC2 start, Crafty's container may still be booting.
         self.wait(self.api_ready, self.timeouts["start"], "Crafty's API did not come up; check minecraft-crafty.service")
         server = self.server(instance)
@@ -644,6 +726,8 @@ class Adapter:
         if not self.running(server):
             if self.manifest is not None:
                 server = self.apply_content(instance, server)
+            if allowlist is not None:
+                self.apply_allowlist(server, allowlist)
             # Mark the session first, so a crash before the next drain can never look backed up.
             self.record(instance, backup="pending", boot_id=self.host.boot_id())
             self.action(server, "start_server")
@@ -656,6 +740,9 @@ class Adapter:
             return self._stop(instance)
 
     def _stop(self, instance: str) -> dict:
+        if not self.provisioned(instance).exists():
+            # Nothing to archive, and a server created but not yet restored must never become the newest archive.
+            return {"instance": instance, "application": "stopped", "backup": "not-required"}
         server = self.server(instance)
         port = self.config["instances"][instance]["java_port"]
         if self.running(server):
@@ -692,96 +779,99 @@ class Adapter:
         under crafty/staging: until the next restore when its world is in S3, otherwise until the operator
         deletes it."""
         with self.lifecycle():
-            prefix = f"instances/{instance}/crafty/"
-            if not re.fullmatch(re.escape(prefix) + r"[0-9]{8}T[0-9]{6}Z\.tar\.gz", key):
-                raise CraftyError("restore needs the key of one of this instance's archives")
-            if self.draining():
-                raise CraftyError("host is draining; finish stopping the host before restoring")
-            # The launcher restores right after an EC2 start, while Crafty's container may still be booting.
-            self.wait(self.api_ready, self.timeouts["start"], "Crafty's API did not come up; check minecraft-crafty.service")
-            server = self.server(instance)
-            if self.running(server):
-                raise CraftyError("stop the server before restoring it")
-            target, backup = self.server_dir(server), self.config["backup"]
-            staging = self.root / "crafty" / "staging"
-            staging.mkdir(mode=0o700, parents=True, exist_ok=True)
-            # Each is another copy of a world on the data disk: work folders of restores cut off before their
-            # cleanup (mkdtemp's eight-character names), and the folders earlier restores replaced whose worlds
-            # were in S3. Only plain folders go. An unarchived-* folder, and a replaced-* folder an adapter before
-            # this one left without checking its world, stay until the operator deletes them.
-            leftover = re.compile(rf"archived-{re.escape(instance)}-[0-9]{{8}}T[0-9]{{6}}Z|restore-[a-z0-9_]{{8}}")
-            with os.scandir(staging) as entries:
-                stale = [entry.path for entry in entries if leftover.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False)]
-            for path in stale:
-                shutil.rmtree(path, ignore_errors=True)
-            work = Path(tempfile.mkdtemp(dir=staging, prefix="restore-"))
+            return self._restore(instance, key)
+
+    def _restore(self, instance: str, key: str) -> dict:
+        prefix = f"instances/{instance}/crafty/"
+        if not re.fullmatch(re.escape(prefix) + r"[0-9]{8}T[0-9]{6}Z\.tar\.gz", key):
+            raise CraftyError("restore needs the key of one of this instance's archives")
+        if self.draining():
+            raise CraftyError("host is draining; finish stopping the host before restoring")
+        # The launcher restores right after an EC2 start, while Crafty's container may still be booting.
+        self.wait(self.api_ready, self.timeouts["start"], "Crafty's API did not come up; check minecraft-crafty.service")
+        server = self.server(instance)
+        if self.running(server):
+            raise CraftyError("stop the server before restoring it")
+        target, backup = self.server_dir(server), self.config["backup"]
+        staging = self.root / "crafty" / "staging"
+        staging.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Each is another copy of a world on the data disk: work folders of restores cut off before their
+        # cleanup (mkdtemp's eight-character names), and the folders earlier restores replaced whose worlds
+        # were in S3. Only plain folders go. An unarchived-* folder, and a replaced-* folder an adapter before
+        # this one left without checking its world, stay until the operator deletes them.
+        leftover = re.compile(rf"archived-{re.escape(instance)}-[0-9]{{8}}T[0-9]{{6}}Z|restore-[a-z0-9_]{{8}}")
+        with os.scandir(staging) as entries:
+            stale = [entry.path for entry in entries if leftover.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False)]
+        for path in stale:
+            shutil.rmtree(path, ignore_errors=True)
+        work = Path(tempfile.mkdtemp(dir=staging, prefix="restore-"))
+        try:
+            expected = self.archive_checksum(backup, key, work / "checksum")
+            counted = {}
+
+            def read(source) -> None:
+                counted["source"] = _CountedReader(source)
+                # The archive is this adapter's own, so its owners and modes are kept (restored_member).
+                with tarfile.open(fileobj=counted["source"], mode="r|gz") as bundle:
+                    bundle.extractall(work / "files", filter=restored_member, numeric_owner=True)
+                while counted["source"].read(1024 * 1024):
+                    pass
+
             try:
-                expected = self.archive_checksum(backup, key, work / "checksum")
-                counted = {}
-
-                def read(source) -> None:
-                    counted["source"] = _CountedReader(source)
-                    # The archive is this adapter's own, so its owners and modes are kept (restored_member).
-                    with tarfile.open(fileobj=counted["source"], mode="r|gz") as bundle:
-                        bundle.extractall(work / "files", filter=restored_member, numeric_owner=True)
-                    while counted["source"].read(1024 * 1024):
-                        pass
-
-                try:
-                    self.host.download(backup["region"], backup["bucket"], key, read)
-                except (tarfile.TarError, EOFError) as exc:
-                    raise CraftyError("the archive could not be unpacked") from exc
-                except OSError as exc:
-                    if exc.errno != errno.ENOSPC:
-                        raise
-                    raise CraftyError("the data disk filled up while unpacking the archive; grow the disk, then restore again") from exc
-                digest = counted["source"].digest.hexdigest()
-                restored = work / "files" / instance
-                if digest != expected or not restored.is_dir() or restored.is_symlink():
-                    raise CraftyError("the archive does not match its recorded SHA-256")
-                # The world in place is in S3 only when the last archive stored it unchanged, checked now, after the
-                # download, since Crafty's UI may have run it meanwhile. Only then may a later restore remove the
-                # folder this one replaces. Missing state proves nothing: a session run from Crafty's own UI before
-                # the adapter's first start leaves none.
-                archived = self.backup_state(instance) == "complete" and self.unchanged(instance)
-                # Crafty's own UI could have started the server while the archive unpacked, or while the check above
-                # read the world, so this is the last look before the swap. Crafty reports a start only once it has
-                # sampled the game's CPU for half a second, so the host is asked too: a game works in its folder.
-                if self.running(server) or (target.exists() and self.host.works_in(target)):
-                    raise CraftyError("the server was started during the restore; stop it and restore again")
-                replaced = None
-                if target.exists():
-                    kept = "archived" if archived else "unarchived"
-                    replaced = staging / f"{kept}-{instance}-{self.host.now().strftime('%Y%m%dT%H%M%SZ')}"
-                    target.rename(replaced)
-                try:
-                    restored.rename(target)
-                except BaseException:
-                    if replaced is not None:
-                        replaced.rename(target)  # never leave the server without a folder
+                self.host.download(backup["region"], backup["bucket"], key, read)
+            except (tarfile.TarError, EOFError) as exc:
+                raise CraftyError("the archive could not be unpacked") from exc
+            except OSError as exc:
+                if exc.errno != errno.ENOSPC:
                     raise
-                # Crafty has no lock this adapter can hold, so a start from its UI in the instant between that look
-                # and the swap is caught here instead: its game works in the folder just moved aside, which may then
-                # hold the only copy of its play. No later restore may remove that folder, and the restore fails for
-                # the operator. A look that cannot be answered counts as such a start. The message fits the
-                # launcher's 200 bytes with the longest instance name.
+                raise CraftyError("the data disk filled up while unpacking the archive; grow the disk, then restore again") from exc
+            digest = counted["source"].digest.hexdigest()
+            restored = work / "files" / instance
+            if digest != expected or not restored.is_dir() or restored.is_symlink():
+                raise CraftyError("the archive does not match its recorded SHA-256")
+            # The world in place is in S3 only when the last archive stored it unchanged, checked now, after the
+            # download, since Crafty's UI may have run it meanwhile. Only then may a later restore remove the
+            # folder this one replaces. Missing state proves nothing: a session run from Crafty's own UI before
+            # the adapter's first start leaves none.
+            archived = self.backup_state(instance) == "complete" and self.unchanged(instance)
+            # Crafty's own UI could have started the server while the archive unpacked, or while the check above
+            # read the world, so this is the last look before the swap. Crafty reports a start only once it has
+            # sampled the game's CPU for half a second, so the host is asked too: a game works in its folder.
+            if self.running(server) or (target.exists() and self.host.works_in(target)):
+                raise CraftyError("the server was started during the restore; stop it and restore again")
+            replaced = None
+            if target.exists():
+                kept = "archived" if archived else "unarchived"
+                replaced = staging / f"{kept}-{instance}-{self.host.now().strftime('%Y%m%dT%H%M%SZ')}"
+                target.rename(replaced)
+            try:
+                restored.rename(target)
+            except BaseException:
                 if replaced is not None:
-                    try:
-                        started = self.host.works_in(replaced) or self.running(server)
-                    except (CraftyError, OSError):
-                        started = True
-                    if started:
-                        if kept == "archived":
-                            replaced = replaced.rename(replaced.with_name("un" + replaced.name))
-                        raise CraftyError(f"the server started as the restore swapped folders; kept staging/{replaced.name}; "
-                                          "stop it, check which world it played, restore again")
-                # The unpacked files and both renames reach the disk before the record says the archive is in place,
-                # so a power loss never leaves a record of a restore whose world the next boot does not have.
-                self.host.flush()
-                self.record(instance, backup="complete", key=key, sha256=digest, boot_id=self.host.boot_id(),
-                            fingerprint=fingerprint(target))
-            finally:
-                shutil.rmtree(work, ignore_errors=True)
+                    replaced.rename(target)  # never leave the server without a folder
+                raise
+            # Crafty has no lock this adapter can hold, so a start from its UI in the instant between that look
+            # and the swap is caught here instead: its game works in the folder just moved aside, which may then
+            # hold the only copy of its play. No later restore may remove that folder, and the restore fails for
+            # the operator. A look that cannot be answered counts as such a start. The message fits the
+            # launcher's 200 bytes with the longest instance name.
+            if replaced is not None:
+                try:
+                    started = self.host.works_in(replaced) or self.running(server)
+                except (CraftyError, OSError):
+                    started = True
+                if started:
+                    if kept == "archived":
+                        replaced = replaced.rename(replaced.with_name("un" + replaced.name))
+                    raise CraftyError(f"the server started as the restore swapped folders; kept staging/{replaced.name}; "
+                                      "stop it, check which world it played, restore again")
+            # The unpacked files and both renames reach the disk before the record says the archive is in place,
+            # so a power loss never leaves a record of a restore whose world the next boot does not have.
+            self.host.flush()
+            self.record(instance, backup="complete", key=key, sha256=digest, boot_id=self.host.boot_id(),
+                        fingerprint=fingerprint(target))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
         return {"instance": instance, "restored": key, "replaced": str(replaced) if replaced else None}
 
     def archive_checksum(self, backup: dict, key: str, scratch: Path) -> str:
@@ -850,10 +940,14 @@ class Adapter:
             print(f"warning: could not prune old archives: {exc}", file=sys.stderr)
         return {"key": key, "sha256": digest}
 
-    def prune(self, backup: dict, prefix: str) -> None:
+    def stored(self, backup: dict, prefix: str) -> tuple[set, list]:
+        """Every key S3 holds under prefix, and those of them that are archives, oldest first."""
         listing = self.host.aws(backup["region"], "s3api", "list-objects-v2", "--bucket", backup["bucket"], "--prefix", prefix)
         present = {item.get("Key", "") for item in listing.get("Contents", [])}
-        keys = sorted(key for key in present if re.fullmatch(re.escape(prefix) + r"[0-9]{8}T[0-9]{6}Z\.tar\.gz", key))
+        return present, sorted(key for key in present if re.fullmatch(re.escape(prefix) + r"[0-9]{8}T[0-9]{6}Z\.tar\.gz", key))
+
+    def prune(self, backup: dict, prefix: str) -> None:
+        present, keys = self.stored(backup, prefix)
         # Only an archive with its checksum is a recovery point, so only those count toward the kept
         # number. Anything older than the oldest one kept goes, with or without a checksum.
         verified = [key for key in keys if f"{key}.sha256" in present]
@@ -904,31 +998,19 @@ class Adapter:
             raise CraftyError("the server started while its content was being applied; stop it, then start it again")
         return server
 
-    def content_path(self, instance: str) -> Path:
-        return self.root / "crafty" / STATE_DIR / f"{instance}-content.json"
-
     def apply_files(self, instance: str, server: dict) -> None:
-        """Replace each jar and managed file that differs from its pin, and remove the jars an earlier manifest
-        pinned that this one does not. Downloads finish before the server folder changes."""
+        """Replace each jar and managed file that differs from its pin, and remove every other jar directly in
+        plugins/: a mod that is off, or a jar a restored archive or an earlier manifest left, since a rebuilt host
+        keeps no record of earlier pins. A plugin's own data folder stays, and so does the file a mod that is now
+        off managed. Downloads finish before the server folder changes."""
         artifacts = self.manifest["artifacts"]
         wanted = {artifact["path"] for artifact in artifacts}
-        try:
-            recorded = json.loads(self.content_path(instance).read_text())
-            pinned = recorded["artifacts"]
-        except FileNotFoundError:
-            recorded, pinned = None, []  # a server staged from the first manifest holds only its own jars
-        except (OSError, ValueError, TypeError, KeyError):
-            pinned = None
-        if not isinstance(pinned, list) or not all(isinstance(path, str) and JAR_PATH.fullmatch(path) for path in pinned):
-            raise CraftyError("the record of the server's applied content cannot be read")
-        # Every jar a manifest has pinned, so a later one removes it, even from a restored older archive.
-        pinned = sorted(wanted | set(pinned))
         with _ServerFolder(self.server_dir(server)) as folder:
             # Paper first, so a later failure never leaves a new Paper for the next start to find unarchived.
             changed = sorted((artifact for artifact in artifacts if folder.digest(artifact["path"]) != artifact["sha256"]),
                              key=lambda artifact: artifact["name"] != "paper")
             managed = [item for item in self.manifest.get("managed_files", []) if folder.digest(item["path"]) != item["sha256"]]
-            stale = [path for path in pinned if path not in wanted and folder.exists(path)]
+            stale = [path for path in folder.plugin_jars() if path not in wanted]
             if changed or managed or stale:
                 # A new Paper upgrades the world on its first start, so the last archive must hold the world as it is.
                 if any(artifact["name"] == "paper" for artifact in changed) and not self.unchanged(instance):
@@ -943,8 +1025,6 @@ class Adapter:
                     # Downloads take a while; never change the jars under a server someone started meanwhile.
                     if self.running(server):
                         raise CraftyError("the server started while its content was downloading; stop it, then start it again")
-                    # Record every jar before any lands, so a later manifest can remove what this change leaves.
-                    write_durably(self.content_path(instance), {"artifacts": pinned})
                     for artifact in changed:
                         with open(staged[artifact["path"]], "rb") as jar:
                             folder.write(artifact["path"], iter(lambda: jar.read(1024 * 1024), b""), artifact["sha256"])
@@ -954,9 +1034,15 @@ class Adapter:
                         folder.remove(path)
                 finally:
                     shutil.rmtree(work, ignore_errors=True)
-        record = {"artifacts": pinned, "revision": self.manifest.get("revision")}
-        if recorded != record:
-            write_durably(self.content_path(instance), record)
+
+    def apply_allowlist(self, server: dict, entries: list) -> None:
+        """Write the family allowlist the launcher carried over the stopped server's whitelist.json, as the managed
+        files are written, so the game loads it at this start. An allowlist already in place stays as it is."""
+        data = (json.dumps(entries, indent=2) + "\n").encode()
+        digest = hashlib.sha256(data).hexdigest()
+        with _ServerFolder(self.server_dir(server)) as folder:
+            if folder.digest("whitelist.json") != digest:
+                folder.write("whitelist.json", [data], digest)
 
     def apply_compose(self) -> bool:
         """Write the Compose file the manifest calls for and have Docker apply it, answering whether Docker ran.
@@ -1283,16 +1369,16 @@ class _ServerFolder:
                 digest.update(chunk)
         return digest.hexdigest()
 
-    def exists(self, path: str) -> bool:
+    def plugin_jars(self) -> list:
+        """The path of every jar directly in plugins/, whatever put it there. Folders are never listed."""
         try:
-            folder, name = self._parent(path)
+            folder, _ = self._parent("plugins/jar")
         except FileNotFoundError:
-            return False
+            return []
         try:
-            os.stat(name, dir_fd=folder, follow_symlinks=False)
-            return True
-        except FileNotFoundError:
-            return False
+            with os.scandir(folder) as entries:
+                return sorted(f"plugins/{entry.name}" for entry in entries
+                              if entry.name.endswith(".jar") and not entry.is_dir(follow_symlinks=False))
         finally:
             os.close(folder)
 
@@ -1355,28 +1441,49 @@ class _ServerFolder:
             os.close(folder)
 
 
-def read_player_file(path: Path) -> dict:
-    """Read the private identity file the launcher writes for one allowlist change: a regular file owned by
-    this user with mode 0600, never a link. Its contents are never echoed."""
+def read_private(path: Path, limit: int, name: str):
+    """The JSON in a private file the launcher writes for one command: a regular file owned by this user with
+    mode 0600, never a link, of at most limit bytes. Its contents are never echoed."""
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
-        raise CraftyError("cannot open the private player file") from exc
+        raise CraftyError(f"cannot open the private {name} file") from exc
     with os.fdopen(descriptor, "rb") as stream:
         metadata = os.fstat(stream.fileno())
         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()
                 or stat.S_IMODE(metadata.st_mode) != 0o600):
-            raise CraftyError("the player file must be a private regular file (mode 0600) owned by this user")
-        data = stream.read(PLAYER_FILE_LIMIT + 1)
-    if len(data) > PLAYER_FILE_LIMIT:
-        raise CraftyError("the player file exceeded its size limit")
+            raise CraftyError(f"the {name} file must be a private regular file (mode 0600) owned by this user")
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise CraftyError(f"the {name} file exceeded its size limit")
     try:
-        value = json.loads(data)
+        return json.loads(data)
     except ValueError:
-        raise CraftyError("the player file is not JSON") from None
+        raise CraftyError(f"the {name} file is not JSON") from None
+
+
+def read_player_file(path: Path) -> dict:
+    """The identity of the one player an allowlist change names."""
+    value = read_private(path, PLAYER_FILE_LIMIT, "player")
     if not isinstance(value, dict):
         raise CraftyError("the player file must hold a JSON object")
     return value
+
+
+def read_allowlist_file(path: Path) -> list:
+    """The family allowlist a start carries, in whitelist.json's own format: each player's UUID and name."""
+    from minecraft_access import AccessError, canonical_uuid  # only a start that carries the allowlist needs it
+
+    entries = read_private(path, ALLOWLIST_LIMIT, "allowlist")
+    try:
+        valid = isinstance(entries, list) and all(
+            isinstance(entry, dict) and set(entry) == {"uuid", "name"} and canonical_uuid(entry["uuid"])
+            and isinstance(entry["name"], str) and 1 <= len(entry["name"]) <= 32 for entry in entries)
+    except AccessError:
+        valid = False
+    if not valid:
+        raise CraftyError("the allowlist file must list each player's canonical UUID and a name of 1 to 32 characters")
+    return entries
 
 
 def write_durably(path: Path, value: dict | bytes, *, mode: int | None = None) -> None:
@@ -1421,36 +1528,77 @@ def sync_folder(path: Path) -> None:
 # First setup: stage the reviewed server files for Crafty's "import from folder" ------------
 
 def load_manifest(path: Path) -> dict:
+    """The pinned server content, schema 2: the base every world's server holds, the catalog of mods, and the worlds
+    in display order, each with its own server properties and the mods that may be switched on it."""
     try:
         manifest = json.loads(Path(path).read_text())
     except (OSError, ValueError) as exc:
         raise CraftyError("cannot read the pinned server content") from exc
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1 or not re.fullmatch(
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 2 or not re.fullmatch(
             r"registry\.gitlab\.com/crafty-controller/crafty-4@sha256:[0-9a-f]{64}", manifest.get("crafty", {}).get("image", "")):
-        raise CraftyError("manifest must pin the Crafty image by digest")
+        raise CraftyError("manifest must be schema 2 and pin the Crafty image by digest")
+    base, mods, worlds = manifest.get("base"), manifest.get("mods"), manifest.get("worlds")
+    if not isinstance(base, dict) or not isinstance(mods, dict) or not isinstance(worlds, list) or not worlds:
+        raise CraftyError("manifest must hold the base content, the mods and at least one world")
     names, paths = set(), set()
-    for artifact in manifest.get("artifacts", []):
+
+    def pin(name: str, artifact: dict) -> None:
         url = urllib.parse.urlsplit(artifact.get("url", ""))
         path = artifact.get("path", "")
-        if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", str(artifact.get("name", ""))) or artifact["name"] in names
+        if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", str(name)) or name in names
                 or path in paths or not SHA256.fullmatch(artifact.get("sha256", ""))
                 or url.scheme != "https" or url.netloc not in ARTIFACT_HOSTS or url.query or "latest" in url.path.lower()
                 or not JAR_PATH.fullmatch(path)):
-            raise CraftyError("every artifact needs a plain unique name and jar path, an exact HTTPS URL and a SHA-256")
-        names.add(artifact["name"])
+            raise CraftyError("every artifact and mod needs a plain unique name and jar path, an exact HTTPS URL and a SHA-256")
+        names.add(name)
         paths.add(path)
-    if not {"paper", "geyser", "floodgate", "multiverse-core", "multiverse-inventories"} <= names:
-        raise CraftyError("manifest must include Paper, Geyser, Floodgate and Multiverse")
-    for managed in manifest.get("managed_files", []):
+
+    for artifact in base.get("artifacts", []):
+        pin(artifact.get("name", ""), artifact)
+    if not {"paper", "geyser", "floodgate"} <= names:
+        raise CraftyError("manifest must include Paper, Geyser and Floodgate")
+    for name, mod in mods.items():
+        # A mod's id names its jar among the artifacts of a world it is on for (world_content).
+        pin(name, mod)
+        if not INSTANCE_ID.fullmatch(name) or not mod["path"].startswith("plugins/"):
+            raise CraftyError("every mod needs an id of the kind a world has and a jar in plugins/")
+    for managed in [*base.get("managed_files", []), *(item for mod in mods.values() for item in mod.get("managed_files", []))]:
         # Written under sudo, so only plain relative paths inside the server folder are accepted.
         if not re.fullmatch(r"(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*", str(managed.get("path", ""))):
             raise CraftyError("managed file paths must be plain relative paths")
         if hashlib.sha256(_managed_file_bytes(managed)).hexdigest() != managed.get("sha256"):
             raise CraftyError("managed configuration checksum mismatch")
-    if not isinstance(manifest.get("server_properties"), dict) or type(manifest["server_properties"].get("server-port")) is not int:
+    if not isinstance(base.get("server_properties"), dict) or type(base["server_properties"].get("server-port")) is not int:
         raise CraftyError("manifest must include server properties with the Java port")
-    bedrock_transport(manifest)
+    ids = set()
+    for world in worlds:
+        properties, switches = world.get("server_properties"), world.get("mods")
+        if (not INSTANCE_ID.fullmatch(str(world.get("id", ""))) or world["id"] in ids
+                or not isinstance(world.get("name"), str) or not world["name"]
+                or not isinstance(properties, dict) or SHARED_PROPERTIES & set(properties)
+                or not isinstance(switches, dict) or not set(switches) <= set(mods)
+                or any(type(default) is not bool for default in switches.values())):
+            raise CraftyError("every world needs a unique id, a name, server properties of its own and mods from the catalog")
+        ids.add(world["id"])
+    bedrock_transport(base)
     return manifest
+
+
+def world_content(manifest: dict, world: str, mods: list | None = None) -> dict:
+    """What one world's server holds with mods switched on, as one server's content: the base's artifacts and
+    managed files with each mod's jar and files, and the base's server properties under the world's own. Without
+    mods, the world's defaults are on. A mod the manifest does not list for the world is refused."""
+    entry = next((item for item in manifest["worlds"] if item["id"] == world), None)
+    if entry is None:
+        raise CraftyError("the pinned server content has no such world")
+    if mods is None:
+        mods = [name for name, default in entry["mods"].items() if default]
+    if not set(mods) <= set(entry["mods"]):
+        raise CraftyError("the pinned server content lists no such mod for this world")
+    base, on = manifest["base"], [manifest["mods"][name] | {"name": name} for name in sorted(set(mods))]
+    return {"crafty": manifest["crafty"], "artifacts": base["artifacts"] + on,
+            "managed_files": base.get("managed_files", []) + [item for mod in on for item in mod.get("managed_files", [])],
+            "server_properties": base["server_properties"] | entry["server_properties"]}
 
 
 def bedrock_transport(manifest: dict) -> str:
@@ -1467,7 +1615,7 @@ def bedrock_transport(manifest: dict) -> str:
 
 def render_compose(manifest: dict, crafty_root: Path) -> bytes:
     """Crafty's Compose file: the pinned image, the game ports the transport needs, the web UI on loopback only (reached
-    through SSM), and Crafty's folders on the retained disk."""
+    through SSM), and Crafty's folders under the data root. It is the same for every world: only the base decides it."""
     java = manifest["server_properties"]["server-port"]
     ports = [f"{java}:{java}/tcp", "19132:19132/udp"]
     if bedrock_transport(manifest) == "both":
@@ -1581,12 +1729,17 @@ def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("/etc/minecraft/operator.json"))
     commands = parser.add_subparsers(dest="action", required=True)
-    for name in ("start", "stop", "status"):
+    start = commands.add_parser("start")
+    start.add_argument("instance")
+    start.add_argument("--mods", help="the mods that are on, as ids with commas between; without it, the world's defaults")
+    start.add_argument("--allowlist-file", type=Path, help="a private file in whitelist.json's format to start the server with")
+    for name in ("stop", "status"):
         commands.add_parser(name).add_argument("instance")
     commands.add_parser("host-drain")
     commands.add_parser("host-status")
     stage = commands.add_parser("stage-import", help="download and verify the pinned server files for a first Crafty import")
     stage.add_argument("--manifest", type=Path, required=True)
+    stage.add_argument("--world", required=True, help="the world to stage, with its default mods")
     stage.add_argument("--destination", type=Path, required=True)
     stage.add_argument("--archive", type=Path, help="also write the .zip that Crafty 4.11 imports")
     compose = commands.add_parser("render-compose", help="print the Compose file the pinned server content calls for")
@@ -1595,7 +1748,7 @@ def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
     create = commands.add_parser("import-server", help="create the Crafty server from a staged archive in import/upload")
     create.add_argument("instance")
     create.add_argument("--archive-name", required=True)
-    create.add_argument("--max-memory-gb", type=int, default=5)
+    create.add_argument("--max-memory-gb", type=int, default=MAX_MEMORY_GB)
     restore = commands.add_parser("restore", help="replace the stopped server folder with a verified archive from S3")
     restore.add_argument("instance")
     restore.add_argument("--key", required=True)
@@ -1611,24 +1764,34 @@ def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
     args = parser.parse_args(argv)
     try:
         if args.action == "stage-import":
-            path = stage_import(load_manifest(args.manifest), args.destination, archive=args.archive)
+            path = stage_import(world_content(load_manifest(args.manifest), args.world), args.destination, archive=args.archive)
             print(json.dumps({"staged": str(path), **({"archive": str(args.archive)} if args.archive else {})}))
             return 0
         if args.action == "render-compose":
-            sys.stdout.buffer.write(render_compose(load_manifest(args.manifest), args.data_root / "crafty"))
+            pinned = load_manifest(args.manifest)
+            sys.stdout.buffer.write(render_compose(pinned | pinned["base"], args.data_root / "crafty"))  # the same for every world
             return 0
         config = load_config(args.config)
         if getattr(args, "instance", None) is not None and args.instance not in config["instances"]:
             raise CraftyError("instance is not configured")
+        content = allowlist = None
+        if args.action == "start":
+            # A start applies the pinned content the launcher installed beside the adapter, and fails without it: the
+            # instance is the world, with the mods the launcher names. Both files are checked before anything changes.
+            mods = None if args.mods is None else [name for name in args.mods.split(",") if name]
+            content = world_content(load_manifest(manifest), args.instance, mods)
+            if args.allowlist_file is not None:
+                allowlist = read_allowlist_file(args.allowlist_file)
         if api is None:
-            # setup-api-key makes the token, so it starts without one.
-            token = None if args.action == "setup-api-key" else Path(config["token_file"]).read_text().strip()
+            # setup-api-key makes the token, and so does the first start on a new host: both begin without one.
+            token_file = Path(config["token_file"])
+            token = token_file.read_text().strip() if args.action != "setup-api-key" and token_file.exists() else None
             api = CraftyAPI(config["crafty_url"], token)
-        # A start applies the pinned content the launcher installed beside the adapter, and fails without it.
-        adapter = Adapter(config, api, host, load_manifest(manifest) if args.action == "start" else None)
-        handlers = {"start": adapter.start, "stop": adapter.stop, "status": adapter.status}
-        if args.action in handlers:
-            output = handlers[args.action](args.instance)
+        adapter = Adapter(config, api, host, content)
+        if args.action == "start":
+            output = adapter.start(args.instance, allowlist)
+        elif args.action in ("stop", "status"):
+            output = getattr(adapter, args.action)(args.instance)
         elif args.action == "restore":
             output = adapter.restore(args.instance, args.key)
         elif args.action == "allowlist":

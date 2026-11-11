@@ -48,7 +48,7 @@ resource "aws_iam_role_policy" "backups" {
         Action   = ["s3:ListBucket"]
         Resource = [local.backup_bucket_arn]
         Condition = {
-          StringLike = { "s3:prefix" = [for id in sort(tolist(var.instance_ids)) : "instances/${id}/*"] }
+          StringLike = { "s3:prefix" = [for id in local.backup_instance_ids : "instances/${id}/*"] }
         }
       },
       {

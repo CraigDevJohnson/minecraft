@@ -17,6 +17,8 @@ def main() -> None:
         for folder, patterns in {
             "infra": ("*.tf", "*.tftest.hcl", ".terraform.lock.hcl", "*.placeholder", "tests/fixtures/packages/*.zip"),
             "scripts": ("*.py", "*.sh", "*.tftpl"),
+            # infra/worlds.tf reads the worlds from the pinned server content.
+            "runtime": ("crafty/server.json",),
         }.items():
             for pattern in patterns:
                 for source in (ROOT / folder).rglob(pattern):

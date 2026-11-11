@@ -1,4 +1,4 @@
-"""Offline evidence that unattended observations cannot operate the Minecraft host."""
+"""Offline evidence that unattended observations cannot operate the Minecraft world hosts."""
 from __future__ import annotations
 
 import contextlib
@@ -138,7 +138,7 @@ class MinecraftHealthTests(unittest.TestCase):
         self.assertTrue((ROOT / "scripts/minecraft_health.py").is_file(), "health reporter is missing")
         return importlib.import_module("minecraft_health")
 
-    def observe(self, aws, *, arguments=(), dns_addresses=(HOST_IP,), tcp_reply=None, udp_reply=None,
+    def observe(self, aws, *, arguments=("survival",), dns_addresses=(HOST_IP,), tcp_reply=None, udp_reply=None,
                 dns_failure=None, tcp_failure=None, udp_failure=None, signaling=None, signaling_failure=None):
         reporter = self.reporter()
         output, errors = io.StringIO(), io.StringIO()
@@ -162,7 +162,14 @@ class MinecraftHealthTests(unittest.TestCase):
         self.assertNotIn(SECRET, output.getvalue())
         self.assertNotIn(HOST_ID, output.getvalue())
         self.assertNotIn(HOST_IP, output.getvalue())
-        return code, json.loads(output.getvalue()), (dns, tcp, udp)
+        # Most tests observe one world and read its report beside the run's own fields.
+        report = json.loads(output.getvalue())
+        worlds = report.pop("worlds")
+        if list(arguments) == ["survival"]:
+            report.update(worlds.get("survival", {}))
+        else:
+            report["worlds"] = worlds
+        return code, report, (dns, tcp, udp)
 
     def assert_read_calls(self, aws, expected):
         self.assertEqual([tuple(command[1:3]) for command, _ in aws.calls], expected)
@@ -194,8 +201,11 @@ class MinecraftHealthTests(unittest.TestCase):
         self.assert_read_calls(aws, [("sts", "get-caller-identity"), ("ec2", "describe-instances")])
         inventory = aws.calls[1][0]
         for tag in ("Name=tag:Project,Values=minecraft", "Name=tag:Environment,Values=family",
-                    "Name=tag:Name,Values=minecraft-family-host"):
-            self.assertIn(tag, inventory)
+                    "Name=tag:Purpose,Values=replaceable-host", "Name=tag:World,Values=survival",
+                    "Name=tag:Name,Values=minecraft-family-survival"):
+            self.assertIn(tag, inventory[inventory.index("--filters"):inventory.index("--max-items")])
+        # The old family host has the project's tags and no world, so no read may name it.
+        self.assertNotIn("Name=tag:Name,Values=minecraft-family-host", inventory)
         self.assertEqual(inventory[inventory.index("--max-items") + 1], "2")
 
     def test_stopped_host_is_idle_and_does_not_start_or_probe_it(self):
@@ -243,12 +253,59 @@ class MinecraftHealthTests(unittest.TestCase):
                 self.assert_read_calls(aws, [("sts", "get-caller-identity")])
 
     def test_cli_target_overrides_fail_without_any_aws_or_network_calls(self):
+        for arguments in (["--region", SECRET], ["family"], ["Survival"], ["survival", "creative"], [""]):
+            with self.subTest(arguments=arguments):
+                aws = FakeAWS()
+                code, report, network = self.observe(aws, arguments=arguments)
+                self.assertEqual((code, report["failure"], report["worlds"]), (1, "unsupported_arguments", {}))
+                self.assertEqual(aws.calls, [])
+                for dependency in network:
+                    dependency.assert_not_called()
+
+    def test_without_a_world_every_world_is_observed_at_its_own_host_and_hostname(self):
+        hosts = {"survival": host(), "creative": host("stopped", public_ipv4=None), "adventure": None}
         aws = FakeAWS()
-        code, report, network = self.observe(aws, arguments=["--region", SECRET])
-        self.assertEqual((code, report["failure"]), (1, "unsupported_arguments"))
-        self.assertEqual(aws.calls, [])
+
+        def inventory(command, **options):
+            if tuple(command[1:3]) == ("ec2", "describe-instances"):
+                [world] = [name for name in hosts if f"Name=tag:World,Values={name}" in command]
+                self.assertIn(f"Name=tag:Name,Values=minecraft-family-{world}", command)
+                aws.inventory["hosts"] = [hosts[world]] if hosts[world] else []
+            return aws(command, **options)
+
+        code, report, (dns, tcp, _) = self.observe(inventory, arguments=[])
+        self.assertEqual((code, report["status"], report["identity_verified"]), (0, "healthy", True))
+        self.assertEqual(list(report["worlds"]), ["adventure", "creative", "survival"])
+        self.assertEqual({world: (seen["state"], seen["status"], seen["game_ready"]) for world, seen in report["worlds"].items()},
+                         {"survival": ("running", "healthy", True), "creative": ("stopped", "idle", False),
+                          "adventure": ("absent", "idle", False)})
+        hostname = f"survival.{self.reporter().HOSTNAME}"
+        dns.assert_called_once_with(hostname, 25565, socket.AF_INET, socket.SOCK_STREAM)
+        self.assertEqual(len(tcp.call_args_list), 2)
+        self.assert_read_calls(aws, [("sts", "get-caller-identity"), ("ec2", "describe-instances"),
+                                   ("ec2", "describe-instance-status"), ("ec2", "describe-instances"),
+                                   ("ec2", "describe-instances")])
+
+    def test_one_worlds_failure_fails_the_run_and_the_other_worlds_are_still_observed(self):
+        aws = FakeAWS()
+
+        def inventory(command, **options):
+            if tuple(command[1:3]) == ("ec2", "describe-instances"):
+                aws.inventory["hosts"] = [host("pending")] if "Name=tag:World,Values=survival" in command else [host("stopped")]
+            return aws(command, **options)
+
+        code, report, network = self.observe(inventory, arguments=[])
+        self.assertEqual((code, report["status"]), (1, "failed"))
+        self.assertNotIn("failure", report)
+        self.assertEqual({world: (seen["status"], seen.get("failure")) for world, seen in report["worlds"].items()},
+                         {"survival": ("failed", "host_transitioning"), "creative": ("idle", None), "adventure": ("idle", None)})
         for dependency in network:
             dependency.assert_not_called()
+
+    def test_all_worlds_idle_is_an_idle_run(self):
+        code, report, _ = self.observe(FakeAWS(), arguments=[])
+        self.assertEqual((code, report["status"]), (0, "idle"))
+        self.assertEqual({seen["state"] for seen in report["worlds"].values()}, {"absent"})
 
     def test_running_host_probes_only_verified_address_with_status_requests_and_safe_output(self):
         aws = FakeAWS([host()])
@@ -262,7 +319,8 @@ class MinecraftHealthTests(unittest.TestCase):
         self.assertEqual(report["java"], {"version": "26.2", "protocol": 776, "online": 1, "limit": 6})
         self.assertEqual(report["bedrock"], {"version": "26.51", "protocol": 2193, "online": 1, "limit": 6})
         self.assertEqual(report["nethernet"], {"version": "26.51", "protocol": 2193, "online": 1, "limit": 6})
-        dns.assert_called_once_with("mc.craigdevjohnson.com", 25565, socket.AF_INET, socket.SOCK_STREAM)
+        hostname = f"survival.{self.reporter().HOSTNAME}"
+        dns.assert_called_once_with(hostname, 25565, socket.AF_INET, socket.SOCK_STREAM)
         self.assertEqual(tcp.call_args_list, [mock.call((HOST_IP, 25565), timeout=self.reporter().NETWORK_TIMEOUT),
                                               mock.call((HOST_IP, 19132), timeout=self.reporter().NETWORK_TIMEOUT)])
         # A plain discovery GET: no admission request, no SDP offer.
@@ -271,7 +329,8 @@ class MinecraftHealthTests(unittest.TestCase):
         udp.assert_called_once_with(socket.AF_INET, socket.SOCK_DGRAM)
         self.assertEqual(bedrock.target, (HOST_IP, 19132))
         self.assertTrue(java.sent.endswith(b"\x01\x01\x00"))
-        self.assertIn(b"mc.craigdevjohnson.com", java.sent)
+        self.assertIn(varint(len(hostname)) + hostname.encode(), java.sent)
+        self.assertIn(f"Host: {hostname}:19132".encode(), signaling.sent)
         self.assertEqual(bedrock.sent[:1], b"\x01")
         self.assertEqual(len(bedrock.sent), 33)
         self.assertTrue(all(0 < timeout <= self.reporter().NETWORK_TIMEOUT for timeout in java.timeouts + bedrock.timeouts))
@@ -303,7 +362,7 @@ class MinecraftHealthTests(unittest.TestCase):
 
     def test_a_raknet_only_server_is_not_asked_for_signaling(self):
         manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())
-        bedrock = manifest["managed_files"][0]["content"]["bedrock"]
+        bedrock = manifest["base"]["managed_files"][0]["content"]["bedrock"]
         for key in ("transport", "webrtc-port", "signaling"):
             bedrock.pop(key, None)
         with tempfile.TemporaryDirectory() as directory:
@@ -313,9 +372,11 @@ class MinecraftHealthTests(unittest.TestCase):
                 code, report, (_, tcp, _) = self.observe(FakeAWS([host()]))
             self.assertEqual((code, report["status"], report["nethernet_signaling_ok"]), (0, "healthy", None))
             self.assertEqual(tcp.call_args_list, [mock.call((HOST_IP, 25565), timeout=self.reporter().NETWORK_TIMEOUT)])
+            # The worlds come from the manifest, so without it nothing is read at all.
             with mock.patch.object(self.reporter(), "MANIFEST", Path(directory) / "missing.json"):
-                code, report, _ = self.observe(FakeAWS([host()]))
-            self.assertEqual((code, report["failure"]), (1, "manifest_unreadable"))
+                aws = FakeAWS([host()])
+                code, report, _ = self.observe(aws)
+            self.assertEqual((code, report["failure"], aws.calls), (1, "manifest_unreadable", []))
 
     def test_transitional_host_states_fail_without_any_network_or_operational_retries(self):
         for state in ("pending", "stopping", "shutting-down"):
@@ -420,7 +481,7 @@ class MinecraftHealthTests(unittest.TestCase):
                     mock.patch.object(reporter.socket, dependency) as connect:
                 client = connect.return_value.__enter__.return_value
                 with self.assertRaises(reporter.HealthError):
-                    probe(HOST_IP)
+                    probe(*(["survival.example.net"] if probe is not reporter.bedrock_discovery else []), HOST_IP)
                 client.recv.assert_not_called()
 
     def test_dns_timeout_returns_without_waiting_for_a_stalled_system_resolver(self):
@@ -438,7 +499,7 @@ class MinecraftHealthTests(unittest.TestCase):
                     mock.patch.object(reporter, "NETWORK_TIMEOUT", 0.03):
                 before = time.monotonic()
                 with self.assertRaisesRegex(reporter.HealthError, "dns_lookup_failed"):
-                    reporter.require_dns_match(HOST_IP)
+                    reporter.require_dns_match("survival.example.net", HOST_IP)
                 self.assertTrue(started.is_set())
                 self.assertLess(time.monotonic() - before, 0.5)
         finally:

@@ -74,6 +74,12 @@ class ServerControlRoleTests(unittest.TestCase):
         self.assertLess(server.index("GITHUB_EVENT_PATH"), server.index("PLAYER: ${{ inputs.player }}"))
         self.assertLess(mask, server.index("PLAYER: ${{ inputs.player }}"))
         self.assertEqual(server.count("${{ inputs.player }}"), 1)
+        # The world and the mod reach the script through the environment, and each world has its own queue.
+        self.assertEqual(server.count("${{ inputs.mod }}"), 1)
+        self.assertIn("MOD: ${{ inputs.mod }}", server)
+        self.assertIn("WORLD: ${{ inputs.world }}", server)
+        self.assertIn("group: minecraft-server-${{ inputs.world }}", server)
+        self.assertEqual(server.count("${{ inputs.world }}"), 2)
         deploy = (ROOT / ".github/workflows/deploy.yml").read_text()
         self.assertIn("environment: deploy", deploy)
         self.assertEqual(sorted(re.findall(r"secrets\.([A-Z_]+)", deploy)), ["BACKEND_CONFIG", "DEPLOYMENT_TFVARS"])

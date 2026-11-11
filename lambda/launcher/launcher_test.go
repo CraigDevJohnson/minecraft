@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,10 +20,14 @@ import (
 
 const (
 	hostID        = "i-0123456789abcdef0"
-	stateName     = "/minecraft-test/launcher/state"
-	idleStateName = "/minecraft-test/idle-stop/state"
+	stateName     = "/minecraft-test/launcher/worlds/survival/state"
+	idleStateName = "/minecraft-test/idle-stop/worlds/survival/state"
 	address       = "203.0.113.10"
 	commandID     = "11111111-2222-3333-4444-555555555555"
+	// startCommand starts the survival world with no mod on and nobody on the allowlist: W10= is [] in base64.
+	startCommand = `allowlist="$(mktemp)"` + "\n" + `trap 'rm -f "$allowlist"' EXIT` + "\n" +
+		`printf '%s' 'W10=' | base64 -d > "$allowlist"` + "\n" +
+		remoteCommand + ` start survival --mods= --allowlist-file "$allowlist"`
 )
 
 var now = time.Date(2026, 10, 11, 16, 0, 0, 0, time.UTC)
@@ -31,6 +36,7 @@ func init() { pollEvery = time.Millisecond }
 
 type fakeEC2 struct {
 	mu       sync.Mutex
+	host     string                       // the one host it describes, starts and stops
 	states   []ec2types.InstanceStateName // successive DescribeInstances answers; the last repeats
 	launch   time.Time
 	ip       string
@@ -60,7 +66,7 @@ func (f *fakeEC2) DescribeInstances(context.Context, *ec2.DescribeInstancesInput
 	if len(f.states) > 1 {
 		f.states = f.states[1:]
 	}
-	instance := ec2types.Instance{InstanceId: aws.String(hostID), State: &ec2types.InstanceState{Name: state}}
+	instance := ec2types.Instance{InstanceId: aws.String(f.host), State: &ec2types.InstanceState{Name: state}}
 	if state == ec2types.InstanceStateNameRunning || state == ec2types.InstanceStateNamePending {
 		instance.LaunchTime = aws.Time(f.launch)
 	}
@@ -73,7 +79,7 @@ func (f *fakeEC2) DescribeInstances(context.Context, *ec2.DescribeInstancesInput
 func (f *fakeEC2) StartInstances(_ context.Context, input *ec2.StartInstancesInput, _ ...func(*ec2.Options)) (*ec2.StartInstancesOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(input.InstanceIds) != 1 || input.InstanceIds[0] != hostID {
+	if len(input.InstanceIds) != 1 || input.InstanceIds[0] != f.host {
 		panic("started another host")
 	}
 	f.starts++
@@ -86,7 +92,7 @@ func (f *fakeEC2) StartInstances(_ context.Context, input *ec2.StartInstancesInp
 func (f *fakeEC2) StopInstances(_ context.Context, input *ec2.StopInstancesInput, _ ...func(*ec2.Options)) (*ec2.StopInstancesOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(input.InstanceIds) != 1 || input.InstanceIds[0] != hostID {
+	if len(input.InstanceIds) != 1 || input.InstanceIds[0] != f.host {
 		panic("stopped another host")
 	}
 	f.stops++
@@ -98,6 +104,8 @@ func (f *fakeEC2) StopInstances(_ context.Context, input *ec2.StopInstancesInput
 
 type fakeSSM struct {
 	mu         sync.Mutex
+	host       string   // the one host it sends commands to
+	writable   []string // the parameters its owner may write
 	params     map[string]string
 	getErr     error
 	putErr     error
@@ -135,17 +143,17 @@ func (f *fakeSSM) PutParameter(_ context.Context, input *ssm.PutParameterInput, 
 	if f.putErr != nil {
 		return nil, f.putErr
 	}
-	if aws.ToString(input.Name) != stateName {
-		panic("wrote a parameter other than its own state")
+	if !slices.Contains(f.writable, aws.ToString(input.Name)) {
+		panic("wrote a parameter that is not its own")
 	}
-	f.params[stateName] = aws.ToString(input.Value)
+	f.params[aws.ToString(input.Name)] = aws.ToString(input.Value)
 	return &ssm.PutParameterOutput{}, nil
 }
 
 func (f *fakeSSM) SendCommand(_ context.Context, input *ssm.SendCommandInput, _ ...func(*ssm.Options)) (*ssm.SendCommandOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if aws.ToString(input.DocumentName) != "AWS-RunShellScript" || len(input.InstanceIds) != 1 || input.InstanceIds[0] != hostID {
+	if aws.ToString(input.DocumentName) != "AWS-RunShellScript" || len(input.InstanceIds) != 1 || input.InstanceIds[0] != f.host {
 		panic("sent a command to another host or document")
 	}
 	f.commands = append(f.commands, input.Parameters["commands"]...)
@@ -179,16 +187,19 @@ func (f *fakeSSM) DescribeInstanceInformation(context.Context, *ssm.DescribeInst
 	if !online {
 		return &ssm.DescribeInstanceInformationOutput{}, nil
 	}
-	return &ssm.DescribeInstanceInformationOutput{InstanceInformationList: []ssmtypes.InstanceInformation{{InstanceId: aws.String(hostID), PingStatus: ssmtypes.PingStatusOnline}}}, nil
+	return &ssm.DescribeInstanceInformationOutput{InstanceInformationList: []ssmtypes.InstanceInformation{{InstanceId: aws.String(f.host), PingStatus: ssmtypes.PingStatusOnline}}}, nil
 }
 
 type rig struct {
-	ec2           *fakeEC2
-	ssm           *fakeSSM
-	launcher      *Launcher
-	gameUp        bool
-	players       int
-	pinged        []string
+	ec2      *fakeEC2
+	ssm      *fakeSSM
+	launcher *Launcher
+	gameUp   bool
+	players  int
+	pinged   []string
+	// mods are the mods that are on for the world, and whitelist the allowlist its starts carry.
+	mods          []string
+	whitelist     string
 	dnsErr        error
 	pointedAt     []string
 	followUps     int
@@ -197,13 +208,21 @@ type rig struct {
 	followStopErr error
 }
 
+// newRig is the survival world on its own host.
 func newRig(state ec2types.InstanceStateName, launchedAgo time.Duration) *rig {
+	return newWorldRig("survival", "Survival", hostID, state, launchedAgo)
+}
+
+// newWorldRig is one world's Launcher with a host, a hostname and a record of its own.
+func newWorldRig(world, name, host string, state ec2types.InstanceStateName, launchedAgo time.Duration) *rig {
+	record := "/minecraft-test/launcher/worlds/" + world + "/state"
 	r := &rig{
-		ec2: &fakeEC2{states: []ec2types.InstanceStateName{state}, launch: now.Add(-launchedAgo), ip: address},
-		ssm: &fakeSSM{params: map[string]string{stateName: "{}"}},
+		ec2:       &fakeEC2{host: host, states: []ec2types.InstanceStateName{state}, launch: now.Add(-launchedAgo), ip: address},
+		ssm:       &fakeSSM{host: host, writable: []string{record}, params: map[string]string{record: "{}"}},
+		whitelist: "[]",
 	}
 	r.launcher = &Launcher{
-		Config: Config{HostID: hostID, Instance: "family", ServerName: "Family server", PublicHostname: "mc.example.com", BedrockPort: 19132, StateParameter: stateName},
+		Config: Config{HostID: host, Instance: world, ServerName: name, PublicHostname: world + ".mc.example.com", BedrockPort: 19132, StateParameter: record},
 		EC2:    r.ec2,
 		SSM:    r.ssm,
 		Ping: func(_ context.Context, target string) (int, error) {
@@ -219,6 +238,8 @@ func newRig(state ec2types.InstanceStateName, launchedAgo time.Duration) *rig {
 		},
 		FollowUp:     func(context.Context) error { r.followUps++; return r.followErr },
 		FollowUpStop: func(context.Context) error { r.followUpStops++; return r.followStopErr },
+		Mods:         func(context.Context) ([]string, error) { return r.mods, nil },
+		Whitelist:    func(context.Context) ([]byte, error) { return []byte(r.whitelist), nil },
 		Now:          func() time.Time { return now },
 	}
 	return r
@@ -230,13 +251,13 @@ func (r *rig) setSession(t *testing.T, session Session) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.ssm.params[stateName] = string(encoded)
+	r.ssm.params[r.launcher.Config.StateParameter] = string(encoded)
 }
 
 func (r *rig) session(t *testing.T) Session {
 	t.Helper()
 	var session Session
-	if err := json.Unmarshal([]byte(r.ssm.params[stateName]), &session); err != nil {
+	if err := json.Unmarshal([]byte(r.ssm.params[r.launcher.Config.StateParameter]), &session); err != nil {
 		t.Fatal(err)
 	}
 	return session
@@ -274,10 +295,10 @@ func TestReadyOnlyWhenTheGameAnswers(t *testing.T) {
 	if strings.Join(r.pinged, ",") != address+":25565" {
 		t.Fatalf("pinged %v", r.pinged)
 	}
-	want := Connection{Java: &Endpoint{Address: "mc.example.com"}, Bedrock: &Endpoint{Address: "mc.example.com", Port: 19132}}
+	want := Connection{Java: &Endpoint{Address: "survival.mc.example.com"}, Bedrock: &Endpoint{Address: "survival.mc.example.com", Port: 19132}}
 	got, _ := json.Marshal(status.Connection)
 	expected, _ := json.Marshal(want)
-	if string(got) != string(expected) || status.Name != "Family server" {
+	if string(got) != string(expected) || status.Name != "Survival" {
 		t.Fatalf("status %+v", status)
 	}
 }
@@ -586,7 +607,7 @@ func success(output string) ssm.GetCommandInvocationOutput {
 	return ssm.GetCommandInvocationOutput{Status: ssmtypes.CommandInvocationStatusSuccess, StandardOutputContent: aws.String(output)}
 }
 
-const readyOutput = `{"application": "running", "backup": "pending", "instance": "family", "ready": true, "storage": {}}`
+const readyOutput = `{"application": "running", "backup": "pending", "instance": "survival", "ready": true, "storage": {}}`
 
 func finishRig(t *testing.T) *rig {
 	r := newRig(ec2types.InstanceStateNameStopped, 0)
@@ -606,7 +627,7 @@ func TestFinishStartRunsTheWorkstationSteps(t *testing.T) {
 	if strings.Join(r.pointedAt, ",") != address {
 		t.Fatalf("DNS pointed at %v", r.pointedAt)
 	}
-	if strings.Join(r.ssm.commands, "|") != "set -eu\n/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json start family" {
+	if strings.Join(r.ssm.commands, "|") != "set -eu\n"+startCommand {
 		t.Fatalf("commands %v", r.ssm.commands)
 	}
 	session := r.session(t)
@@ -631,7 +652,7 @@ func TestFinishStartStartsTheGameWhenDNSFails(t *testing.T) {
 
 func TestFinishStartRecordsAFailedGame(t *testing.T) {
 	for _, answer := range []ssm.GetCommandInvocationOutput{
-		success(`{"application": "running", "instance": "family", "ready": false}`),
+		success(`{"application": "running", "instance": "survival", "ready": false}`),
 		success(`{"error": "the server did not become ready; inspect its Crafty console"}`),
 		success(`not json`),
 		{Status: ssmtypes.CommandInvocationStatusSuccess, ResponseCode: 1, StandardOutputContent: aws.String(readyOutput)},

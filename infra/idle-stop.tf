@@ -1,15 +1,12 @@
 locals {
   idle_stop_count          = var.idle_stop == null ? 0 : 1
   idle_stop_name           = "${var.resource_prefix}-idle-stop"
-  idle_stop_host_arn       = "arn:aws:ec2:${var.region}:${var.account_id}:instance/${aws_instance.host.id}"
-  idle_stop_state_name     = "/${var.resource_prefix}/idle-stop/state"
-  idle_stop_state_arn      = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${local.idle_stop_state_name}"
   idle_stop_log_group_name = "/aws/lambda/${local.idle_stop_name}"
   idle_stop_package_path   = var.package_dir == null ? try(var.idle_stop.package_path, null) : "${var.package_dir}/idle-stop.zip"
   # The same Cloudflare token SecureString the launcher reads, so there is one copy of the token.
   idle_stop_token_name = coalesce(local.launcher_token_name, "/${var.resource_prefix}/launcher/cloudflare-token")
-  idle_stop_token_arn  = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${local.idle_stop_token_name}"
-  # The launcher's boundary allows everything the function does on this host, so the operator can create its role.
+  idle_stop_token_arn  = "${local.parameter_arn_base}${local.idle_stop_token_name}"
+  # The launcher's boundary allows everything the function does on the world hosts, so the operator can create its role.
   idle_stop_boundary = try(coalesce(var.idle_stop.permissions_boundary_arn, try(var.launcher.permissions_boundary_arn, null)), null)
 }
 
@@ -42,16 +39,16 @@ resource "aws_iam_role_policy" "idle_stop" {
         Resource = "*"
       },
       {
-        Sid      = "StopOnlyThisHost"
+        Sid      = "StopOnlyWorldHosts"
         Effect   = "Allow"
         Action   = ["ec2:StopInstances"]
-        Resource = [local.idle_stop_host_arn]
+        Resource = local.world_host_arns
       },
       {
-        Sid      = "DrainOnlyThisHostWithShellDocument"
+        Sid      = "DrainOnlyWorldHostsWithShellDocument"
         Effect   = "Allow"
         Action   = ["ssm:SendCommand"]
-        Resource = [local.idle_stop_host_arn, "arn:aws:ssm:${var.region}::document/AWS-RunShellScript"]
+        Resource = concat(local.world_host_arns, ["arn:aws:ssm:${var.region}::document/AWS-RunShellScript"])
       },
       {
         Sid      = "FollowDrain"
@@ -63,7 +60,7 @@ resource "aws_iam_role_policy" "idle_stop" {
         Sid      = "OwnStateOnly"
         Effect   = "Allow"
         Action   = ["ssm:GetParameter", "ssm:PutParameter"]
-        Resource = [local.idle_stop_state_arn]
+        Resource = [for id in local.world_ids : "${local.parameter_arn_base}${aws_ssm_parameter.world_idle_stop_state[id].name}"]
       },
       {
         Sid      = "ReadOnlyCloudflareToken"
@@ -89,18 +86,20 @@ resource "aws_iam_role_policy" "idle_stop" {
         Resource = ["arn:aws:logs:${var.region}:${var.account_id}:log-group:${local.idle_stop_log_group_name}:*"]
       },
       ], var.launcher == null ? [] : [{
-        # A stop the launcher is running is left to it, so the two never drain the host at once.
+        # A stop the launcher is running is left to it, so the two never drain a host at once.
         Sid      = "ReadLauncherProgress"
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
-        Resource = [local.launcher_state_arn]
+        Resource = [for id in local.world_ids : "${local.parameter_arn_base}${aws_ssm_parameter.world_launcher_state[id].name}"]
     }])
   })
 }
 
+# The family host's idle-stop record. The function keeps a record per world now (worlds.tf) and no longer
+# reads this one; it stays declared until the family host is retired.
 resource "aws_ssm_parameter" "idle_stop_state" {
   count       = local.idle_stop_count
-  name        = local.idle_stop_state_name
+  name        = "/${var.resource_prefix}/idle-stop/state"
   description = "Idle-stop timer and drain progress; owned by the function after creation."
   type        = "String"
   value       = "{}"
@@ -118,7 +117,7 @@ resource "aws_cloudwatch_log_group" "idle_stop" {
 resource "aws_lambda_function" "idle_stop" {
   count            = local.idle_stop_count
   function_name    = local.idle_stop_name
-  description      = "Drains and stops the Minecraft host after it has been idle."
+  description      = "Drains and stops a world's Minecraft host after it has been idle."
   role             = aws_iam_role.idle_stop[0].arn
   runtime          = "provided.al2023"
   architectures    = ["arm64"]
@@ -129,14 +128,10 @@ resource "aws_lambda_function" "idle_stop" {
   timeout          = 60
   environment {
     variables = {
-      HOST_ID                    = aws_instance.host.id
-      STATE_PARAMETER            = aws_ssm_parameter.idle_stop_state[0].name
-      PUBLIC_HOSTNAME            = var.public_hostname
+      WORLDS                     = local.worlds
       CLOUDFLARE_ZONE_ID         = var.cloudflare_zone_id
       CLOUDFLARE_TOKEN_PARAMETER = local.idle_stop_token_name
       IDLE_MINUTES               = tostring(var.idle_stop.idle_minutes)
-      INSTANCES                  = join(",", sort(tolist(var.instance_ids)))
-      LAUNCHER_STATE_PARAMETER   = var.launcher == null ? "" : local.launcher_state_name
     }
   }
   logging_config {
@@ -149,14 +144,22 @@ resource "aws_lambda_function" "idle_stop" {
 resource "aws_cloudwatch_event_rule" "idle_stop" {
   count               = local.idle_stop_count
   name                = local.idle_stop_name
-  description         = "Checks the Minecraft host for idleness."
+  description         = "Checks each world's Minecraft host for idleness."
   schedule_expression = "rate(5 minutes)"
 }
 
+# The one target the family host's check had becomes the first world's, so the change removes nothing.
+moved {
+  from = aws_cloudwatch_event_target.idle_stop[0]
+  to   = aws_cloudwatch_event_target.idle_stop["survival"]
+}
+
+# One check per world on every tick, each told which world it is for.
 resource "aws_cloudwatch_event_target" "idle_stop" {
-  count = local.idle_stop_count
-  rule  = aws_cloudwatch_event_rule.idle_stop[0].name
-  arn   = aws_lambda_function.idle_stop[0].arn
+  for_each = toset(local.world_idle_keys)
+  rule     = aws_cloudwatch_event_rule.idle_stop[0].name
+  arn      = aws_lambda_function.idle_stop[0].arn
+  input    = jsonencode({ world = each.key })
 }
 
 resource "aws_lambda_permission" "idle_stop" {
@@ -183,7 +186,7 @@ resource "aws_sns_topic_subscription" "idle_stop_alerts" {
 resource "aws_cloudwatch_metric_alarm" "idle_stop_errors" {
   count               = local.idle_stop_count
   alarm_name          = "${local.idle_stop_name}-failing"
-  alarm_description   = "The idle stop failed or is blocked; the host may be left running. See docs/operations/idle-stop.md."
+  alarm_description   = "The idle stop failed or is blocked; a world's host may be left running. See docs/operations/idle-stop.md."
   namespace           = "AWS/Lambda"
   metric_name         = "Errors"
   dimensions          = { FunctionName = aws_lambda_function.idle_stop[0].function_name }

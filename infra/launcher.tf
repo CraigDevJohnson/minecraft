@@ -1,5 +1,5 @@
 locals {
-  # One function per Lobby environment the launcher serves (var.launcher.sites), all starting the same host.
+  # One function per Lobby environment the launcher serves (var.launcher.sites), all starting the same world hosts.
   launcher_sites = var.launcher == null ? {} : var.launcher.sites
   launcher_count = var.launcher == null ? 0 : 1
   # The operator's control role (the Server control workflow and the Task targets) may call every site's
@@ -7,15 +7,11 @@ locals {
   launcher_control_sites = try(var.launcher.control_role_arn, null) == null ? {} : local.launcher_sites
   launcher_package_path  = var.package_dir == null ? try(var.launcher.package_path, null) : "${var.package_dir}/launcher.zip"
   # The site may call only backends named *-<its environment>-* (the-lobby's site boundary), so each name carries the environment it serves.
-  launcher_names    = { for environment in keys(local.launcher_sites) : environment => "${var.resource_prefix}-${environment}-launcher" }
-  launcher_arns     = { for environment, name in local.launcher_names : environment => "arn:aws:lambda:${var.region}:${var.account_id}:function:${name}" }
-  launcher_host_arn = "arn:aws:ec2:${var.region}:${var.account_id}:instance/${aws_instance.host.id}"
-  # The start record and the Cloudflare token belong to the host, not to a site, so every function shares them:
-  # a start from one site shows as starting on the others.
-  launcher_state_name      = "/${var.resource_prefix}/launcher/state"
-  launcher_state_arn       = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${local.launcher_state_name}"
+  launcher_names = { for environment in keys(local.launcher_sites) : environment => "${var.resource_prefix}-${environment}-launcher" }
+  launcher_arns  = { for environment, name in local.launcher_names : environment => "arn:aws:lambda:${var.region}:${var.account_id}:function:${name}" }
+  # The Cloudflare token belongs to the deployment, not to a site, so every function shares it.
   launcher_token_name      = try(coalesce(var.launcher.cloudflare_token_parameter, "/${var.resource_prefix}/launcher/cloudflare-token"), null)
-  launcher_token_arn       = "arn:aws:ssm:${var.region}:${var.account_id}:parameter${coalesce(local.launcher_token_name, "/absent")}"
+  launcher_token_arn       = "${local.parameter_arn_base}${coalesce(local.launcher_token_name, "/absent")}"
   launcher_log_group_names = { for environment, name in local.launcher_names : environment => "/aws/lambda/${name}" }
 }
 
@@ -105,23 +101,23 @@ resource "aws_iam_role_policy" "launcher" {
         Resource = "*"
       },
       {
-        Sid      = "StartOnlyThisHost"
+        Sid      = "StartOnlyWorldHosts"
         Effect   = "Allow"
         Action   = ["ec2:StartInstances"]
-        Resource = [local.launcher_host_arn]
+        Resource = local.world_host_arns
       },
       {
         # A stop goes through the host's drain first (ADR 0006); EC2 stops only after its evidence is complete.
-        Sid      = "StopOnlyThisHost"
+        Sid      = "StopOnlyWorldHosts"
         Effect   = "Allow"
         Action   = ["ec2:StopInstances"]
-        Resource = [local.launcher_host_arn]
+        Resource = local.world_host_arns
       },
       {
-        Sid      = "StartGameOnlyOnThisHostWithShellDocument"
+        Sid      = "StartGameOnlyOnWorldHostsWithShellDocument"
         Effect   = "Allow"
         Action   = ["ssm:SendCommand"]
-        Resource = [local.launcher_host_arn, "arn:aws:ssm:${var.region}::document/AWS-RunShellScript"]
+        Resource = concat(local.world_host_arns, ["arn:aws:ssm:${var.region}::document/AWS-RunShellScript"])
       },
       {
         Sid      = "FollowStart"
@@ -130,10 +126,12 @@ resource "aws_iam_role_policy" "launcher" {
         Resource = "*"
       },
       {
+        # Each world's start record, and the two records every world shares: the mods Members switched and
+        # the family allowlist.
         Sid      = "OwnStateOnly"
         Effect   = "Allow"
         Action   = ["ssm:GetParameter", "ssm:PutParameter"]
-        Resource = [local.launcher_state_arn]
+        Resource = concat([for id in local.world_ids : "${local.parameter_arn_base}${aws_ssm_parameter.world_launcher_state[id].name}"], ["${local.parameter_arn_base}${aws_ssm_parameter.launcher_mods[0].name}", "${local.parameter_arn_base}${aws_ssm_parameter.launcher_allowlist[0].name}"])
       },
       {
         Sid      = "ReadOnlyCloudflareToken"
@@ -168,15 +166,16 @@ resource "aws_iam_role_policy" "launcher" {
         Sid      = "ReadIdleStopProgress"
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
-        Resource = [local.idle_stop_state_arn]
+        Resource = [for id in local.world_ids : "${local.parameter_arn_base}${aws_ssm_parameter.world_idle_stop_state[id].name}"]
     }])
   })
 }
 
-# Shared by every site's function: they start the same host, so they share one start record.
+# The family host's start record. The launcher keeps a record per world now (worlds.tf) and no longer reads
+# this one; it stays declared until the family host is retired.
 resource "aws_ssm_parameter" "launcher_state" {
   count       = local.launcher_count
-  name        = local.launcher_state_name
+  name        = "/${var.resource_prefix}/launcher/state"
   description = "The launcher's last start or stop and its outcome; owned by the function after creation."
   type        = "String"
   value       = "{}"
@@ -194,7 +193,7 @@ resource "aws_cloudwatch_log_group" "launcher" {
 resource "aws_lambda_function" "launcher" {
   for_each         = local.launcher_sites
   function_name    = local.launcher_names[each.key]
-  description      = "Answers The Lobby's Minecraft Launcher (${each.key} site) and starts or stops the family server."
+  description      = "Answers The Lobby's Minecraft Launcher (${each.key} site) and starts or stops the family's worlds."
   role             = aws_iam_role.launcher[each.key].arn
   runtime          = "provided.al2023"
   architectures    = ["arm64"]
@@ -207,15 +206,12 @@ resource "aws_lambda_function" "launcher" {
   timeout = 900
   environment {
     variables = {
-      HOST_ID                    = aws_instance.host.id
-      INSTANCE                   = one(var.instance_ids)
-      SERVER_NAME                = var.launcher.server_name
-      PUBLIC_HOSTNAME            = var.public_hostname
+      WORLDS                     = local.worlds
+      MODS_PARAMETER             = aws_ssm_parameter.launcher_mods[0].name
+      ALLOWLIST_PARAMETER        = aws_ssm_parameter.launcher_allowlist[0].name
       BEDROCK_PORT               = "19132"
-      STATE_PARAMETER            = aws_ssm_parameter.launcher_state[0].name
       CLOUDFLARE_ZONE_ID         = var.cloudflare_zone_id
       CLOUDFLARE_TOKEN_PARAMETER = local.launcher_token_name
-      IDLE_STOP_STATE_PARAMETER  = var.idle_stop == null ? "" : local.idle_stop_state_name
       # The sites' roles may start and stop; the launcher refuses them a forced stop and the allowlist.
       SITE_ROLE_ARNS = join(",", sort(values(local.launcher_sites)))
     }

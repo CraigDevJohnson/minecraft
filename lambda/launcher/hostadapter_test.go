@@ -298,17 +298,17 @@ func TestCommandsRunAfterTheAdapterInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	install := r.launcher.Adapter.Script()
-	want := "set -eu\n" + install + "\n" + remoteCommand + " start family"
+	want := "set -eu\n" + install + "\n" + startCommand
 	if len(r.ssm.commands) != 1 || r.ssm.commands[0] != want {
 		t.Fatalf("commands %q", r.ssm.commands)
 	}
 
-	a, _ := allowlistRig(t)
-	a.launcher.Adapter = r.launcher.Adapter
-	if _, err := a.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"}); err != nil {
+	a := allowlistRig(t)
+	a.survival.launcher.Adapter = r.launcher.Adapter
+	if _, err := a.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"}); err != nil {
 		t.Fatal(err)
 	}
-	script := a.ssm.commands[0]
+	script := a.survival.ssm.commands[0]
 	if !strings.HasPrefix(script, "set -eu\n"+install+"\n") || strings.Index(script, `player="$(mktemp)"`) < len(install) {
 		t.Fatalf("the allowlist must run after the install:\n%s", script)
 	}
@@ -321,5 +321,16 @@ func TestCommandsRunAfterTheAdapterInstall(t *testing.T) {
 	}
 	if want := "set -eu\n" + install + "\n" + restoreCommand; len(restore.ssm.commands) != 1 || restore.ssm.commands[0] != want {
 		t.Fatalf("commands %q", restore.ssm.commands)
+	}
+
+	// The drain installs too, so a host that never got as far as a start, and so holds no adapter, can still be
+	// stopped. The check that follows the drain runs the adapter the drain installed.
+	stop := stopRig(t)
+	stop.launcher.Adapter = r.launcher.Adapter
+	if err := stop.launcher.FinishStop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := "set -eu\n" + install + "\n" + remoteCommand + " host-drain|" + remoteCommand + " host-status"; strings.Join(stop.ssm.commands, "|") != want {
+		t.Fatalf("commands %q", stop.ssm.commands)
 	}
 }

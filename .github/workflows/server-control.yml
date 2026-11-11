@@ -1,6 +1,6 @@
-# Controls the family server from anywhere with GitHub: status, start, stop,
-# restoring an archive into the stopped server, and allowlist changes, each one
-# signed request to the launcher's Function URL. Nothing runs here but that
+# Controls the worlds from anywhere with GitHub: status, start, stop, restoring
+# an archive into a stopped world, switching a world's mods, and allowlist
+# changes, each one signed request to the launcher's Function URL. Nothing runs here but that
 # request; the launcher does the work in AWS. The job runs only when Craig's own
 # account started the run (and any re-run of it): the launcher treats this role
 # as the operator. See docs/operations/cloud-controls.md and ADR 0006.
@@ -14,16 +14,25 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: What to do with the family server
+        description: What to do
         type: choice
-        options: [status, start, stop, restore, allowlist-add, allowlist-remove]
+        options: [status, start, stop, restore, mods, mod-on, mod-off, allowlist-add, allowlist-remove]
         default: status
+      world:
+        description: The world to act on. With none, status lists every world and start, stop and restore use the first world. The mods list and the allowlist actions take none
+        type: choice
+        options: [none, survival, creative, adventure]
+        default: none
       nobody_playing:
-        description: For stop, confirm nobody is playing, so the server stops even when the game still reports players or does not answer
+        description: For stop, confirm nobody is playing, so the world stops even when the game still reports players or does not answer
         type: boolean
         default: false
       archive:
         description: For restore, the archive's name in S3, such as 20261016T031500Z.tar.gz
+        type: string
+        default: ''
+      mod:
+        description: For mod-on and mod-off, the mod's id as the mods action lists it, such as fawe
         type: string
         default: ''
       edition:
@@ -38,9 +47,10 @@ on:
 
 permissions: {}
 
-# One server operation at a time; a second run waits instead of cancelling one in flight.
+# One operation on a world at a time; a second run for that world waits instead of cancelling one in flight.
+# Each world has its own host, so runs for different worlds go side by side.
 concurrency:
-  group: minecraft-server
+  group: minecraft-server-${{ inputs.world }}
   cancel-in-progress: false
 
 defaults:
@@ -60,7 +70,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     # A stop waits for the drain, which may take up to the launcher's 75-minute deadline, and a restore is
-    # followed for up to 60 minutes while the archive is put in place and the server starts.
+    # followed for up to 60 minutes while the archive is put in place and the world starts.
     timeout-minutes: 90
     environment: server
     permissions:
@@ -98,14 +108,25 @@ jobs:
       - name: Send the request and follow the server
         env:
           ACTION: ${{ inputs.action }}
+          WORLD: ${{ inputs.world }}
+          MOD: ${{ inputs.mod }}
           NOBODY_PLAYING: ${{ inputs.nobody_playing }}
           ARCHIVE: ${{ inputs.archive }}
           EDITION: ${{ inputs.edition }}
           PLAYER: ${{ inputs.player }}
           LAUNCHER_URL: ${{ vars.MINECRAFT_LAUNCHER_URL }}
         run: |
+          if [[ "$WORLD" == none ]]; then
+            WORLD=""
+          fi
           args=("$ACTION")
           case "$ACTION" in
+          # These take a world; ;;& carries on to the action's own options below.
+          status | start | stop | restore)
+            if [[ -n "$WORLD" ]]; then
+              args+=(--world "$WORLD")
+            fi
+            ;;&
           stop)
             if [[ "$NOBODY_PLAYING" == true ]]; then
               args+=(--force)
@@ -113,6 +134,9 @@ jobs:
             ;;
           restore)
             args+=(--archive "$ARCHIVE")
+            ;;
+          mod-on | mod-off)
+            args+=(--world "$WORLD" --mod "$MOD")
             ;;
           allowlist-add | allowlist-remove)
             args+=(--edition "$EDITION" --player "$PLAYER")

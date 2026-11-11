@@ -170,7 +170,7 @@ func (l *Launcher) restoreSteps(ctx context.Context, session *Session, deadline 
 	}
 	if session.RestoreCommandID == "" {
 		// The key goes into the command in single quotes, which keep it literal: it must name one of this
-		// server's archives, and loadConfig checked the instance's name, so it holds only lower-case letters,
+		// world's archives, and LoadManifest checked the world's id, so it holds only lower-case letters,
 		// digits, T, Z, hyphens, slashes and dots.
 		if archive, ok := strings.CutPrefix(session.RestoreKey, l.restoreKey("")); !ok || !archiveName.MatchString(archive) {
 			return errors.New("the restore's record names no archive of this server")

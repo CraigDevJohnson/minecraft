@@ -40,6 +40,7 @@ const (
 )
 
 var (
+	// instanceID is the shape of a world id, which also names the world host's one instance.
 	instanceID      = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 	commandIdentity = regexp.MustCompile(`^[0-9a-f-]{36}$`)
 	parameterName   = regexp.MustCompile(`^/[A-Za-z0-9/_.-]{1,500}$`)
@@ -62,7 +63,7 @@ type SSMAPI interface {
 // Pinger returns the number of players online at a Java edition server address.
 type Pinger func(ctx context.Context, address string) (int, error)
 
-// Config is supplied by the function's environment.
+// Config is one world's, supplied by the function's environment.
 type Config struct {
 	HostID                   string
 	StateParameter           string
@@ -503,18 +504,4 @@ func oneOf(value string, allowed ...string) bool {
 		}
 	}
 	return false
-}
-
-// ParseInstances validates the comma-separated configured instance IDs.
-func ParseInstances(value string) ([]string, error) {
-	var instances []string
-	seen := map[string]bool{}
-	for _, name := range strings.Split(value, ",") {
-		if !instanceID.MatchString(name) || seen[name] {
-			return nil, fmt.Errorf("invalid configured instance list")
-		}
-		seen[name] = true
-		instances = append(instances, name)
-	}
-	return instances, nil
 }

@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	drainOutput  = `{"draining": true, "instances": {"family": {"instance": "family", "application": "stopped", "backup": "complete"}}}`
-	statusOutput = `{"draining": true, "instances": {"family": {"instance": "family", "application": "stopped", "backup": "complete", "ready": false}}}`
+	drainOutput  = `{"draining": true, "instances": {"survival": {"instance": "survival", "application": "stopped", "backup": "complete"}}}`
+	statusOutput = `{"draining": true, "instances": {"survival": {"instance": "survival", "application": "stopped", "backup": "complete", "ready": false}}}`
 )
 
 func TestStopARunningServerNobodyIsPlaying(t *testing.T) {
@@ -361,7 +361,8 @@ func TestFinishStopRunsTheWorkstationSteps(t *testing.T) {
 	if err := r.launcher.FinishStop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want := remoteCommand + " host-drain|" + remoteCommand + " host-status"
+	// The drain installs the adapter first (onHost); the rig carries none, so only `set -eu` shows.
+	want := "set -eu\n" + remoteCommand + " host-drain|" + remoteCommand + " host-status"
 	if strings.Join(r.ssm.commands, "|") != want {
 		t.Fatalf("commands %v", r.ssm.commands)
 	}
@@ -386,8 +387,8 @@ func TestFinishStopDrainsBeforeAnythingStops(t *testing.T) {
 		{Status: ssmtypes.CommandInvocationStatusFailed},
 		{Status: ssmtypes.CommandInvocationStatusTimedOut},
 		{Status: ssmtypes.CommandInvocationStatusSuccess, ResponseCode: 1, StandardOutputContent: aws.String(drainOutput)},
-		success(`{"draining": true, "instances": {"family": {"instance": "family", "application": "running", "backup": "pending"}}}`),
-		success(`{"draining": false, "instances": {"family": {"instance": "family", "application": "stopped", "backup": "complete"}}}`),
+		success(`{"draining": true, "instances": {"survival": {"instance": "survival", "application": "running", "backup": "pending"}}}`),
+		success(`{"draining": false, "instances": {"survival": {"instance": "survival", "application": "stopped", "backup": "complete"}}}`),
 		success(`{"draining": true, "instances": {"other": {"instance": "other", "application": "stopped", "backup": "complete"}}}`),
 		success(`{"error": "host drain refused"}`),
 		success(`not json`),
@@ -403,7 +404,7 @@ func TestFinishStopDrainsBeforeAnythingStops(t *testing.T) {
 	}
 	// A fresh host status that no longer shows the drain forbids the stop too.
 	r := stopRig(t)
-	r.ssm.invocation = []ssm.GetCommandInvocationOutput{success(drainOutput), success(`{"draining": false, "instances": {"family": {"instance": "family", "application": "running", "backup": "pending"}}}`)}
+	r.ssm.invocation = []ssm.GetCommandInvocationOutput{success(drainOutput), success(`{"draining": false, "instances": {"survival": {"instance": "survival", "application": "running", "backup": "pending"}}}`)}
 	if err := r.launcher.FinishStop(context.Background()); err == nil || r.ec2.stops != 0 || r.session(t).Phase != StopFailed {
 		t.Fatalf("err=%v stops=%d", err, r.ec2.stops)
 	}
@@ -570,22 +571,22 @@ func TestFinishStopDrainThatNeverAppearsFails(t *testing.T) {
 }
 
 func TestValidateDrainForOneInstance(t *testing.T) {
-	if err := validateDrain(drainOutput, "family"); err != nil {
+	if err := validateDrain(drainOutput, "survival"); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDrain(`{"draining": true, "instances": {"family": {"instance": "family", "application": "stopped", "backup": "not-required"}}}`, "family"); err != nil {
+	if err := validateDrain(`{"draining": true, "instances": {"survival": {"instance": "survival", "application": "stopped", "backup": "not-required"}}}`, "survival"); err != nil {
 		t.Fatal(err)
 	}
 	for _, output := range []string{
 		drainOutput + "x",
 		`{"draining": true, "instances": {}}`,
-		`{"draining": true, "instances": {"family": {"instance": "family", "application": "stopped", "backup": "complete"}, "other": {"instance": "other", "application": "stopped", "backup": "complete"}}}`,
-		`{"draining": true, "instances": {"family": {"instance": "other", "application": "stopped", "backup": "complete"}}}`,
-		`{"draining": true, "instances": {"family": {"instance": "family", "application": "stopped", "backup": "failed"}}}`,
-		`{"draining": true, "instances": {"family": {"instance": "family", "application": "halted", "backup": "complete"}}}`,
-		`{"instances": {"family": {"instance": "family", "application": "stopped", "backup": "complete"}}}`,
+		`{"draining": true, "instances": {"survival": {"instance": "survival", "application": "stopped", "backup": "complete"}, "other": {"instance": "other", "application": "stopped", "backup": "complete"}}}`,
+		`{"draining": true, "instances": {"survival": {"instance": "other", "application": "stopped", "backup": "complete"}}}`,
+		`{"draining": true, "instances": {"survival": {"instance": "survival", "application": "stopped", "backup": "failed"}}}`,
+		`{"draining": true, "instances": {"survival": {"instance": "survival", "application": "halted", "backup": "complete"}}}`,
+		`{"instances": {"survival": {"instance": "survival", "application": "stopped", "backup": "complete"}}}`,
 	} {
-		if err := validateDrain(output, "family"); err == nil {
+		if err := validateDrain(output, "survival"); err == nil {
 			t.Fatalf("%s must be refused", output)
 		}
 	}

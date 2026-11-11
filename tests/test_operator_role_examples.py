@@ -47,6 +47,7 @@ EC2_SECURITY_SETTINGS = [
     "ec2:DeleteVpcBlockPublicAccessExclusion",
 ]
 HOST_POLICY_SOURCES = [ROOT / "infra/iam.tf"]
+FUNCTION_POLICY_SOURCES = [ROOT / "infra/launcher.tf", ROOT / "infra/idle-stop.tf"]
 
 
 def statements(name):
@@ -151,6 +152,18 @@ class OperatorRoleExampleTests(unittest.TestCase):
                     self.assertRegex(action, r"^(ssm|ssmmessages|s3):[A-Za-z]+$")
                     self.assertTrue(any(s["Effect"] == "Allow" and covers(s, action) for s in self.boundary))
                     self.assertFalse(any(s["Effect"] == "Deny" and covers(s, action) for s in self.boundary))
+
+    def test_launcher_boundary_allows_every_action_the_function_policies_grant(self):
+        # The launcher and the idle stop reach the world hosts and their per-world records inside the boundary
+        # the administrator already created, which scopes by the Project tag and the resource prefix.
+        boundary = statements("launcher-boundary")
+        for path in FUNCTION_POLICY_SOURCES:
+            blocks, actions = host_policy_actions(path)
+            self.assertEqual(len(blocks), 1, path)
+            self.assertTrue({"ec2:StopInstances", "ssm:SendCommand", "ssm:PutParameter"} <= actions, path)
+            for action in sorted(actions):
+                with self.subTest(source=path.name, action=action):
+                    self.assertTrue(any(s["Effect"] == "Allow" and covers(s, action) for s in boundary))
 
     def test_boundary_bucket_access_stays_in_the_deployment_account(self):
         bucket_statements = [s for s in self.boundary if any(a.startswith("s3:") for a in as_list(s["Action"]))]
