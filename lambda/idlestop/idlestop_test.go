@@ -358,7 +358,7 @@ func TestBlockClearsAfterHostStopsAndStartsAgain(t *testing.T) {
 	if _, err := h.run(t); !errors.Is(err, ErrBlocked) {
 		t.Fatalf("err = %v", err)
 	}
-	// The operator repairs the failure and stops the host with minecraft_host.py.
+	// The operator repairs the failure and stops the host through the launcher.
 	h.aws.hostState = ec2types.InstanceStateNameStopped
 	h.mustAction(t, "host-not-running")
 	h.aws.hostState = ec2types.InstanceStateNameRunning

@@ -1,7 +1,7 @@
 locals {
   backup_bucket_arn = "arn:aws:s3:::${var.backup_bucket_name}"
-  # The family host's instances and every world: the hosts share one role, so each can reach every namespace.
-  backup_instance_ids     = distinct(concat(sort(tolist(var.instance_ids)), local.world_ids))
+  # Every world: the world hosts share one role, so each can reach every world's namespace.
+  backup_instance_ids     = local.world_ids
   backup_instance_objects = [for id in local.backup_instance_ids : "${local.backup_bucket_arn}/instances/${id}/*"]
 }
 

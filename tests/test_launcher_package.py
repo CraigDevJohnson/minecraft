@@ -14,13 +14,9 @@ import package_idle_stop as package  # noqa: E402
 
 
 class LauncherPackageTests(unittest.TestCase):
-    """The launcher installs the adapter it carries (ADR 0007), so its zip must carry the adapter install_crafty.sh installs."""
+    """The launcher installs the adapter it carries (ADR 0007), so its zip must carry the files the launcher installs."""
 
     def test_the_adapter_lists_agree(self):
-        installed = re.search(r'^install -m 0644 (.*) "\$install_dir/scripts/"$', (ROOT / "scripts" / "install_crafty.sh").read_text(), re.MULTILINE)
-        self.assertIsNotNone(installed)
-        self.assertEqual(set(re.findall(r'"\$source_dir/(?:scripts|runtime/crafty)/([a-z_]+\.(?:py|json))"', installed.group(1))),
-                         set(package.ADAPTER_FILES))
         self.assertEqual({name: package.source(name) for name in package.ADAPTER_FILES if name.endswith(".json")},
                          {"server.json": ROOT / "runtime" / "crafty" / "server.json"})
         go = re.search(r"var adapterFiles = \[\]string\{([^}]*)\}", (ROOT / "lambda" / "launcher" / "hostadapter.go").read_text())

@@ -1,6 +1,6 @@
 # ADR 0007: The launcher carries the host adapter
 
-Status: Accepted, 2026-10-12. Amended 2026-11-10 by [ADR 0009](0009-one-host-per-world.md): a stop's drain installs the adapter too, so a world host that never got as far as a start can be stopped, and a world host's folders come from its user data instead of `scripts/install_crafty.sh`.
+Status: Accepted, 2026-10-12. Amended 2026-11-10 by [ADR 0009](0009-one-host-per-world.md): a stop's drain installs the adapter too, so a world host that never got as far as a start can be stopped, and a world host's folders come from its user data instead of `scripts/install_crafty.sh`. Amended 2026-11-11: `scripts/install_crafty.sh` was removed with the family host (#88), so the launcher is the only installer of the adapter.
 
 [ADR 0006](0006-cloud-controls.md) made the launcher the only operator, and its allowlist route calls the host adapter's `allowlist` action. The Crafty adapter installed on the host ([ADR 0004](0004-crafty-multiverse-rebuild.md), `scripts/install_crafty.sh`) had no such action: it was written for the earlier runtime, which reached the console over RCON, and nothing but a hands-on run of the installer ever updated the adapter on the host. A Deploy changed the launcher and left the host's adapter as it was, so the route could not work after any deploy. Copying the adapter by hand is a workstation step, which ADR 0006 rules out.
 

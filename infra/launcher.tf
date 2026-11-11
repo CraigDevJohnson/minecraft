@@ -171,19 +171,6 @@ resource "aws_iam_role_policy" "launcher" {
   })
 }
 
-# The family host's start record. The launcher keeps a record per world now (worlds.tf) and no longer reads
-# this one; it stays declared until the family host is retired.
-resource "aws_ssm_parameter" "launcher_state" {
-  count       = local.launcher_count
-  name        = "/${var.resource_prefix}/launcher/state"
-  description = "The launcher's last start or stop and its outcome; owned by the function after creation."
-  type        = "String"
-  value       = "{}"
-  lifecycle {
-    ignore_changes = [value]
-  }
-}
-
 resource "aws_cloudwatch_log_group" "launcher" {
   for_each          = local.launcher_sites
   name              = local.launcher_log_group_names[each.key]

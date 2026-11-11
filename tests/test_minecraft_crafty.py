@@ -926,7 +926,7 @@ def content_manifest(transport: str = "both", world: str = "survival", mods: lis
     return crafty.world_content(pinned_manifest(transport), world, mods)
 
 
-# The Compose file scripts/install_crafty.sh wrote before NetherNet, byte for byte: a RakNet manifest leaves it alone.
+# The Compose file the retired by-hand installer wrote before NetherNet, byte for byte: a RakNet manifest leaves it alone.
 INSTALLED_COMPOSE = """services:
   crafty:
     image: registry.gitlab.com/crafty-controller/crafty-4@sha256:7b6e87514259549647e15ceeaf73d238792e6d77e2c79fc744d5badc8d6e997c

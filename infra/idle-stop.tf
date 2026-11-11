@@ -95,19 +95,6 @@ resource "aws_iam_role_policy" "idle_stop" {
   })
 }
 
-# The family host's idle-stop record. The function keeps a record per world now (worlds.tf) and no longer
-# reads this one; it stays declared until the family host is retired.
-resource "aws_ssm_parameter" "idle_stop_state" {
-  count       = local.idle_stop_count
-  name        = "/${var.resource_prefix}/idle-stop/state"
-  description = "Idle-stop timer and drain progress; owned by the function after creation."
-  type        = "String"
-  value       = "{}"
-  lifecycle {
-    ignore_changes = [value]
-  }
-}
-
 resource "aws_cloudwatch_log_group" "idle_stop" {
   count             = local.idle_stop_count
   name              = local.idle_stop_log_group_name

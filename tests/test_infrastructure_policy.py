@@ -21,10 +21,27 @@ def resource_blocks(directory):
 
 
 class ProtectedInfrastructurePolicyTests(unittest.TestCase):
-    def test_the_one_host_boots_the_exact_looked_up_ami(self):
+    def test_the_family_host_is_retired(self):
+        # The family host, its data disk and its two old records were removed once the worlds were proven
+        # (docs/operations/worlds.md#the-family-hosts-retirement); nothing may bring them back.
+        source = "\n".join(path.read_text() for path in INFRA.glob("*.tf"))
+        for address in ("aws_instance.host", "aws_ebs_volume.data", "aws_volume_attachment.data",
+                        "aws_ssm_parameter.launcher_state", "aws_ssm_parameter.idle_stop_state"):
+            with self.subTest(address=address):
+                self.assertNotRegex(source, r"\b%s\b" % re.escape(address))
+        self.assertFalse(any(name.startswith(("aws_ebs_volume.", "aws_volume_attachment.")) for name in resource_blocks(INFRA)))
+        for name in ("data_filesystem_uuid", "data_volume_size_gib", "instance_ids"):
+            with self.subTest(variable=name):
+                self.assertNotIn(f'variable "{name}"', (INFRA / "variables.tf").read_text())
+        for path in ("scripts/host-bootstrap.sh.tftpl", "scripts/minecraft_storage.py", "scripts/install_crafty.sh", "scripts/minecraft_host.py"):
+            with self.subTest(path=path):
+                self.assertFalse((ROOT / path).exists())
+
+    def test_the_world_hosts_boot_the_exact_looked_up_ami(self):
         source = (INFRA / 'host.tf').read_text()
         self.assertNotRegex(source, r'\bcount\s*=')
-        self.assertRegex(resource_blocks(INFRA)['aws_instance.host'], r'ami\s*=\s*data\.aws_ami\.host\.id')
+        self.assertRegex(source, r'data "aws_ami" "host"')
+        self.assertRegex(resource_blocks(INFRA)['aws_instance.world'], r'ami\s*=\s*data\.aws_ami\.host\.id')
 
     def test_retained_resources_refuse_destroy(self):
         main = resource_blocks(INFRA)
@@ -32,39 +49,22 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
         protected = {
             name: body
             for name, body in main.items()
-            if name == "aws_ebs_volume.data" or name.startswith("aws_s3_")
+            if name.startswith("aws_s3_")
         }
         protected.update(state)
-        self.assertIn("aws_ebs_volume.data", protected)
         self.assertIn("aws_s3_bucket.backups", protected)
         self.assertIn("aws_s3_bucket.state", protected)
         for name, body in protected.items():
             with self.subTest(resource=name):
                 self.assertRegex(body, r"lifecycle\s*\{\s*prevent_destroy\s*=\s*true\s*\}")
 
-    def test_retained_data_disk_size_is_an_explicit_private_input(self):
-        # A default would let an existing deployment silently plan a smaller disk. EBS cannot
-        # shrink: the provider plans a smaller size as an in-place update that AWS then rejects.
-        self.assertRegex(resource_blocks(INFRA)["aws_ebs_volume.data"], r"(?m)^\s*size\s*=\s*var\.data_volume_size_gib$")
-        variable = re.search(
-            r'^variable "data_volume_size_gib" \{\n(.*?)^\}', (INFRA / "variables.tf").read_text(), re.M | re.S)
-        self.assertIsNotNone(variable, "data_volume_size_gib is not declared")
-        self.assertRegex(variable.group(1), r"(?m)^\s*type\s*=\s*number$")
-        self.assertRegex(variable.group(1), r"(?m)^\s*nullable\s*=\s*false$")
-        self.assertNotRegex(variable.group(1), r"(?m)^\s*default\s*=")
-
     def test_auto_assigned_public_ip_does_not_force_host_replacement(self):
         # EC2 releases an auto-assigned address when the host stops, and the provider then
         # reads associate_public_ip_address=false. Without ignore_changes every plan taken
         # while the host is stopped, which is most of the time, would replace it.
-        hosts = {
-            "family": resource_blocks(INFRA)["aws_instance.host"],
-            "world": resource_blocks(INFRA)["aws_instance.world"],
-        }
-        for host, body in hosts.items():
-            with self.subTest(host=host):
-                self.assertRegex(body, r"associate_public_ip_address\s*=\s*true")
-                self.assertRegex(body, r"lifecycle\s*\{[^}]*ignore_changes\s*=\s*\[\s*associate_public_ip_address\s*\]")
+        body = resource_blocks(INFRA)["aws_instance.world"]
+        self.assertRegex(body, r"associate_public_ip_address\s*=\s*true")
+        self.assertRegex(body, r"lifecycle\s*\{[^}]*ignore_changes\s*=\s*\[\s*associate_public_ip_address\s*\]")
 
     def test_no_root_declares_an_elastic_ip(self):
         # An allocated address bills all month; the hosts use an address billed only while running.
@@ -77,14 +77,12 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
     def test_host_launch_waits_for_its_internet_route(self):
         # The address exists from first boot, so cloud-init reaches packages and SSM at once;
         # the Elastic IP association used to order this after the route.
-        for name in ("aws_instance.host", "aws_instance.world"):
-            with self.subTest(resource=name):
-                self.assertRegex(resource_blocks(INFRA)[name], r"depends_on\s*=\s*\[[^\]]*\baws_route\.internet\b[^\]]*\baws_route_table_association\.public\b")
+        self.assertRegex(resource_blocks(INFRA)["aws_instance.world"], r"depends_on\s*=\s*\[[^\]]*\baws_route\.internet\b[^\]]*\baws_route_table_association\.public\b")
 
     def test_storage_identity_has_no_dependency_on_replaceable_compute(self):
         for directory in [INFRA, INFRA / "state-bootstrap"]:
             for name, body in resource_blocks(directory).items():
-                if name.startswith("aws_s3_") or name == "aws_ebs_volume.data":
+                if name.startswith("aws_s3_"):
                     with self.subTest(resource=name):
                         self.assertNotRegex(
                             body,
@@ -94,28 +92,18 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
         state_source = "\n".join(path.read_text() for path in (INFRA / "state-bootstrap").glob("*.tf"))
         self.assertNotRegex(state_source, r'\bmodule\s+"|\baws_instance\.')
 
-    def test_data_is_not_owned_by_instance_block_device_configuration(self):
-        host = resource_blocks(INFRA)["aws_instance.host"]
-        self.assertNotRegex(host, r"\bebs_block_device\s*\{")
-        self.assertNotRegex(host, r"\binstance_market_options\s*\{")
-        self.assertNotRegex(host, r"\bkey_name\s*=")
-        self.assertNotIn("aws_ebs_volume", (INFRA / "network.tf").read_text())
-
     def test_a_world_host_keeps_its_world_on_its_own_root_disk(self):
-        # A world host has no data disk (ADR 0009): the family host's retained disk stays the only one declared.
+        # A world host has no data disk (ADR 0009), and no other EBS volume is declared.
         blocks = resource_blocks(INFRA)
         world = blocks["aws_instance.world"]
         self.assertNotRegex(world, r"\bebs_block_device\s*\{")
         self.assertNotRegex(world, r"\binstance_market_options\s*\{")
         self.assertNotRegex(world, r"\bkey_name\s*=")
         self.assertRegex(world, r'instance_initiated_shutdown_behavior\s*=\s*"stop"')
-        self.assertEqual(
-            {name for name in blocks if name.startswith(("aws_ebs_volume.", "aws_volume_attachment."))},
-            {"aws_ebs_volume.data", "aws_volume_attachment.data"},
-        )
-        self.assertRegex(blocks["aws_volume_attachment.data"], r"instance_id\s*=\s*aws_instance\.host\.id\b")
+        self.assertFalse(any(name.startswith(("aws_ebs_volume.", "aws_volume_attachment.")) for name in blocks))
+        self.assertNotIn("aws_ebs_volume", (INFRA / "network.tf").read_text())
 
-    def test_a_world_host_boots_the_family_ami_and_holds_nothing_of_the_server_content(self):
+    def test_a_world_host_boots_the_reviewed_ami_and_holds_nothing_of_the_server_content(self):
         # Its user data carries the world's id, the bucket, the region and the AWS CLI installer only, so a
         # change to the pinned server content never replaces a host.
         world = resource_blocks(INFRA)["aws_instance.world"]
@@ -153,14 +141,6 @@ class ProtectedInfrastructurePolicyTests(unittest.TestCase):
         self.assertFalse(
             any(name.startswith(("aws_iam_access_key.", "aws_iam_role_policy_attachment.", "aws_iam_policy_attachment.")) for name in blocks)
         )
-
-    def test_host_bootstrap_receives_retained_identity_and_both_scripts(self):
-        host = resource_blocks(INFRA)["aws_instance.host"]
-        self.assertRegex(host, r"user_data_base64\s*=\s*base64gzip\(templatefile\(")
-        self.assertIn("../scripts/host-bootstrap.sh.tftpl", host)
-        self.assertIn("../scripts/minecraft_storage.py", host)
-        self.assertRegex(host, r"data_volume_id\s*=\s*local.data_volume_id\b")
-        self.assertRegex(host, r"data_filesystem_uuid\s*=\s*var.data_filesystem_uuid\b")
 
     def test_state_backends_require_encryption_and_native_locking(self):
         for path in [INFRA / "versions.tf", INFRA / "state-bootstrap/remote-backend.tf.example"]:

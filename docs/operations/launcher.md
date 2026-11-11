@@ -32,7 +32,7 @@ The Member named in `X-Lobby-Member` is logged with every start, stop, restore a
 
 ## How a start runs
 
-A start of a world runs the steps the workstation start once ran for the family host, on that world's host:
+A start of a world runs these steps on that world's host:
 
 1. The request records the start in the world's SSM parameter, `/<resource_prefix>/launcher/worlds/<world>/state`, shared by every environment's function, calls `StartInstances` on the world's host, and starts a second, asynchronous run of the same function, which is told the world. The page gets `202` with `starting` straight away.
 2. The second run waits for EC2 `running` and a public address. It points the world's hostname at that address through Cloudflare (DNS only, TTL 60), then waits for SSM. The A record must already exist: the function updates a record and never creates one.

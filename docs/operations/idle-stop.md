@@ -67,7 +67,7 @@ The function role allows:
 - Writing to its own log group.
 - `ssm:GetParameter` on the launcher's Cloudflare token SecureString, and `kms:Decrypt` on the AWS managed `aws/ssm` key through SSM only.
 
-It cannot start instances, run commands on other hosts, including the family host, or read backups.
+It cannot start instances, run commands on any host but a world's, or read backups.
 
 The operator creates the `<resource_prefix>-idle-stop` role under the launcher's permissions boundary, which already allows everything above for the project's hosts, parameters and logs, so no boundary of its own is needed. The operator role's `launcher` policy covers the function, its role, logs, alarm, SNS topic and state parameter; the version in [`launcher-operator.json.example`](operator-role/launcher-operator.json.example) adds the schedule rule and its target. Nothing is created by local verification.
 

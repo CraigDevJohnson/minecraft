@@ -69,7 +69,7 @@ variable "region" {
 }
 
 variable "availability_zone" {
-  description = "Explicit stable AZ shared by the host and retained data disk; changing it requires recovery into a new disk."
+  description = "Explicit stable AZ of the public subnet and every world host; changing it replaces the subnet and the world hosts."
   type        = string
   validation {
     condition     = can(regex("^[a-z]{2}-[a-z]+-[1-9][a-z]$", var.availability_zone)) && startswith(var.availability_zone, var.region)
@@ -95,41 +95,12 @@ variable "ami_owner_account_id" {
   }
 }
 
-variable "data_filesystem_uuid" {
-  description = "Privately generated ext4 UUID; explicit blank-disk initialization must use this identity."
-  type        = string
-  validation {
-    condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", var.data_filesystem_uuid))
-    error_message = "data_filesystem_uuid must be a lowercase UUID."
-  }
-}
-
-variable "data_volume_size_gib" {
-  description = "Retained data disk size in GiB. EBS grows online but never shrinks: only ever increase this for an existing disk (docs/operations/data-disk-capacity.md). Recommended start: 5."
-  type        = number
-  nullable    = false
-  validation {
-    condition     = var.data_volume_size_gib >= 2 && var.data_volume_size_gib <= 128 && floor(var.data_volume_size_gib) == var.data_volume_size_gib
-    error_message = "data_volume_size_gib must be a whole number of GiB from 2 through 128."
-  }
-}
-
 variable "backup_bucket_name" {
   description = "Globally unique private backup bucket name, separate from the state bucket."
   type        = string
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{1,61}[a-z0-9]$", var.backup_bucket_name))
     error_message = "backup_bucket_name must contain 3-63 lowercase letters, digits, or hyphens."
-  }
-}
-
-variable "instance_ids" {
-  description = "The family host's instance IDs, each authorized a separate backup namespace. The worlds of runtime/crafty/server.json get theirs without being named here; adding an ID does not deploy a runtime."
-  type        = set(string)
-  default     = ["survival"]
-  validation {
-    condition     = length(var.instance_ids) > 0 && alltrue([for id in var.instance_ids : can(regex("^[a-z][a-z0-9-]{0,31}$", id))])
-    error_message = "Each instance ID must begin with a lowercase letter and contain at most 32 lowercase letters, digits, or hyphens."
   }
 }
 
@@ -145,7 +116,7 @@ variable "bedrock_transport" {
 }
 
 variable "additional_game_ingress" {
-  description = "Named game listeners for additional independent server instances on this host."
+  description = "Named extra game listeners the world hosts' shared security group opens beside the standard ones."
   type        = map(object({ protocol = string, port = number }))
   default     = {}
   validation {
@@ -167,7 +138,7 @@ variable "additional_game_ingress" {
 }
 
 variable "public_hostname" {
-  description = "DNS hostname of the family host. Each world is reached at <world>.<public_hostname>, whose existing Cloudflare A record the launcher points at the world's running host and parks while it is stopped."
+  description = "The family's DNS name. Each world is reached at <world>.<public_hostname>, whose existing Cloudflare A record the launcher points at the world's running host and parks while it is stopped."
   type        = string
   validation {
     condition     = length(var.public_hostname) <= 253 && can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.public_hostname))
@@ -227,11 +198,10 @@ variable "idle_stop" {
 }
 
 variable "launcher" {
-  description = "Optional backend for The Lobby's Minecraft Launcher: status, start and stop through a Function URL only the site, and the operator's control role when control_role_arn is set, may call. sites maps each Lobby environment the launcher serves (dev, prod) to that site's IAM role, and gets one function per environment, named <resource_prefix>-<environment>-launcher, all sharing each world's start record because they start the same world hosts. server_name is still accepted and no longer used: a world's name comes from runtime/crafty/server.json. permissions_boundary_arn is the administrator-created launcher boundary; control_role_arn admits the operator's server control role beside the sites. package_path is the zip built by `task lambda:package:launcher`, unless package_dir names the directory holding it. null deploys none of its resources."
+  description = "Optional backend for The Lobby's Minecraft Launcher: status, start and stop through a Function URL only the site, and the operator's control role when control_role_arn is set, may call. sites maps each Lobby environment the launcher serves (dev, prod) to that site's IAM role, and gets one function per environment, named <resource_prefix>-<environment>-launcher, all sharing each world's start record because they start the same world hosts. permissions_boundary_arn is the administrator-created launcher boundary; control_role_arn admits the operator's server control role beside the sites. package_path is the zip built by `task lambda:package:launcher`, unless package_dir names the directory holding it. null deploys none of its resources."
   type = object({
     package_path               = optional(string)
     sites                      = map(string)
-    server_name                = optional(string, "Family server")
     cloudflare_token_parameter = optional(string)
     permissions_boundary_arn   = string
     control_role_arn           = optional(string)
@@ -260,10 +230,6 @@ variable "launcher" {
   validation {
     condition     = var.launcher == null || try(var.launcher.cloudflare_token_parameter == null || can(regex("^/${var.resource_prefix}/[A-Za-z0-9/_.-]+$", var.launcher.cloudflare_token_parameter)), false)
     error_message = "launcher.cloudflare_token_parameter must be an SSM parameter under /<resource_prefix>/."
-  }
-  validation {
-    condition     = var.launcher == null || try(length(trimspace(var.launcher.server_name)) > 0 && length(var.launcher.server_name) <= 60, false)
-    error_message = "launcher.server_name must be 1 to 60 characters."
   }
   validation {
     condition     = var.launcher == null || try(can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", var.launcher.permissions_boundary_arn)) && split(":", var.launcher.permissions_boundary_arn)[4] == var.account_id, false)

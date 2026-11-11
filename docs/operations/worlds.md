@@ -1,6 +1,6 @@
 # Worlds and mods
 
-Each world runs on an EC2 host of its own ([ADR 0009](../adr/0009-one-host-per-world.md)). [`runtime/crafty/server.json`](../../runtime/crafty/server.json) names the worlds and pins everything they run, and OpenTofu makes one host per world from that list. This runbook covers what the file holds, how to add a mod or a world, the first Deploy, the proof run for a world, and how the old family host is retired later. Day-to-day starts and stops are in [cloud controls](cloud-controls.md).
+Each world runs on an EC2 host of its own ([ADR 0009](../adr/0009-one-host-per-world.md)). [`runtime/crafty/server.json`](../../runtime/crafty/server.json) names the worlds and pins everything they run, and OpenTofu makes one host per world from that list. This runbook covers what the file holds, how to add a mod or a world, the first Deploy, the proof run for a world, and the record of the old family host's retirement. Day-to-day starts and stops are in [cloud controls](cloud-controls.md).
 
 Status: built and checked offline on 2026-11-10. Nothing below has run against AWS, Cloudflare or a real host yet. Record each world's proof run on its issue when it is done.
 
@@ -52,7 +52,7 @@ Removing a world is the reverse edit. The next plan destroys that world's host, 
 
 ## The first Deploy
 
-This is the Deploy that brings the world hosts. It is done once.
+This is the Deploy that brought the world hosts. It was done once, and these steps are its record; the family host and the inputs it names have since been [retired](#the-family-hosts-retirement).
 
 **Before the plan**
 
@@ -96,11 +96,26 @@ Run it once for each world after the first Deploy, and again for a new world. Us
 
 Restoring an older archive by hand needs a world host that has finished its first start; on a rebuilt host, start the world once (it restores the newest archive), stop it, then restore. The restore on a rebuilt host is proven the first time a Deploy replaces the world hosts, which any change to the first-boot script causes: after that apply, start the world and check that it is the world from its last stop, not a fresh one.
 
-## Retire the family host
+## The family host's retirement
 
-The family host of [ADR 0004](../adr/0004-crafty-multiverse-rebuild.md) stays declared, stopped and billing for its disks until a separate pull request removes it. That pull request is not written yet. When the worlds have been proven and nothing more is wanted from the old server:
+The family host of [ADR 0004](../adr/0004-crafty-multiverse-rebuild.md) stayed declared and stopped until the worlds were proven, and was then removed by one pull request (#88). It removed:
 
-1. Decide what to keep from `instances/family/crafty/`. Those archives hold the Multiverse worlds and stay in the bucket; no world host restores them.
-2. The pull request removes `aws_instance.host`, `aws_ebs_volume.data` and its attachment, the two old state parameters (`/<prefix>/launcher/state` and `/<prefix>/idle-stop/state`), the family bootstrap (`scripts/host-bootstrap.sh.tftpl`, `scripts/minecraft_storage.py`), the by-hand tooling that only served it (`scripts/install_crafty.sh`, `scripts/minecraft_host.py`), the inputs that only it used, and its runbooks ([host commands](host-commands.md), [data disk capacity](data-disk-capacity.md), the disk set-up in [infrastructure](infrastructure.md)).
-3. The data disk has `prevent_destroy`, so this is the [explicit destructive workflow](infrastructure.md#normal-replacement-and-explicit-destructive-workflow): the pull request names the protection it removes, the plan lists exactly those destroys, and Craig approves those exact resources.
-4. After that Deploy, Craig deletes the old A record, the public hostname's own. The three world records stay.
+- from `infra`: `aws_instance.host`, its data disk `aws_ebs_volume.data` with the disk's `prevent_destroy`, `aws_volume_attachment.data`, the `moved` blocks and the local that named them, and the two old state parameters `aws_ssm_parameter.launcher_state` (`/<prefix>/launcher/state`) and `aws_ssm_parameter.idle_stop_state` (`/<prefix>/idle-stop/state`);
+- the inputs only that host used: `data_filesystem_uuid`, `data_volume_size_gib`, `instance_ids` and `launcher.server_name`, and the `deployment` output's `host_id`, `data_volume_id`, `data_volume_size_gib`, `data_filesystem_uuid` and `instances` (its `schema_version` is now 3);
+- the family prefix, `instances/family/`, from the host role's backup policy, which now names only the worlds' prefixes;
+- the family bootstrap (`scripts/host-bootstrap.sh.tftpl`, `scripts/minecraft_storage.py`), the by-hand tooling that only served it (`scripts/install_crafty.sh`, `scripts/minecraft_host.py`), their tests, and the host commands and data disk capacity runbooks with the disk set-up in [infrastructure](infrastructure.md).
+
+The backup bucket and every object in it stay, including the family server's archives under `instances/family/crafty/`; no world host restores them, and the bucket's lifecycle is unchanged. The world hosts keep the AMI lookup, the host role and instance profile, the security group and the network they always shared.
+
+The private deployment inputs may still set the removed variables. OpenTofu 1.12 warns about a value for an undeclared variable in a `-var-file` and goes on, and drops `server_name` from `launcher` without a word, so the Deploy works with them in place. Remove them from the `DEPLOYMENT_TFVARS` secret when it is next edited.
+
+**The Deploy for it**, run with every world stopped, is the [explicit destructive workflow](infrastructure.md#normal-replacement-and-explicit-destructive-workflow): Craig approves these exact destroys. Its plan must show:
+
+- **Destroyed, exactly five:** `aws_instance.host`, `aws_ebs_volume.data`, `aws_volume_attachment.data`, `aws_ssm_parameter.launcher_state[0]` and `aws_ssm_parameter.idle_stop_state[0]`.
+- **0 to add.**
+- **Changed in place only:** the host role's backup policy (`aws_iam_role_policy.backups`), and the Launcher and idle-stop functions where their packages changed.
+- **No line for any `aws_instance.world`,** nor for the bucket, its objects or the network.
+
+Anything else, any replacement in particular, is a stop condition.
+
+After that Deploy, Craig deletes the old A record in Cloudflare, the public hostname's own. The three world records, `survival.`, `creative.` and `adventure.<the public hostname>`, stay.

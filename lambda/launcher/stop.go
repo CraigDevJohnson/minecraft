@@ -165,7 +165,7 @@ func (l *Launcher) saveParked(ctx context.Context, session Session) error {
 	return l.saveSession(ctx, session)
 }
 
-// FinishStop does the rest of a stop: the same steps as `minecraft_host.py stop`. It drains the game on the
+// FinishStop does the rest of a stop. It drains the game on the
 // host, stops EC2 once the drain's evidence is complete, waits for stopped and parks the players' hostname.
 // A run that Lambda ends before the stop's own deadline hands the rest to a fresh run of itself; the record
 // carries the drain's command id, so that run follows the same drain.
@@ -387,7 +387,7 @@ func (l *Launcher) waitStopped(ctx context.Context) error {
 	}
 }
 
-// validateDrain applies the evidence rules of `minecraft_host.py stop` and the idle stop's ValidateDrain, for
+// validateDrain applies the same evidence rules as the idle stop's ValidateDrain, for
 // the one configured instance: the response covers exactly that instance, confirms the drain barrier, and
 // reports the game stopped with its backup complete (or not required for a never-started instance). Anything
 // else forbids the EC2 stop.
