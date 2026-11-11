@@ -37,7 +37,7 @@ printf '%s\\n%s' "${line#*	}" "${line%%	*}"
 
 
 class LauncherCallTests(unittest.TestCase):
-    """start, stop and restore end green only once the server is ready or stopped, whoever began the change."""
+    """start, stop and restore end green only once the world's server is ready or stopped, whoever began the change."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="launcher-call-"))
@@ -115,7 +115,7 @@ class LauncherCallTests(unittest.TestCase):
                                         [(202, {"state": "starting"}), (200, {"state": "starting"}), (200, {"state": "ready"})])
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(requests, ["POST /server/restore", "GET /server", "GET /server"])
-        self.assertEqual([json.loads(line) for line in self.bodies.read_text().splitlines()], [{"archive": "20261016T031500Z.tar.gz"}])
+        self.assertEqual(self.sent(), [{"archive": "20261016T031500Z.tar.gz"}])
 
     def test_restore_fails_where_it_settles_when_that_is_not_ready(self):
         completed, requests = self.call(["restore", "--archive", "20261016T031500Z.tar.gz"],
@@ -154,7 +154,108 @@ class LauncherCallTests(unittest.TestCase):
                 completed, requests = self.call(["restore", "--archive", archive], [(202, {"state": "starting"}), (200, {"state": "ready"})])
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 self.assertEqual(requests, ["POST /server/restore", "GET /server"])
-                self.assertEqual([json.loads(line) for line in self.bodies.read_text().splitlines()], [{"archive": "20261016T031500Z.tar.gz"}])
+                self.assertEqual(self.sent(), [{"archive": "20261016T031500Z.tar.gz"}])
+
+    def sent(self):
+        return [json.loads(line) for line in self.bodies.read_text().splitlines()]
+
+    def test_a_named_world_is_sent_and_followed_by_itself(self):
+        completed, requests = self.call(["start", "--world", "creative"], [(202, {"state": "starting"}), (200, {"state": "ready"})])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(requests, ["POST /server/start", "GET /server?world=creative"])
+        self.assertEqual(self.sent(), [{"world": "creative"}])
+        completed, requests = self.call(["stop", "--world", "creative", "--force"], [(202, {"state": "stopping"}), (200, {"state": "stopped"})])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(requests, ["POST /server/stop", "GET /server?world=creative"])
+        self.assertEqual(self.sent(), [{"world": "creative", "force": True}])
+        completed, requests = self.call(["restore", "--world", "creative", "--archive", "20261016T031500Z.tar.gz"],
+                                        [(202, {"state": "starting"}), (200, {"state": "ready"})])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(requests, ["POST /server/restore", "GET /server?world=creative"])
+        self.assertEqual(self.sent(), [{"world": "creative", "archive": "20261016T031500Z.tar.gz"}])
+
+    def test_without_a_world_nothing_names_one_so_the_launcher_uses_its_first(self):
+        completed, requests = self.call(["start"], [(202, {"state": "starting"}), (200, {"state": "ready"})])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(requests, ["POST /server/start", "GET /server"])
+        self.assertEqual(self.sent(), [])
+        completed, _ = self.call(["stop", "--force"], [(200, {"state": "stopped"})])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.sent(), [{"force": True}])
+
+    def test_an_unknown_world_is_red(self):
+        completed, requests = self.call(["start", "--world", "nowhere"], [(409, {"code": "unknown_world"})])
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(requests, ["POST /server/start"])
+        self.assertIn("unknown_world", completed.stdout)
+        self.assertIn("the launcher answered 409", completed.stderr)
+
+    def test_status_lists_every_world_or_answers_for_the_one_named(self):
+        java = {"java": {"address": "creative.mc.example.net"}}
+        worlds = [{"id": "survival", "name": "Survival", "state": "stopped", "connection": {}},
+                  {"id": "creative", "name": "Creative", "state": "ready", "connection": java}]
+        completed, requests = self.call(["status"], [(200, {"name": "Survival", "state": "stopped", "worlds": worlds})])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(requests, ["GET /server"])
+        self.assertEqual([line.split() for line in completed.stdout.splitlines()],
+                         [["survival", "stopped"], ["creative", "ready", "creative.mc.example.net"]])
+        answer = {"name": "Creative", "state": "ready", "connection": java}
+        completed, requests = self.call(["status", "--world", "creative"], [(200, answer)])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(requests, ["GET /server?world=creative"])
+        self.assertEqual(json.loads(completed.stdout), answer)
+        completed, _ = self.call(["status"], [(500, {"code": "internal"})])
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("internal", completed.stdout)
+
+    def test_mods_lists_each_worlds_mods_and_a_switch_names_the_world_and_the_mod(self):
+        def mods(enabled):
+            return {"worlds": [{"id": "creative", "name": "Creative", "mods": [
+                {"id": "fawe", "name": "FastAsyncWorldEdit", "version": "2.16.2", "summary": "Bulk building tools.",
+                 "bedrock": "Works.", "default": True, "enabled": enabled}]}]}
+        completed, requests = self.call(["mods"], [(200, mods(True))])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(requests, ["GET /mods"])
+        self.assertEqual([line.split() for line in completed.stdout.splitlines()],
+                         [["creative", "(Creative)"], ["fawe", "on", "FastAsyncWorldEdit", "2.16.2"]])
+        completed, requests = self.call(["mod-off", "--world", "creative", "--mod", "fawe"], [(200, mods(False))])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(requests, ["POST /mods"])
+        self.assertEqual(self.sent(), [{"world": "creative", "mod": "fawe", "enabled": False}])
+        self.assertIn("fawe             off FastAsyncWorldEdit 2.16.2 (usually on)", completed.stdout)
+        self.assertIn("fawe is off for creative from its next start", completed.stdout)
+        completed, _ = self.call(["mod-on", "--world", "creative", "--mod", "fawe"], [(200, mods(True))])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.sent(), [{"world": "creative", "mod": "fawe", "enabled": True}])
+        completed, requests = self.call(["mod-on", "--world", "creative", "--mod", "gsit"], [(409, {"code": "unknown_mod"})])
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("unknown_mod", completed.stdout)
+        self.assertNotIn("from its next start", completed.stdout)
+
+    def test_an_allowlist_change_takes_no_world_and_says_which_running_worlds_it_reached(self):
+        answer = {"edition": "java", "operation": "add", "allowlist": "updated", "worlds": ["creative"]}
+        completed, requests = self.call(["allowlist-add", "--edition", "java", "--player", "ExamplePlayer"], [(200, answer)])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(requests, ["POST /server/allowlist"])
+        self.assertEqual(self.sent(), [{"operation": "add", "edition": "java", "name": "ExamplePlayer"}])
+        self.assertIn("running worlds changed now: creative", completed.stdout)
+        completed, _ = self.call(["allowlist-remove", "--edition", "bedrock", "--player", "Example Player"], [(200, dict(answer, worlds=[]))])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("no world is running", completed.stdout)
+        completed, _ = self.call(["allowlist-add", "--edition", "java", "--player", "ExamplePlayer"], [(409, {"code": "unknown_player"})])
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(completed.stdout.strip(), json.dumps({"code": "unknown_player"}))
+
+    def test_a_bad_or_misplaced_world_or_mod_is_refused_before_any_request(self):
+        for action in (["start", "--world"], ["start", "--world", ""], ["start", "--world", "Creative"], ["status", "--world", "a b"],
+                       ["stop", "--world", "x&force=1"], ["mod-on", "--world", "creative"], ["mod-off", "--mod", "fawe"],
+                       ["mod-on", "--world", "creative", "--mod", "../fawe"], ["mods", "--world", "creative"],
+                       ["allowlist-add", "--world", "creative", "--edition", "java", "--player", "ExamplePlayer"]):
+            with self.subTest(action=action):
+                completed, requests = self.call(action, [])
+                self.assertEqual(completed.returncode, 2, completed.stderr)
+                self.assertEqual(requests, [])
+                self.assertIn("usage:", completed.stderr)
 
 
 if __name__ == "__main__":

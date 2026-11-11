@@ -12,9 +12,9 @@ import (
 )
 
 // The launcher carries the host adapter it calls, the Crafty adapter installed on the host as
-// /usr/local/sbin/minecraft-instance, and installs it before each game start and allowlist change whenever
-// the host's copy differs. A deploy of the launcher therefore always brings the adapter its commands were
-// written for (ADR 0007). The package script puts the files in the function's adapter folder.
+// /usr/local/sbin/minecraft-instance, and installs it before each game start, drain, restore and allowlist change
+// whenever the host's copy differs. A deploy of the launcher therefore always brings the adapter its commands
+// were written for (ADR 0007). The package script puts the files in the function's adapter folder.
 const adapterDirectory = "/opt/minecraft-crafty/scripts"
 
 // adapterFiles are the files scripts/install_crafty.sh puts in adapterDirectory, in the order they are swapped

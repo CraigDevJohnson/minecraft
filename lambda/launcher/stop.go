@@ -218,7 +218,8 @@ func (l *Launcher) stopSteps(ctx context.Context, session *Session) error {
 				return err
 			}
 		}
-		id, err := l.sendCommand(ctx, remoteCommand+" host-drain", "minecraft launcher stop", drainTimeoutSeconds)
+		// The adapter's installation comes first, so a host that never got as far as a start can still be stopped.
+		id, err := l.sendCommand(ctx, l.onHost(remoteCommand+" host-drain"), "minecraft launcher stop", drainTimeoutSeconds)
 		if err != nil {
 			return fmt.Errorf("send drain: %w", err)
 		}

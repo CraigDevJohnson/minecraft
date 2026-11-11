@@ -1,6 +1,6 @@
-// Command launcher is the Minecraft Launcher's backend: it answers The Lobby's site with the family server's
-// status, starts or stops the server when a Member or the operator's workflow asks, and restores an archive
-// when the operator's workflow asks.
+// Command launcher is the Minecraft Launcher's backend: it answers The Lobby's site with each world's status,
+// starts or stops a world when a Member or the operator's workflow asks, switches a world's mods, and restores
+// an archive or changes the allowlist when the operator's workflow asks.
 //
 // On Lambda it serves the site through its Function URL, which only the site's role and the operator's
 // control role may call (the-lobby ADR 0006, ADR 0006 here), and finishes each start, stop or restore in a
@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"time"
 
@@ -35,47 +34,95 @@ import (
 	"github.com/awslabs/aws-lambda-go-api-proxy/httpadapter"
 )
 
-// The payloads of the asynchronous runs that finish a start and a stop.
+// The tasks of the asynchronous runs that finish a start and a stop.
 const (
 	finishStartTask = "finish-start"
 	finishStopTask  = "finish-stop"
 )
 
+// task is the payload of the asynchronous run that finishes one world's start or stop.
+type task struct {
+	Task  string `json:"launcher_task"`
+	World string `json:"world"`
+}
+
+// run finishes the start or stop the task names, for the world it names.
+func (t task) run(ctx context.Context, worlds *Worlds, log *slog.Logger) error {
+	launcher, ok := worlds.Launchers[t.World]
+	switch {
+	case !ok:
+		return errors.New("launcher task for an unknown world")
+	case t.Task == finishStartTask:
+		return finish(ctx, "finish start", t.World, launcher.FinishStart, log)
+	case t.Task == finishStopTask:
+		return finish(ctx, "finish stop", t.World, launcher.FinishStop, log)
+	}
+	return errors.New("unknown launcher task")
+}
+
 // followUpMargin leaves the follow-up run time to record a failure before Lambda ends it.
 const followUpMargin = 20 * time.Second
 
-// instanceName is the host adapter's rule for an instance's name (INSTANCE_ID in scripts/minecraft_crafty.py).
-// The name goes unquoted into the commands this function runs on the host.
-var instanceName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+// Environment is what the function's environment supplies: each world's Config, in the order the pinned server
+// content lists the worlds, the zone and token their DNS records share, and the two parameters the worlds share.
+type Environment struct {
+	Worlds             []Config
+	DNS                DNSPointer
+	ModsParameter      string
+	AllowlistParameter string
+}
 
-func loadConfig(getenv func(string) string) (Config, *DNSPointer, error) {
-	cfg := Config{
-		HostID:                 getenv("HOST_ID"),
-		Instance:               getenv("INSTANCE"),
-		ServerName:             getenv("SERVER_NAME"),
-		PublicHostname:         getenv("PUBLIC_HOSTNAME"),
-		StateParameter:         getenv("STATE_PARAMETER"),
-		IdleStopStateParameter: getenv("IDLE_STOP_STATE_PARAMETER"),
+func loadConfig(getenv func(string) string, manifest *Manifest) (Environment, error) {
+	env := Environment{
+		DNS:                DNSPointer{ZoneID: getenv("CLOUDFLARE_ZONE_ID"), TokenParameter: getenv("CLOUDFLARE_TOKEN_PARAMETER")},
+		ModsParameter:      getenv("MODS_PARAMETER"),
+		AllowlistParameter: getenv("ALLOWLIST_PARAMETER"),
 	}
 	port, err := strconv.Atoi(getenv("BEDROCK_PORT"))
 	if err != nil || port < 1 || port > 65535 {
-		return Config{}, nil, errors.New("BEDROCK_PORT must be a port number")
+		return Environment{}, errors.New("BEDROCK_PORT must be a port number")
 	}
-	cfg.BedrockPort = port
-	if cfg.HostID == "" || cfg.Instance == "" || cfg.ServerName == "" || !parameterName.MatchString(cfg.StateParameter) {
-		return Config{}, nil, errors.New("HOST_ID, INSTANCE, SERVER_NAME and STATE_PARAMETER are required")
+	if !cloudflareID.MatchString(env.DNS.ZoneID) || !parameterName.MatchString(env.DNS.TokenParameter) {
+		return Environment{}, errors.New("valid CLOUDFLARE_ZONE_ID and CLOUDFLARE_TOKEN_PARAMETER are required")
 	}
-	if !instanceName.MatchString(cfg.Instance) {
-		return Config{}, nil, errors.New("INSTANCE must be an instance name: a lower-case letter, then up to 31 lower-case letters, digits or hyphens")
+	if !parameterName.MatchString(env.ModsParameter) || !parameterName.MatchString(env.AllowlistParameter) {
+		return Environment{}, errors.New("MODS_PARAMETER and ALLOWLIST_PARAMETER must be parameter names")
 	}
-	if cfg.IdleStopStateParameter != "" && !parameterName.MatchString(cfg.IdleStopStateParameter) {
-		return Config{}, nil, errors.New("IDLE_STOP_STATE_PARAMETER must be a parameter name")
+	// WORLDS is OpenTofu's: each world's host, hostname and state parameters under the world's id. The idle
+	// stop gets the same value.
+	var worlds map[string]struct {
+		HostID                 string `json:"host_id"`
+		Hostname               string `json:"hostname"`
+		LauncherStateParameter string `json:"launcher_state_parameter"`
+		IdleStopStateParameter string `json:"idle_stop_state_parameter"`
 	}
-	dns := &DNSPointer{Hostname: cfg.PublicHostname, ZoneID: getenv("CLOUDFLARE_ZONE_ID"), TokenParameter: getenv("CLOUDFLARE_TOKEN_PARAMETER")}
-	if len(dns.Hostname) > 253 || !hostname.MatchString(dns.Hostname) || !cloudflareID.MatchString(dns.ZoneID) || !parameterName.MatchString(dns.TokenParameter) {
-		return Config{}, nil, errors.New("valid PUBLIC_HOSTNAME, CLOUDFLARE_ZONE_ID and CLOUDFLARE_TOKEN_PARAMETER are required")
+	mismatch := errors.New("WORLDS must hold exactly the worlds of the pinned server content")
+	if json.Unmarshal([]byte(getenv("WORLDS")), &worlds) != nil || len(worlds) != len(manifest.Worlds) {
+		return Environment{}, mismatch
 	}
-	return cfg, dns, nil
+	for _, world := range manifest.Worlds {
+		settings, ok := worlds[world.ID]
+		switch {
+		case !ok:
+			return Environment{}, mismatch
+		case settings.HostID == "" || !parameterName.MatchString(settings.LauncherStateParameter):
+			return Environment{}, fmt.Errorf("WORLDS needs a host_id and a launcher_state_parameter for %s", world.ID)
+		case len(settings.Hostname) > 253 || !hostname.MatchString(settings.Hostname):
+			return Environment{}, fmt.Errorf("WORLDS needs a valid hostname for %s", world.ID)
+		case settings.IdleStopStateParameter != "" && !parameterName.MatchString(settings.IdleStopStateParameter):
+			return Environment{}, fmt.Errorf("WORLDS needs a parameter name, or nothing, as the idle_stop_state_parameter of %s", world.ID)
+		}
+		env.Worlds = append(env.Worlds, Config{
+			HostID:                 settings.HostID,
+			Instance:               world.ID,
+			ServerName:             world.Name,
+			PublicHostname:         settings.Hostname,
+			BedrockPort:            port,
+			StateParameter:         settings.LauncherStateParameter,
+			IdleStopStateParameter: settings.IdleStopStateParameter,
+		})
+	}
+	return env, nil
 }
 
 // adapterSource answers the host adapter files: the package's adapter folder on Lambda
@@ -108,7 +155,18 @@ func checkoutRoot() string {
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	cfg, dns, err := loadConfig(os.Getenv)
+	source := adapterSource(os.Getenv)
+	adapter, err := LoadHostAdapter(source)
+	if err != nil {
+		log.Error("host adapter", "err", err)
+		os.Exit(1)
+	}
+	manifest, err := LoadManifest(source)
+	if err != nil {
+		log.Error("pinned server content", "err", err)
+		os.Exit(1)
+	}
+	env, err := loadConfig(os.Getenv, manifest)
 	if err != nil {
 		log.Error("configuration", "err", err)
 		os.Exit(1)
@@ -118,57 +176,51 @@ func main() {
 		log.Error("load AWS configuration", "err", err)
 		os.Exit(1)
 	}
-	adapter, err := LoadHostAdapter(adapterSource(os.Getenv))
-	if err != nil {
-		log.Error("host adapter", "err", err)
-		os.Exit(1)
-	}
+	ec2Client := ec2.NewFromConfig(awsConfig)
 	ssmClient := ssm.NewFromConfig(awsConfig)
-	dns.Parameters = ssmClient
-	dns.Client = cloudflareClient()
-	launcher := &Launcher{
-		Config:   cfg,
-		EC2:      ec2.NewFromConfig(awsConfig),
-		SSM:      ssmClient,
-		Ping:     PingPlayers,
-		PointDNS: dns.Point,
-		Adapter:  adapter,
-		Now:      time.Now,
+	worlds := &Worlds{
+		Manifest:           manifest,
+		Launchers:          map[string]*Launcher{},
+		SSM:                ssmClient,
+		ModsParameter:      env.ModsParameter,
+		AllowlistParameter: env.AllowlistParameter,
+		LookupPlayer:       (&PlayerLookup{Client: lookupClient()}).Lookup,
 	}
-	launcher.LookupPlayer = (&PlayerLookup{Client: lookupClient()}).Lookup
-	server := &Server{Launcher: launcher, Log: log}
+	for _, cfg := range env.Worlds {
+		// Each world has its own DNS record, in the one zone, changed with the one token.
+		dns := env.DNS
+		dns.Hostname, dns.Parameters, dns.Client = cfg.PublicHostname, ssmClient, cloudflareClient()
+		worlds.Add(&Launcher{
+			Config:   cfg,
+			EC2:      ec2Client,
+			SSM:      ssmClient,
+			Ping:     PingPlayers,
+			PointDNS: dns.Point,
+			Adapter:  adapter,
+			Now:      time.Now,
+		})
+	}
+	server := &Server{Launcher: worlds, Log: log}
 
 	if name := os.Getenv("AWS_LAMBDA_FUNCTION_NAME"); os.Getenv("AWS_LAMBDA_RUNTIME_API") != "" && name != "" {
 		invoker := awslambda.NewFromConfig(awsConfig)
-		invokeSelf := func(task string) func(ctx context.Context) error {
-			payload, _ := json.Marshal(map[string]string{"launcher_task": task})
-			return func(ctx context.Context) error {
-				_, err := invoker.Invoke(ctx, &awslambda.InvokeInput{
-					FunctionName:   aws.String(name),
-					InvocationType: lambdatypes.InvocationTypeEvent,
-					Payload:        payload,
-				})
-				return err
-			}
-		}
-		launcher.FollowUp = invokeSelf(finishStartTask)
-		launcher.FollowUpStop = invokeSelf(finishStopTask)
+		worlds.HandOff(func(ctx context.Context, t task) error {
+			payload, _ := json.Marshal(t)
+			_, err := invoker.Invoke(ctx, &awslambda.InvokeInput{
+				FunctionName:   aws.String(name),
+				InvocationType: lambdatypes.InvocationTypeEvent,
+				Payload:        payload,
+			})
+			return err
+		})
 		server.StartFailed = func() { writeMetric(os.Stdout, name, startFailureMetric, time.Now()) }
 		server.StopFailed = func() { writeMetric(os.Stdout, name, stopFailureMetric, time.Now()) }
 		server.Operator = signedOperator(RoleNames(os.Getenv("SITE_ROLE_ARNS")))
 		proxy := httpadapter.NewV2(server.Handler())
 		lambda.Start(func(ctx context.Context, raw json.RawMessage) (any, error) {
-			var task struct {
-				Task string `json:"launcher_task"`
-			}
-			if json.Unmarshal(raw, &task) == nil && task.Task != "" {
-				switch task.Task {
-				case finishStartTask:
-					return nil, finish(ctx, "finish start", launcher.FinishStart, log)
-				case finishStopTask:
-					return nil, finish(ctx, "finish stop", launcher.FinishStop, log)
-				}
-				return nil, errors.New("unknown launcher task")
+			var t task
+			if json.Unmarshal(raw, &t) == nil && t.Task != "" {
+				return nil, t.run(ctx, worlds, log)
 			}
 			var request events.APIGatewayV2HTTPRequest
 			if err := json.Unmarshal(raw, &request); err != nil {
@@ -179,18 +231,14 @@ func main() {
 		return
 	}
 
-	inBackground := func(name string, run func(context.Context) error) func(context.Context) error {
-		return func(context.Context) error {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-				defer cancel()
-				_ = finish(ctx, name, run, log)
-			}()
-			return nil
-		}
-	}
-	launcher.FollowUp = inBackground("finish start", launcher.FinishStart)
-	launcher.FollowUpStop = inBackground("finish stop", launcher.FinishStop)
+	worlds.HandOff(func(_ context.Context, t task) error {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+			defer cancel()
+			_ = t.run(ctx, worlds, log)
+		}()
+		return nil
+	})
 	addr := os.Getenv("LAUNCHER_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:8082"
@@ -203,7 +251,6 @@ func main() {
 	}
 }
 
-// finish runs a follow-up with time left to record a failure before Lambda ends the run.
 // signedOperator reads the IAM caller the Function URL verified from the request's event and admits it as an
 // operator unless it is one of the sites' roles. A request without that caller (the local server) admits nobody.
 func signedOperator(siteRoles map[string]bool) func(*http.Request) bool {
@@ -216,7 +263,8 @@ func signedOperator(siteRoles map[string]bool) func(*http.Request) bool {
 	}
 }
 
-func finish(ctx context.Context, name string, run func(context.Context) error, log *slog.Logger) error {
+// finish runs a world's follow-up with time left to record a failure before Lambda ends the run.
+func finish(ctx context.Context, name, world string, run func(context.Context) error, log *slog.Logger) error {
 	if deadline, ok := ctx.Deadline(); ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, deadline.Add(-followUpMargin))
@@ -224,9 +272,9 @@ func finish(ctx context.Context, name string, run func(context.Context) error, l
 	}
 	err := run(ctx)
 	if err != nil {
-		log.Error(name, "err", err)
+		log.Error(name, "world", world, "err", err)
 	} else {
-		log.Info(name, "outcome", "done")
+		log.Info(name, "world", world, "outcome", "done")
 	}
 	return err
 }

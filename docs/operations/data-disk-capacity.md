@@ -1,5 +1,7 @@
 # Data disk capacity
 
+This page is the old family host's. A world host has no data disk ([ADR 0009](../adr/0009-one-host-per-world.md)): its world lives on the host's 20 GiB root disk, which no input sizes, and the page goes when the family host is retired ([worlds](worlds.md#retire-the-family-host)).
+
 The retained data disk, `aws_ebs_volume.data` mounted at `/srv/minecraft`, takes its size from the required private input `data_volume_size_gib`. EBS grows a volume online and never shrinks one, so the disk starts small and grows when the [usage warning](#usage-report-and-warning) says so. gp3 gives the same 3,000 IOPS and 125 MiB/s at any size: a smaller disk is not a slower one. Keep volume IDs, UUIDs, and command output in the private operator directory, never in an issue or pull request.
 
 ## What the disk holds

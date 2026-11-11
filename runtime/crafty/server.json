@@ -1,112 +1,224 @@
 {
-  "schema_version": 1,
-  "revision": "family-2026-11-05-paper-263-242-geyser-1288",
+  "schema_version": 2,
+  "revision": "worlds-2026-11-10",
   "crafty": {
     "image": "registry.gitlab.com/crafty-controller/crafty-4@sha256:7b6e87514259549647e15ceeaf73d238792e6d77e2c79fc744d5badc8d6e997c",
     "version": "4.11.0"
   },
   "minecraft_version": "26.3",
   "java_version": "25",
-  "artifacts": [
-    {
-      "name": "paper",
-      "version": "26.3",
-      "build": 242,
-      "path": "paper.jar",
-      "url": "https://fill-data.papermc.io/v1/objects/fc704a4510a2744bab90a6770336b202038e60333e37f24af8027ee948935d20/paper-26.3-242.jar",
-      "sha256": "fc704a4510a2744bab90a6770336b202038e60333e37f24af8027ee948935d20"
-    },
-    {
-      "name": "geyser",
-      "version": "2.12.1",
-      "build": 1288,
-      "path": "plugins/Geyser-Spigot.jar",
-      "url": "https://download.geysermc.org/v2/projects/geyser/versions/2.12.1/builds/1288/downloads/spigot",
-      "sha256": "6c090fac496d8a8b9f51040eb39dc350a5f4e5384e9c76bc0efdd185ba1c9e67"
-    },
-    {
-      "name": "floodgate",
-      "version": "2.2.5",
-      "build": 141,
-      "path": "plugins/floodgate-spigot.jar",
-      "url": "https://download.geysermc.org/v2/projects/floodgate/versions/2.2.5/builds/141/downloads/spigot",
-      "sha256": "21570aff9ce17d6983928e8552777760e1ede5050026b04c686b0ae112e6fd7e"
-    },
-    {
-      "name": "multiverse-core",
-      "version": "5.8.1",
-      "path": "plugins/multiverse-core-5.8.1.jar",
-      "url": "https://github.com/Multiverse/Multiverse-Core/releases/download/5.8.1/multiverse-core-5.8.1.jar",
-      "sha256": "bc3f34e2d747fdf024f44868747bb016b08fa11d98ccb4ffcac958f083151a83"
-    },
-    {
-      "name": "multiverse-inventories",
-      "version": "5.3.6",
-      "path": "plugins/multiverse-inventories-5.3.6.jar",
-      "url": "https://github.com/Multiverse/Multiverse-Inventories/releases/download/5.3.6/multiverse-inventories-5.3.6.jar",
-      "sha256": "6e58e89009283f4be8658abe2b7e46c482010ceccf3c8e0b0e8ca6a0a114ff92"
-    },
-    {
-      "name": "multiverse-portals",
-      "version": "5.3.0",
-      "path": "plugins/multiverse-portals-5.3.0.jar",
-      "url": "https://github.com/Multiverse/Multiverse-Portals/releases/download/5.3.0/multiverse-portals-5.3.0.jar",
-      "sha256": "345f0f296bb54e1fd98494260f93fb1ab97ba92f8ad7f6bfba129ea90021ea8d"
-    },
-    {
-      "name": "multiverse-netherportals",
-      "version": "5.1.0",
-      "path": "plugins/multiverse-netherportals-5.1.0.jar",
-      "url": "https://github.com/Multiverse/Multiverse-NetherPortals/releases/download/5.1.0/multiverse-netherportals-5.1.0.jar",
-      "sha256": "a4b3750970b5b710aa942baaff07a8fcef56802cf286b9dcda7e69dd904492cc"
-    }
-  ],
-  "managed_files": [
-    {
-      "path": "plugins/Geyser-Spigot/config.yml",
-      "format": "canonical-json-v1",
-      "content": {
-        "config-version": 12,
-        "bedrock": {
-          "address": "0.0.0.0",
-          "port": 19132,
-          "clone-remote-port": false,
-          "transport": "both",
-          "webrtc-port": 19133,
-          "signaling": {
-            "mode": "builtin"
-          }
-        },
-        "java": {
-          "auth-type": "floodgate"
-        },
-        "motd": {
-          "primary-motd": "Family Minecraft",
-          "secondary-motd": "Family Minecraft",
-          "max-players": 10
-        },
-        "log-player-ip-addresses": false,
-        "saved-user-logins": []
+  "base": {
+    "artifacts": [
+      {
+        "name": "paper",
+        "version": "26.3",
+        "build": 242,
+        "path": "paper.jar",
+        "url": "https://fill-data.papermc.io/v1/objects/fc704a4510a2744bab90a6770336b202038e60333e37f24af8027ee948935d20/paper-26.3-242.jar",
+        "sha256": "fc704a4510a2744bab90a6770336b202038e60333e37f24af8027ee948935d20"
       },
-      "sha256": "261b82a68cbdb7054e2071ef290027ca360cb5193d381c017796d97d54e4d5df"
+      {
+        "name": "geyser",
+        "version": "2.12.1",
+        "build": 1288,
+        "path": "plugins/Geyser-Spigot.jar",
+        "url": "https://download.geysermc.org/v2/projects/geyser/versions/2.12.1/builds/1288/downloads/spigot",
+        "sha256": "6c090fac496d8a8b9f51040eb39dc350a5f4e5384e9c76bc0efdd185ba1c9e67"
+      },
+      {
+        "name": "floodgate",
+        "version": "2.2.5",
+        "build": 141,
+        "path": "plugins/floodgate-spigot.jar",
+        "url": "https://download.geysermc.org/v2/projects/floodgate/versions/2.2.5/builds/141/downloads/spigot",
+        "sha256": "21570aff9ce17d6983928e8552777760e1ede5050026b04c686b0ae112e6fd7e"
+      }
+    ],
+    "managed_files": [
+      {
+        "path": "plugins/Geyser-Spigot/config.yml",
+        "format": "canonical-json-v1",
+        "content": {
+          "config-version": 12,
+          "bedrock": {
+            "address": "0.0.0.0",
+            "port": 19132,
+            "clone-remote-port": false,
+            "transport": "both",
+            "webrtc-port": 19133,
+            "signaling": {
+              "mode": "builtin"
+            }
+          },
+          "java": {
+            "auth-type": "floodgate"
+          },
+          "motd": {
+            "primary-motd": "Family Minecraft",
+            "secondary-motd": "Family Minecraft",
+            "max-players": 10
+          },
+          "log-player-ip-addresses": false,
+          "saved-user-logins": []
+        },
+        "sha256": "261b82a68cbdb7054e2071ef290027ca360cb5193d381c017796d97d54e4d5df"
+      }
+    ],
+    "server_properties": {
+      "server-port": 25565,
+      "difficulty": "normal",
+      "max-players": 10,
+      "view-distance": 10,
+      "simulation-distance": 8,
+      "online-mode": true,
+      "white-list": true,
+      "enforce-whitelist": true,
+      "enforce-secure-profile": false,
+      "enable-rcon": false,
+      "enable-query": false,
+      "spawn-protection": 0,
+      "pvp": false
     }
-  ],
-  "server_properties": {
-    "server-port": 25565,
-    "motd": "Family Minecraft",
-    "level-name": "survival",
-    "gamemode": "survival",
-    "difficulty": "normal",
-    "max-players": 10,
-    "view-distance": 10,
-    "simulation-distance": 8,
-    "online-mode": true,
-    "white-list": true,
-    "enforce-whitelist": true,
-    "enforce-secure-profile": false,
-    "enable-rcon": false,
-    "enable-query": false,
-    "spawn-protection": 0,
-    "pvp": false
-  }
+  },
+  "mods": {
+    "griefprevention": {
+      "name": "GriefPrevention",
+      "version": "16.18.8",
+      "path": "plugins/GriefPrevention-16.18.8.jar",
+      "url": "https://cdn.modrinth.com/data/O4o4mKaq/versions/MtwPHMAS/GriefPrevention.jar",
+      "sha256": "83d199575808ddbab49de36990b99ed1e5549a8c4e844a9906ac30e90fe51701",
+      "summary": "Claim land with a golden shovel so only the people you trust can build or break there.",
+      "bedrock": "Not yet tried on Bedrock.",
+      "managed_files": [
+        {
+          "path": "plugins/GriefPreventionData/config.yml",
+          "format": "canonical-json-v1",
+          "content": {
+            "GriefPrevention": {
+              "Claims": {
+                "Mode": {
+                  "survival": "Survival",
+                  "survival_nether": "Survival",
+                  "survival_the_end": "Survival",
+                  "creative": "Survival",
+                  "creative_nether": "Survival",
+                  "creative_the_end": "Survival",
+                  "adventure": "Survival",
+                  "adventure_nether": "Survival",
+                  "adventure_the_end": "Survival"
+                },
+                "InitialBlocks": 10000,
+                "Expiration": {
+                  "ChestClaimDays": 0,
+                  "AllClaims": {
+                    "DaysInactive": 0
+                  }
+                }
+              },
+              "Spam": {
+                "Enabled": false
+              }
+            }
+          },
+          "sha256": "e73e434a0ab7cf8497f510f50cedc928d557aae7ab5ae70ba227ae19c1253b90"
+        }
+      ]
+    },
+    "fawe": {
+      "name": "FastAsyncWorldEdit",
+      "version": "2.16.2",
+      "path": "plugins/FastAsyncWorldEdit-Paper-2.16.2.jar",
+      "url": "https://github.com/IntellectualSites/FastAsyncWorldEdit/releases/download/2.16.2/FastAsyncWorldEdit-Paper-2.16.2.jar",
+      "sha256": "a74219fa660c782c9779e6740867cde395a24d1381dcba6c4f8022e4e9c3f87d",
+      "summary": "Bulk building tools: copy, paste, fill and brushes, inside land you have claimed.",
+      "bedrock": "Commands and the wand work. Command suggestions do not show.",
+      "managed_files": [
+        {
+          "path": "permissions.yml",
+          "format": "canonical-json-v1",
+          "content": {
+            "family.worldedit": {
+              "description": "FastAsyncWorldEdit's basic editing for every player, inside claims they own or are trusted in.",
+              "default": true,
+              "children": {
+                "fawe.permpack.basic": true,
+                "fawe.griefprevention": true
+              }
+            }
+          },
+          "sha256": "45036371a38f2dd79280a5f5e61cd530149540e181ade47a3026f512f566d897"
+        }
+      ]
+    },
+    "auraskills": {
+      "name": "AuraSkills",
+      "version": "2.4.0",
+      "path": "plugins/AuraSkills-2.4.0.jar",
+      "url": "https://github.com/Archy-X/AuraSkills/releases/download/2.4.0/AuraSkills-2.4.0.jar",
+      "sha256": "de54cbd2e33d65e8b1704751ae4121ed2f5b466ba89c63a1aadf3a3e629d6a40",
+      "summary": "Skills that level up as you play, with stats and abilities.",
+      "bedrock": "Not yet tried on Bedrock."
+    },
+    "decentholograms": {
+      "name": "DecentHolograms",
+      "version": "2.10.2",
+      "path": "plugins/DecentHolograms-2.10.2.jar",
+      "url": "https://github.com/DecentSoftware-eu/DecentHolograms/releases/download/2.10.2/DecentHolograms-2.10.2.jar",
+      "sha256": "99bc2b7b0af7846cc45d5800ea0acfae6846d479e048b8e5995c5afa53df27be",
+      "summary": "Floating text labels.",
+      "bedrock": "Not yet tried on Bedrock."
+    },
+    "gsit": {
+      "name": "GSit",
+      "version": "3.8.0",
+      "path": "plugins/GSit-3.8.0.jar",
+      "url": "https://github.com/Gecolay/GSit/releases/download/3.8.0/GSit-3.8.0.jar",
+      "sha256": "669820b42047eac476ec754142c682dca4f396e0b84f178e7959cf236e64cc4a",
+      "summary": "Sit on stairs and slabs, lie down and crawl.",
+      "bedrock": "Sitting works with a click or /sit. Not yet tried on Bedrock."
+    }
+  },
+  "worlds": [
+    {
+      "id": "survival",
+      "name": "Survival",
+      "server_properties": {
+        "level-name": "survival",
+        "gamemode": "survival",
+        "motd": "Survival"
+      },
+      "mods": {
+        "griefprevention": true,
+        "gsit": true
+      }
+    },
+    {
+      "id": "creative",
+      "name": "Creative",
+      "server_properties": {
+        "level-name": "creative",
+        "gamemode": "creative",
+        "force-gamemode": true,
+        "motd": "Creative"
+      },
+      "mods": {
+        "griefprevention": true,
+        "fawe": true
+      }
+    },
+    {
+      "id": "adventure",
+      "name": "Adventure",
+      "server_properties": {
+        "level-name": "adventure",
+        "gamemode": "survival",
+        "motd": "Adventure"
+      },
+      "mods": {
+        "griefprevention": true,
+        "auraskills": true,
+        "decentholograms": true
+      }
+    }
+  ]
 }

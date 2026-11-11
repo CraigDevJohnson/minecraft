@@ -17,10 +17,10 @@ import (
 
 const (
 	archiveFile = "20261016T031500Z.tar.gz"
-	archiveKey  = "instances/family/crafty/" + archiveFile
+	archiveKey  = "instances/survival/crafty/" + archiveFile
 	// restoredOutput is the adapter's answer to a restore, as scripts/minecraft_crafty.py prints it.
-	restoredOutput = `{"instance": "family", "replaced": "/srv/minecraft/crafty/staging/archived-family-20261011T160100Z", "restored": "` + archiveKey + `"}`
-	restoreCommand = remoteCommand + " restore family --key '" + archiveKey + "'"
+	restoredOutput = `{"instance": "survival", "replaced": "/srv/minecraft/crafty/staging/archived-survival-20261011T160100Z", "restored": "` + archiveKey + `"}`
+	restoreCommand = remoteCommand + " restore survival --key '" + archiveKey + "'"
 )
 
 func TestRestoreAStoppedHostRecordsTheRestoreBeforeEC2(t *testing.T) {
@@ -79,7 +79,7 @@ func TestRestoreOnARunningHostWhoseStartOrRestoreFailed(t *testing.T) {
 		session  Session
 	}{
 		{"a start failed", 5 * time.Minute, Session{RequestedAt: now.Add(-6 * time.Minute), LaunchTime: now.Add(-5 * time.Minute), Phase: Failed, DNS: "current"}},
-		{"a restore failed", 10 * time.Minute, Session{RequestedAt: now.Add(-11 * time.Minute), LaunchTime: now.Add(-10 * time.Minute), Phase: Failed, RestoreKey: "instances/family/crafty/20261015T031500Z.tar.gz", Detail: "restore the archive: the archive does not match its recorded SHA-256"}},
+		{"a restore failed", 10 * time.Minute, Session{RequestedAt: now.Add(-11 * time.Minute), LaunchTime: now.Add(-10 * time.Minute), Phase: Failed, RestoreKey: "instances/survival/crafty/20261015T031500Z.tar.gz", Detail: "restore the archive: the archive does not match its recorded SHA-256"}},
 		{"a restore ran out of time", 45 * time.Minute, Session{RequestedAt: now.Add(-46 * time.Minute), LaunchTime: now.Add(-45 * time.Minute), Phase: Restoring, RestoreKey: archiveKey, RestoreCommandID: commandID}},
 	} {
 		r := newRig(ec2types.InstanceStateNameRunning, tc.launched)
@@ -209,9 +209,9 @@ func TestStopStartAndAllowlistWaitForARestore(t *testing.T) {
 	if status, started, err := r.launcher.Start(context.Background()); err != nil || started || status.State != Starting || r.followUps != 0 {
 		t.Fatalf("state=%s started=%v err=%v followUps=%d", status.State, started, err, r.followUps)
 	}
-	var notReady ErrServerNotReady
-	if _, err := r.launcher.Allowlist(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"}); !errors.As(err, &notReady) || notReady.State != Starting {
-		t.Fatalf("err=%v", err)
+	// An allowlist change is not sent to a world that is being restored: the start that follows carries the list.
+	if verdict, err := r.launcher.allowlistLive(context.Background(), AllowlistRequest{Operation: "add", Edition: "java", Name: "Steve"}, steve, false); err != nil || verdict != "" {
+		t.Fatalf("verdict=%q err=%v", verdict, err)
 	}
 	if r.session(t) != restore || len(r.ssm.commands) != 0 || r.followUpStops != 0 || r.ec2.stops != 0 {
 		t.Fatalf("session=%+v commands=%v followUpStops=%d stops=%d", r.session(t), r.ssm.commands, r.followUpStops, r.ec2.stops)
@@ -273,7 +273,7 @@ func TestFinishRestorePutsTheArchiveInPlaceThenStartsTheGame(t *testing.T) {
 	if err := r.launcher.FinishStart(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.ssm.commands) != 2 || r.ssm.commands[1] != "set -eu\n"+remoteCommand+" start family" {
+	if len(r.ssm.commands) != 2 || r.ssm.commands[1] != "set -eu\n"+startCommand {
 		t.Fatalf("commands %q", r.ssm.commands)
 	}
 	if session := r.session(t); session.Phase != Ready || !session.LaunchTime.Equal(launch) {
@@ -372,7 +372,7 @@ func TestFinishRestoreFailsWithTheAdaptersReason(t *testing.T) {
 		{failed(ssmtypes.CommandInvocationStatusTimedOut, -1, ""), "the restore ended with status TimedOut"},
 		{failed(ssmtypes.CommandInvocationStatusSuccess, 1, `{"error": "the archive could not be unpacked"}`), "restore the archive: the archive could not be unpacked"},
 		{failed(ssmtypes.CommandInvocationStatusSuccess, 2, ""), "the host's adapter refused the restore"},
-		{success(strings.Replace(restoredOutput, `"instance": "family"`, `"instance": "other"`, 1)), "the host's adapter did not confirm the restore"},
+		{success(strings.Replace(restoredOutput, `"instance": "survival"`, `"instance": "other"`, 1)), "the host's adapter did not confirm the restore"},
 		{success(strings.Replace(restoredOutput, archiveFile, "20261015T031500Z.tar.gz", 1)), "the host's adapter did not confirm the restore"},
 		{success(restoredOutput + "\n" + restoredOutput), "the host's adapter did not confirm the restore"},
 		{success("not json"), "the host's adapter did not confirm the restore"},
@@ -450,7 +450,7 @@ func TestFinishRestoreLeavesALaterRequestAlone(t *testing.T) {
 	}
 	// One recorded while the restore runs is never replaced by the restore's start.
 	r = restoreRig(t)
-	later = Session{RequestedAt: now, LaunchTime: now.Add(30 * time.Second), Phase: Restoring, RestoreKey: "instances/family/crafty/20261015T031500Z.tar.gz"}
+	later = Session{RequestedAt: now, LaunchTime: now.Add(30 * time.Second), Phase: Restoring, RestoreKey: "instances/survival/crafty/20261015T031500Z.tar.gz"}
 	r.ssm.onInvocation = func() { r.setSession(t, later) }
 	if err := r.launcher.FinishStart(context.Background()); err == nil || r.followUps != 0 {
 		t.Fatalf("err=%v followUps=%d", err, r.followUps)
@@ -573,7 +573,7 @@ func TestFinishRestoreSendsOnlyAnArchiveOfThisServer(t *testing.T) {
 		"",
 		"instances/other/crafty/" + archiveFile,
 		archiveKey + "'; reboot; '",
-		"instances/family/crafty/../../" + archiveFile,
+		"instances/survival/crafty/../../" + archiveFile,
 		archiveFile,
 	} {
 		r := restoreRig(t)

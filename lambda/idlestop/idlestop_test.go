@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -527,44 +531,72 @@ func TestUnreadableLauncherStateFailsTheCheckWithoutDraining(t *testing.T) {
 }
 
 func TestLoadConfig(t *testing.T) {
-	env := map[string]string{"HOST_ID": hostID, "STATE_PARAMETER": "/p", "IDLE_MINUTES": "30", "INSTANCES": "survival", "PUBLIC_HOSTNAME": "mc.example.com", "CLOUDFLARE_ZONE_ID": "0123456789abcdef0123456789abcdef", "CLOUDFLARE_TOKEN_PARAMETER": "/p/launcher/cloudflare-token"}
-	cfg, err := loadConfig(func(key string) string { return env[key] })
-	if err != nil || cfg.IdleAfter != 30*time.Minute || len(cfg.Instances) != 1 {
-		t.Fatalf("cfg=%+v err=%v", cfg, err)
+	worlds := `{"survival":{"host_id":"` + hostID + `","hostname":"survival.mc.example.net","launcher_state_parameter":"/p/launcher/worlds/survival/state","idle_stop_state_parameter":"/p/idle-stop/worlds/survival/state"},` +
+		`"creative":{"host_id":"i-0fedcba9876543210","hostname":"creative.mc.example.net","launcher_state_parameter":"","idle_stop_state_parameter":"/p/idle-stop/worlds/creative/state"}}`
+	env := map[string]string{"WORLDS": worlds, "IDLE_MINUTES": "30", "CLOUDFLARE_ZONE_ID": "0123456789abcdef0123456789abcdef", "CLOUDFLARE_TOKEN_PARAMETER": "/p/launcher/cloudflare-token"}
+	configs, err := loadConfig(func(key string) string { return env[key] })
+	if err != nil || len(configs) != 2 {
+		t.Fatalf("configs=%+v err=%v", configs, err)
 	}
-	if cfg.LauncherStateParameter != "" {
-		t.Fatalf("an unset LAUNCHER_STATE_PARAMETER must leave the launcher unread, got %q", cfg.LauncherStateParameter)
+	want := Config{HostID: hostID, StateParameter: "/p/idle-stop/worlds/survival/state", IdleAfter: 30 * time.Minute, Instances: []string{"survival"}, PublicHostname: "survival.mc.example.net",
+		CloudflareZoneID: env["CLOUDFLARE_ZONE_ID"], CloudflareTokenParameter: env["CLOUDFLARE_TOKEN_PARAMETER"], LauncherStateParameter: "/p/launcher/worlds/survival/state"}
+	if got := configs["survival"]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("survival = %+v, want %+v", got, want)
 	}
-	withLauncher := map[string]string{}
-	for k, v := range env {
-		withLauncher[k] = v
+	if got := configs["creative"]; got.HostID != "i-0fedcba9876543210" || got.Instances[0] != "creative" || got.LauncherStateParameter != "" {
+		t.Fatalf("an empty launcher_state_parameter must leave the launcher unread, got %+v", got)
 	}
-	withLauncher["LAUNCHER_STATE_PARAMETER"] = "/p/launcher/state"
-	if cfg, err := loadConfig(func(key string) string { return withLauncher[key] }); err != nil || cfg.LauncherStateParameter != "/p/launcher/state" {
-		t.Fatalf("cfg=%+v err=%v", cfg, err)
+	world := func(id, host, name, launcher, state string) string {
+		return `{"` + id + `":{"host_id":"` + host + `","hostname":"` + name + `","launcher_state_parameter":"` + launcher + `","idle_stop_state_parameter":"` + state + `"}}`
 	}
-	for key, value := range map[string]string{"IDLE_MINUTES": "5", "INSTANCES": "Survival", "HOST_ID": "", "CLOUDFLARE_TOKEN_PARAMETER": "", "PUBLIC_HOSTNAME": "https://mc.example.com", "CLOUDFLARE_ZONE_ID": "bad", "LAUNCHER_STATE_PARAMETER": "launcher state"} {
-		broken := map[string]string{}
-		for k, v := range env {
-			broken[k] = v
-		}
-		broken[key] = value
-		if _, err := loadConfig(func(key string) string { return broken[key] }); err == nil {
-			t.Fatalf("%s=%q must be rejected", key, value)
-		}
-	}
-	for _, name := range []string{"p/launcher/cloudflare-token", "/p/launcher/*", "arn:aws:ssm:us-west-2:111122223333:parameter/p/launcher/cloudflare-token"} {
-		if _, err := loadConfig(func(key string) string {
-			if key == "CLOUDFLARE_TOKEN_PARAMETER" {
-				return name
+	for key, values := range map[string][]string{
+		"IDLE_MINUTES":               {"5"},
+		"CLOUDFLARE_ZONE_ID":         {"bad"},
+		"CLOUDFLARE_TOKEN_PARAMETER": {"", "p/launcher/cloudflare-token", "/p/launcher/*", "arn:aws:ssm:us-west-2:111122223333:parameter/p/launcher/cloudflare-token"},
+		"WORLDS": {"", "{}", "[]",
+			world("Survival", hostID, "survival.mc.example.net", "", "/p/state"),
+			world("survival", "", "survival.mc.example.net", "", "/p/state"),
+			world("survival", hostID, "https://survival.mc.example.net", "", "/p/state"),
+			world("survival", hostID, "survival.mc.example.net", "launcher state", "/p/state"),
+			world("survival", hostID, "survival.mc.example.net", "", "")},
+	} {
+		for _, value := range values {
+			broken := map[string]string{}
+			for k, v := range env {
+				broken[k] = v
 			}
-			return env[key]
-		}); err == nil {
-			t.Fatalf("token parameter %q must be rejected: it must be a plain parameter name", name)
+			broken[key] = value
+			if _, err := loadConfig(func(key string) string { return broken[key] }); err == nil {
+				t.Fatalf("%s=%q must be rejected", key, value)
+			}
 		}
 	}
-	if _, err := ParseInstances("survival,survival"); err == nil {
-		t.Fatal("duplicate instances must be rejected")
+}
+
+func TestEventNamesTheWorldToCheck(t *testing.T) {
+	survival, creative := newHarness(), newHarness()
+	survival.players = 2
+	controllers := map[string]*Controller{"survival": survival.ctl, "creative": creative.ctl}
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	defer log.SetOutput(os.Stderr)
+	result, err := handle(context.Background(), controllers, Event{World: "creative"})
+	if err != nil || result.Action != "idle-started" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(survival.addresses) != 0 || survival.aws.described != 0 {
+		t.Fatal("a check of one world must not touch another")
+	}
+	if !strings.Contains(logged.String(), `{"world":"creative","action":"idle-started"`) {
+		t.Fatalf("the log line must carry the world id, got %q", logged.String())
+	}
+	for _, world := range []string{"", "nether"} {
+		if result, err := handle(context.Background(), controllers, Event{World: world}); err == nil || result.Action != "error" {
+			t.Fatalf("world %q must be an error, got %+v", world, result)
+		}
+	}
+	if creative.aws.described != 1 {
+		t.Fatal("an event that names no configured world must check nothing")
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,14 +18,18 @@ import (
 	"github.com/awslabs/aws-lambda-go-api-proxy/httpadapter"
 )
 
+// worldsValue is WORLDS as OpenTofu writes it for the two worlds of testContent.
+const worldsValue = `{
+	"survival": {"host_id": "i-0123456789abcdef0", "hostname": "survival.mc.example.com", "launcher_state_parameter": "/minecraft-test/launcher/worlds/survival/state", "idle_stop_state_parameter": "/minecraft-test/idle-stop/worlds/survival/state"},
+	"creative": {"host_id": "i-0fedcba9876543210", "hostname": "creative.mc.example.com", "launcher_state_parameter": "/minecraft-test/launcher/worlds/creative/state", "idle_stop_state_parameter": ""}
+}`
+
 func environment(overrides map[string]string) func(string) string {
 	values := map[string]string{
-		"HOST_ID":                    "i-0123456789abcdef0",
-		"INSTANCE":                   "family",
-		"SERVER_NAME":                "Family server",
-		"PUBLIC_HOSTNAME":            "mc.example.com",
+		"WORLDS":                     worldsValue,
+		"MODS_PARAMETER":             "/minecraft-test/launcher/mods",
+		"ALLOWLIST_PARAMETER":        "/minecraft-test/launcher/allowlist",
 		"BEDROCK_PORT":               "19132",
-		"STATE_PARAMETER":            "/minecraft-test/launcher/state",
 		"CLOUDFLARE_ZONE_ID":         "0123456789abcdef0123456789abcdef",
 		"CLOUDFLARE_TOKEN_PARAMETER": "/minecraft/launcher/cloudflare-token",
 	}
@@ -35,37 +40,57 @@ func environment(overrides map[string]string) func(string) string {
 }
 
 func TestLoadConfig(t *testing.T) {
-	cfg, dns, err := loadConfig(environment(nil))
-	if err != nil || cfg.BedrockPort != 19132 || cfg.IdleStopStateParameter != "" || dns.TokenParameter != "/minecraft/launcher/cloudflare-token" || dns.Hostname != "mc.example.com" {
-		t.Fatalf("cfg=%+v dns=%+v err=%v", cfg, dns, err)
+	manifest, err := LoadManifest(content(testContent))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if cfg, _, err := loadConfig(environment(map[string]string{"IDLE_STOP_STATE_PARAMETER": "/minecraft-test/idle-stop/state"})); err != nil || cfg.IdleStopStateParameter == "" {
-		t.Fatalf("cfg=%+v err=%v", cfg, err)
+	env, err := loadConfig(environment(nil), manifest)
+	if err != nil || env.ModsParameter != modsName || env.AllowlistParameter != allowlistName || env.DNS.TokenParameter != "/minecraft/launcher/cloudflare-token" || env.DNS.ZoneID == "" {
+		t.Fatalf("env=%+v err=%v", env, err)
+	}
+	// The worlds come in the manifest's order, each named by the manifest and placed by WORLDS. A world without an
+	// idle stop has no state to read.
+	want := []Config{
+		{HostID: hostID, Instance: "survival", ServerName: "Survival", PublicHostname: "survival.mc.example.com", BedrockPort: 19132, StateParameter: stateName, IdleStopStateParameter: idleStateName},
+		{HostID: creativeHostID, Instance: "creative", ServerName: "Creative", PublicHostname: "creative.mc.example.com", BedrockPort: 19132, StateParameter: "/minecraft-test/launcher/worlds/creative/state"},
+	}
+	if !slices.Equal(env.Worlds, want) {
+		t.Fatalf("worlds %+v", env.Worlds)
 	}
 	for key, value := range map[string]string{
-		"HOST_ID":                    "",
-		"INSTANCE":                   "",
-		"SERVER_NAME":                "",
+		"WORLDS":                     "",
+		"MODS_PARAMETER":             "",
+		"ALLOWLIST_PARAMETER":        "allowlist",
 		"BEDROCK_PORT":               "70000",
-		"STATE_PARAMETER":            "launcher-state",
-		"PUBLIC_HOSTNAME":            "MC.Example.com",
 		"CLOUDFLARE_ZONE_ID":         "zone",
 		"CLOUDFLARE_TOKEN_PARAMETER": "arn:aws:secretsmanager:us-west-2:111122223333:secret:token-abcdef",
-		"IDLE_STOP_STATE_PARAMETER":  "state",
 	} {
-		if _, _, err := loadConfig(environment(map[string]string{key: value})); err == nil {
+		if _, err := loadConfig(environment(map[string]string{key: value}), manifest); err == nil {
 			t.Fatalf("%s=%q must be refused", key, value)
 		}
 	}
-	// The instance goes unquoted into the commands run on the host: only the adapter's own names pass.
-	for _, instance := range []string{"Family", "family server", "family;reboot", "-family", "1family", "family'", strings.Repeat("a", 33)} {
-		if _, _, err := loadConfig(environment(map[string]string{"INSTANCE": instance})); err == nil {
-			t.Fatalf("INSTANCE=%q must be refused", instance)
-		}
+	// WORLDS must hold exactly the manifest's worlds: a world without a host could never start, and a host
+	// without a world would never be shown or stopped.
+	survival := `"survival": {"host_id": "i-0123456789abcdef0", "hostname": "survival.mc.example.com", "launcher_state_parameter": "/minecraft-test/launcher/worlds/survival/state"}`
+	creative := func(settings string) string { return `{` + survival + `, "creative": {` + settings + `}}` }
+	whole := `"host_id": "i-0fedcba9876543210", "hostname": "creative.mc.example.com", "launcher_state_parameter": "/minecraft-test/launcher/worlds/creative/state"`
+	if _, err := loadConfig(environment(map[string]string{"WORLDS": creative(whole)}), manifest); err != nil {
+		t.Fatal(err)
 	}
-	for _, instance := range []string{"family", "survival-2", strings.Repeat("a", 32)} {
-		if cfg, _, err := loadConfig(environment(map[string]string{"INSTANCE": instance})); err != nil || cfg.Instance != instance {
-			t.Fatalf("INSTANCE=%q: cfg=%+v err=%v", instance, cfg, err)
+	for name, value := range map[string]string{
+		"not JSON":                   "survival,creative",
+		"a world too few":            `{` + survival + `}`,
+		"a world too many":           `{` + survival + `, "creative": {` + whole + `}, "adventure": {` + whole + `}}`,
+		"another world":              `{` + survival + `, "adventure": {` + whole + `}}`,
+		"no host":                    creative(`"hostname": "creative.mc.example.com", "launcher_state_parameter": "/minecraft-test/launcher/worlds/creative/state"`),
+		"no record":                  creative(`"host_id": "i-0fedcba9876543210", "hostname": "creative.mc.example.com"`),
+		"a record that is no name":   creative(`"host_id": "i-0fedcba9876543210", "hostname": "creative.mc.example.com", "launcher_state_parameter": "launcher-state"`),
+		"no hostname":                creative(`"host_id": "i-0fedcba9876543210", "launcher_state_parameter": "/minecraft-test/launcher/worlds/creative/state"`),
+		"a hostname in capitals":     creative(`"host_id": "i-0fedcba9876543210", "hostname": "Creative.MC.Example.com", "launcher_state_parameter": "/minecraft-test/launcher/worlds/creative/state"`),
+		"an idle stop state no name": creative(whole + `, "idle_stop_state_parameter": "state"`),
+	} {
+		if _, err := loadConfig(environment(map[string]string{"WORLDS": value}), manifest); err == nil {
+			t.Fatalf("WORLDS with %s must be refused", name)
 		}
 	}
 }

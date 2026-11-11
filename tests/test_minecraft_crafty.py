@@ -27,18 +27,26 @@ import minecraft_crafty as crafty  # noqa: E402
 SERVER_ID = "0f0e0d0c-0b0a-4908-8706-050403020100"
 
 
-def config(root: Path) -> dict:
+def config(root: Path, instance: str = "family") -> dict:
     return {
         "schema_version": 1, "runtime": "crafty", "crafty_url": "https://127.0.0.1:8443",
         "token_file": "/etc/minecraft/crafty-api.token", "data_root": str(root),
-        "instances": {"family": {"server_name": "family", "java_port": 25565}},
+        "instances": {instance: {"server_name": instance, "java_port": 25565}},
         "backup": {"bucket": "family-backups", "region": "us-west-2"},
         "timeouts": {"start": 60, "stop": 60},
     }
 
 
+def provisioned(root: Path, instance: str = "family") -> Path:
+    """Mark the host as one a start has finished setting up, as every host that has run a game is."""
+    marker = root / "crafty" / "state" / f"{instance}-provisioned"
+    crafty.write_durably(marker, {"restored": None})
+    return marker
+
+
 class FakeAPI:
-    def __init__(self, running=False, start_after=1, stop_after=1):
+    def __init__(self, running=False, start_after=1, stop_after=1, name="family"):
+        self.name = name
         self.is_running = running
         self.start_after = start_after
         self.stop_after = stop_after
@@ -68,7 +76,7 @@ class FakeAPI:
         if path == "/api/v2/servers":
             if self.no_servers:
                 return {"status": "ok", "data": []}
-            return {"status": "ok", "data": [{"server_id": SERVER_ID, "server_name": "family", "path": f"/crafty/servers/{SERVER_ID}"}]}
+            return {"status": "ok", "data": [{"server_id": SERVER_ID, "server_name": self.name, "path": f"/crafty/servers/{SERVER_ID}"}]}
         if path.endswith("/stats"):
             if self.pending:
                 action, remaining = self.pending
@@ -113,6 +121,8 @@ class FakeHost:
         self.compose = None
         self.compose_failures = 0
         self.on_compose_up = None
+        self.bootstrapped = None
+        self.on_start_service = None
         self.address = "34.212.10.20"
         self.artifacts = {}
         self.failing_downloads = set()
@@ -139,6 +149,11 @@ class FakeHost:
             raise crafty.CraftyError("docker compose did not bring Crafty up")
         if self.on_compose_up:
             self.on_compose_up()
+
+    def start_service(self):
+        self.calls.append(("service", "start"))
+        if self.on_start_service:
+            self.on_start_service()
 
     def public_ipv4(self):
         self.calls.append(("imds",))
@@ -222,6 +237,7 @@ class AdapterTests(unittest.TestCase):
         server_dir = self.root / "crafty" / "servers" / SERVER_ID
         (server_dir / "survival").mkdir(parents=True)
         (server_dir / "survival" / "level.dat").write_bytes(b"world")
+        self.marker = provisioned(self.root)
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -463,6 +479,16 @@ class AdapterTests(unittest.TestCase):
         adapter.restore("family", "instances/family/crafty/20261010T180000Z.tar.gz")
         self.assertEqual((folder / "level.dat").read_bytes(), b"first session")
         self.assertEqual(host.clock - started, 10)
+
+    def test_restore_refuses_a_world_host_that_has_not_finished_its_first_start(self):
+        self.played_server()
+        self.marker.unlink()
+        api = FakeAPI(running=False)
+        adapter, host = self.adapter(api)
+        key = "instances/family/crafty/20261010T180000Z.tar.gz"
+        with self.assertRaisesRegex(crafty.CraftyError, "^start the world once before restoring an archive into it$"):
+            adapter.restore("family", key)
+        self.assertNotIn(("s3", "cp-down", key), host.calls)
 
     def test_restore_refuses_while_the_host_is_draining(self):
         folder = self.played_server()
@@ -851,6 +877,24 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(result["draining"], False)
         self.assertEqual(result["instances"]["family"], {"instance": "family", "application": "stopped", "backup": "not-required", "ready": False})
 
+    def test_a_host_no_start_has_finished_setting_up_drains_with_nothing_to_archive(self):
+        # Crafty is not up, or holds no server or one not yet restored: the host can still be stopped, in the
+        # answers the launcher's stop and the idle stop already accept, and nothing becomes the newest archive.
+        self.marker.unlink()
+        api = FakeAPI()
+        api.request = lambda *arguments, **keywords: (_ for _ in ()).throw(crafty.CraftyError("Crafty API GET request failed"))
+        adapter, host = self.adapter(api)
+        self.assertEqual(adapter.host_status()["instances"]["family"],
+                         {"instance": "family", "application": "stopped", "backup": "not-required", "ready": False})
+        stopped = {"draining": True, "instances": {"family": {"instance": "family", "application": "stopped", "backup": "not-required"}}}
+        self.assertEqual(adapter.host_drain(), stopped)
+        self.assertTrue(adapter.host_status()["draining"])
+        # EC2's shutdown runs the drain again.
+        self.assertEqual(adapter.host_drain(), stopped)
+        self.assertEqual(host.calls, [])
+        with self.assertRaisesRegex(crafty.CraftyError, "host is draining"):
+            adapter.start("family")
+
 
 # Made-up players: a Java account and a Bedrock gamertag with its Floodgate UUID.
 JAVA = {"uuid": "6b1f3c2e-9d4a-4f5e-8a7b-0c1d2e3f4a5b", "name": "Sample_Java"}
@@ -861,18 +905,25 @@ def jar(artifact: dict) -> bytes:
     return f"{artifact['name']} {artifact['version']}".encode()
 
 
-def content_manifest(transport: str = "both") -> dict:
+def pinned_manifest(transport: str = "both") -> dict:
     """The repository's manifest with stand-in jars, and the Geyser configuration of transport."""
     manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())
-    for artifact in manifest["artifacts"]:
+    for artifact in manifest["base"]["artifacts"]:
         artifact["sha256"] = hashlib.sha256(jar(artifact)).hexdigest()
-    geyser = manifest["managed_files"][0]
+    for name, mod in manifest["mods"].items():  # a world's content names a mod's jar by the mod's id
+        mod["sha256"] = hashlib.sha256(jar(mod | {"name": name})).hexdigest()
+    geyser = manifest["base"]["managed_files"][0]
     version = geyser["content"]["config-version"]
     if transport == "raknet":  # Geyser has no RakNet alone from configuration version 12
         version = min(version, crafty.RAKNET_ALONE_LAST_VERSION)
     geyser["content"] = crafty._approved_geyser(version, dual_transport=transport == "both")
     geyser["sha256"] = hashlib.sha256(crafty._managed_file_bytes(geyser)).hexdigest()
     return manifest
+
+
+def content_manifest(transport: str = "both", world: str = "survival", mods: list | None = None) -> dict:
+    """What that manifest gives one world's server, with the world's default mods or the ones named."""
+    return crafty.world_content(pinned_manifest(transport), world, mods)
 
 
 # The Compose file scripts/install_crafty.sh wrote before NetherNet, byte for byte: a RakNet manifest leaves it alone.
@@ -915,11 +966,13 @@ class ContentTests(unittest.TestCase):
         (self.server / "survival" / "level.dat").write_bytes(b"world")
         self.manifest = content_manifest()
         self.raknet = content_manifest("raknet")
-        # The server as the first import staged it: the RakNet release's jars and Geyser configuration.
+        # The server as the first import staged it: the RakNet release's jars, with the survival world's mods, and
+        # its Geyser configuration.
         (self.server / "plugins" / "Geyser-Spigot").mkdir(parents=True)
         for artifact in self.raknet["artifacts"]:
             (self.server / artifact["path"]).write_bytes(jar(artifact))
         (self.server / crafty.GEYSER_CONFIG).write_bytes(crafty._managed_file_bytes(self.raknet["managed_files"][0]))
+        provisioned(self.root)
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -951,9 +1004,6 @@ class ContentTests(unittest.TestCase):
         self.assertEqual(api.log, ["patch", "start_server"])
         # The jars already match, so nothing is downloaded.
         self.assertEqual(self.changes(host), [("imds",), ("compose", "write"), ("compose", "up")])
-        state = json.loads((self.root / "crafty" / "state" / "family-content.json").read_text())
-        self.assertEqual(state, {"artifacts": sorted(a["path"] for a in self.manifest["artifacts"]),
-                                 "revision": self.manifest["revision"]})
 
     def test_a_start_with_the_content_in_place_changes_nothing(self):
         adapter, api, host = self.adapter()
@@ -1015,50 +1065,76 @@ class ContentTests(unittest.TestCase):
         self.assertEqual((self.server / "paper.jar").read_bytes(), jar(paper))
         self.assertEqual(api.actions, ["start_server"])
 
-    def test_jars_an_earlier_manifest_pinned_go_and_others_stay(self):
-        state = self.root / "crafty" / "state" / "family-content.json"
-        state.parent.mkdir(parents=True)
-        state.write_text(json.dumps({"artifacts": [a["path"] for a in self.raknet["artifacts"]] + ["plugins/Old.jar"]}))
-        (self.server / "plugins" / "Old.jar").write_bytes(b"old")
-        (self.server / "plugins" / "Unmanaged.jar").write_bytes(b"kept")
+    def test_plugin_jars_this_start_does_not_want_go_and_everything_else_stays(self):
+        # A jar from an earlier manifest or a restored archive, one someone dropped in, and a link named like one:
+        # a rebuilt host has no record of which is which, so every jar the start does not name goes.
+        outside = self.root / "outside.jar"
+        outside.write_bytes(b"keep")
+        for name in ("Old.jar", "Unmanaged.jar"):
+            (self.server / "plugins" / name).write_bytes(b"old")
+        (self.server / "plugins" / "Linked.jar").symlink_to(outside)
+        # A plugin's data folder, even one named like a jar, a file that is no jar, and jars deeper down stay.
+        (self.server / "plugins" / "Old").mkdir()
+        (self.server / "plugins" / "Old" / "data.yml").write_bytes(b"data")
+        (self.server / "plugins" / "Folder.jar").mkdir()
+        (self.server / "plugins" / "notes.txt").write_bytes(b"notes")
+        (self.server / "plugins" / "Old" / "library.jar").write_bytes(b"library")
+        (self.server / "extra.jar").write_bytes(b"extra")
         adapter, api, host = self.adapter()
         adapter.start("family")
-        self.assertFalse((self.server / "plugins" / "Old.jar").exists())
-        self.assertEqual((self.server / "plugins" / "Unmanaged.jar").read_bytes(), b"kept")
-        # The record keeps it, so a restored archive that still holds it loses it again on the next start.
-        self.assertIn("plugins/Old.jar", json.loads(state.read_text())["artifacts"])
-        api.is_running = False
-        (self.server / "plugins" / "Old.jar").write_bytes(b"old")
-        adapter.start("family")
-        self.assertFalse((self.server / "plugins" / "Old.jar").exists())
-        self.assertEqual((self.server / "plugins" / "Unmanaged.jar").read_bytes(), b"kept")
+        self.assertEqual(sorted(path.name for path in (self.server / "plugins").iterdir() if path.suffix == ".jar" and path.is_file()),
+                         sorted(Path(artifact["path"]).name for artifact in self.manifest["artifacts"][1:]))
+        self.assertFalse(os.path.lexists(self.server / "plugins" / "Linked.jar"))
+        self.assertEqual(outside.read_bytes(), b"keep")
+        self.assertEqual((self.server / "plugins" / "Old" / "data.yml").read_bytes(), b"data")
+        self.assertTrue((self.server / "plugins" / "Folder.jar").is_dir())
+        self.assertEqual((self.server / "plugins" / "notes.txt").read_bytes(), b"notes")
+        self.assertEqual((self.server / "plugins" / "Old" / "library.jar").read_bytes(), b"library")
+        self.assertEqual((self.server / "extra.jar").read_bytes(), b"extra")
+        self.assertEqual(self.changes(host), [("imds",), ("compose", "write"), ("compose", "up")])  # nothing was downloaded
 
-    def test_a_start_with_nothing_to_change_still_records_the_applied_content(self):
-        state = self.root / "crafty" / "state" / "family-content.json"
+    def test_a_mod_s_jar_under_a_new_name_replaces_the_old_one(self):
         adapter, api, host = self.adapter(manifest=self.raknet)
         adapter.start("family")
-        self.assertEqual(json.loads(state.read_text()), {"artifacts": sorted(a["path"] for a in self.raknet["artifacts"]),
-                                                         "revision": self.raknet["revision"]})
-        # A later manifest that renames a pinned jar then removes the old name.
         manifest = content_manifest("raknet")
-        core = next(artifact for artifact in manifest["artifacts"] if artifact["path"] == "plugins/multiverse-core-5.8.1.jar")
-        core["path"], core["version"] = "plugins/multiverse-core-5.9.0.jar", "5.9.0"
-        core["sha256"] = hashlib.sha256(jar(core)).hexdigest()
+        gsit = next(artifact for artifact in manifest["artifacts"] if artifact["name"] == "gsit")
+        old = self.server / gsit["path"]
+        gsit["path"], gsit["version"] = "plugins/GSit-3.9.0.jar", "3.9.0"
+        gsit["sha256"] = hashlib.sha256(jar(gsit)).hexdigest()
         api.is_running = False
         adapter, api, host = self.adapter(api, manifest)
         adapter.start("family")
-        self.assertFalse((self.server / "plugins" / "multiverse-core-5.8.1.jar").exists())
-        self.assertEqual((self.server / "plugins" / "multiverse-core-5.9.0.jar").read_bytes(), jar(core))
+        self.assertFalse(old.exists())
+        self.assertEqual((self.server / "plugins" / "GSit-3.9.0.jar").read_bytes(), jar(gsit))
 
-    def test_an_unreadable_record_of_applied_content_changes_nothing(self):
-        state = self.root / "crafty" / "state" / "family-content.json"
-        state.parent.mkdir(parents=True)
-        state.write_text(json.dumps({"artifacts": ["../../etc/passwd"]}))
+    def test_a_mod_that_is_off_loses_its_jar_and_keeps_its_files(self):
+        claims = self.server / "plugins" / "GriefPreventionData" / "config.yml"
+        jars = {artifact["name"]: self.server / artifact["path"] for artifact in self.manifest["artifacts"]}
         adapter, api, host = self.adapter()
-        with self.assertRaises(crafty.CraftyError):
-            adapter.start("family")
-        self.assertEqual(self.geyser_config(), crafty._managed_file_bytes(self.raknet["managed_files"][0]))
-        self.assertEqual(api.log, [])
+        adapter.start("family")
+        # The survival world's defaults: both of its mods, and the claims configuration GriefPrevention ships.
+        managed = {item["path"]: item for item in self.manifest["managed_files"]}
+        self.assertEqual(claims.read_bytes(), crafty._managed_file_bytes(managed["plugins/GriefPreventionData/config.yml"]))
+        self.assertTrue(jars["griefprevention"].exists() and jars["gsit"].exists())
+        # Switched off, the mod's jar goes; the file it shipped and the data it wrote stay for when it is on again.
+        (claims.parent / "ClaimData").mkdir()
+        claims.write_bytes(b"edited while the mod was off")
+        api.is_running = False
+        adapter, api, host = self.adapter(api, content_manifest(mods=["gsit"]))
+        adapter.start("family")
+        self.assertFalse(jars["griefprevention"].exists())
+        self.assertTrue(jars["gsit"].exists())
+        self.assertEqual(claims.read_bytes(), b"edited while the mod was off")
+        self.assertTrue((claims.parent / "ClaimData").is_dir())
+        self.assertEqual([call for call in host.calls if call[0] == "fetch"], [])
+        # On again, its jar is downloaded and its file is the pinned one.
+        api.is_running = False
+        adapter, api, host = self.adapter(api)
+        adapter.start("family")
+        self.assertEqual(jars["griefprevention"].read_bytes(), b"griefprevention 16.18.8")
+        self.assertEqual(claims.read_bytes(), crafty._managed_file_bytes(managed["plugins/GriefPreventionData/config.yml"]))
+        self.assertEqual([call for call in host.calls if call[0] == "fetch"],
+                         [("fetch", "https://cdn.modrinth.com/data/O4o4mKaq/versions/MtwPHMAS/GriefPrevention.jar")])
 
     def test_a_failed_download_changes_nothing_in_the_server_folder(self):
         manifest = content_manifest()
@@ -1279,23 +1355,132 @@ class ContentTests(unittest.TestCase):
         with self.assertRaises(crafty.CraftyError):
             crafty.bedrock_transport(raknet)
 
-    def test_the_cli_start_applies_the_manifest_beside_the_adapter_and_fails_without_it(self):
+    def cli_start(self, *flags, api=None, manifest=None, world="survival"):
+        """Run `start` as the launcher sends it to a world's host, which this server folder is the survival world's.
+        Answers the exit code, the JSON answer, the API and the host."""
         path = self.root / "operator.json"
-        path.write_text(json.dumps(config(self.root)))
-        manifest = self.root / "server.json"
-        manifest.write_text(json.dumps(self.manifest))
-        _, api, host = self.adapter()
+        path.write_text(json.dumps(config(self.root, world)))
+        pinned = self.root / "server.json"
+        pinned.write_text(json.dumps(pinned_manifest()))
+        provisioned(self.root, world)
+        _, api, host = self.adapter(api or FakeAPI(name=world))
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = crafty.main(["--config", str(path), "start", "family"], api=api, host=host, manifest=self.root / "missing.json")
-        self.assertEqual((code, json.loads(output.getvalue())), (1, {"error": "cannot read the pinned server content"}))
+            code = crafty.main(["--config", str(path), "start", world, *flags], api=api, host=host, manifest=manifest or pinned)
+        return code, json.loads(output.getvalue()), api, host
+
+    def test_the_cli_start_applies_the_manifest_beside_the_adapter_and_fails_without_it(self):
+        code, answer, api, host = self.cli_start(manifest=self.root / "missing.json")
+        self.assertEqual((code, answer), (1, {"error": "cannot read the pinned server content"}))
         self.assertEqual(api.log, [])
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            code = crafty.main(["--config", str(path), "start", "family"], api=api, host=host, manifest=manifest)
+        code, answer, api, host = self.cli_start()
         self.assertEqual(code, 0)
-        self.assertTrue(json.loads(output.getvalue())["ready"])
+        self.assertEqual((answer["instance"], answer["application"], answer["ready"]), ("survival", "running", True))
         self.assertEqual(api.log, ["patch", "start_server"])
+
+    def plugins(self) -> list:
+        return sorted(path.name for path in (self.server / "plugins").iterdir() if path.suffix == ".jar")
+
+    def test_the_cli_start_turns_on_the_mods_it_names_and_the_world_s_defaults_without_any(self):
+        base = ["Geyser-Spigot.jar", "floodgate-spigot.jar"]
+        code, _, api, host = self.cli_start("--mods=gsit")
+        self.assertEqual((code, self.plugins()), (0, sorted([*base, "GSit-3.8.0.jar"])))
+        code, _, api, host = self.cli_start("--mods=")
+        self.assertEqual((code, self.plugins()), (0, base))
+        self.assertEqual([call for call in host.calls if call[0] == "fetch"], [])
+        # Without the flag, the mods the manifest turns on for the world: both come back.
+        code, _, api, host = self.cli_start()
+        self.assertEqual((code, self.plugins()), (0, sorted([*base, "GSit-3.8.0.jar", "GriefPrevention-16.18.8.jar"])))
+
+    def test_the_cli_start_refuses_a_mod_or_a_world_the_manifest_does_not_list_before_anything_changes(self):
+        (self.server / "plugins" / "Old.jar").write_bytes(b"old")
+        # FastAsyncWorldEdit is in the catalog, but the manifest lists it for the creative world only.
+        for flag in ("--mods=gsit,fawe", "--mods=no-such-mod", "--mods=../gsit"):
+            with self.subTest(flag=flag):
+                code, answer, api, host = self.cli_start(flag)
+                self.assertEqual((code, answer), (1, {"error": "the pinned server content lists no such mod for this world"}))
+                self.assertEqual((host.calls, api.log), ([], []))
+        code, answer, api, host = self.cli_start(world="family")
+        self.assertEqual((code, answer), (1, {"error": "the pinned server content has no such world"}))
+        self.assertEqual((host.calls, api.log), ([], []))
+        self.assertTrue((self.server / "plugins" / "Old.jar").exists())
+
+    def allowlist_file(self, value, mode=0o600) -> Path:
+        path = self.root / "allowlist.json"
+        path.unlink(missing_ok=True)
+        path.write_text(value if isinstance(value, str) else json.dumps(value))
+        path.chmod(mode)
+        return path
+
+    def test_the_cli_start_writes_the_allowlist_it_carries_before_the_game_starts(self):
+        # A Java account, and a Bedrock one as Floodgate writes it.
+        family = [JAVA, {"uuid": BEDROCK["uuid"], "name": ".Sample_Player"}]
+        allowlist = self.server / "whitelist.json"
+        allowlist.write_text(json.dumps([RENAMED]))
+        allowlist.chmod(0o660)
+        api, loaded = FakeAPI(name="survival"), []
+        request = api.request
+
+        def seen(method, path, body=None, text=None):
+            if path.endswith("/action/start_server"):
+                loaded.append(json.loads(allowlist.read_text()))
+            return request(method, path, body, text)
+
+        api.request = seen
+        code, answer, api, host = self.cli_start("--allowlist-file", str(self.allowlist_file(family)), api=api)
+        self.assertEqual((code, answer["ready"]), (0, True))
+        self.assertEqual(loaded, [family])
+        # It stays the server account's own file, in the form the game writes.
+        self.assertEqual(stat.S_IMODE(allowlist.stat().st_mode), 0o660)
+        self.assertEqual(allowlist.read_text(), json.dumps(family, indent=2) + "\n")
+        self.assertEqual([path.name for path in self.server.iterdir() if path.name.startswith(".")], [])
+        # The same list again leaves the file as it is, and so does a start that carries none.
+        written = allowlist.stat().st_ino
+        for flags in (("--allowlist-file", str(self.allowlist_file(family))), ()):
+            api.is_running = False
+            code, _, api, host = self.cli_start(*flags, api=api)
+            self.assertEqual((code, allowlist.stat().st_ino), (0, written))
+        # A server that is already running keeps the list it loaded; a live change goes through `allowlist`.
+        code, _, api, host = self.cli_start("--allowlist-file", str(self.allowlist_file([])), api=api)
+        self.assertEqual((code, json.loads(allowlist.read_text())), (0, family))
+        # An empty list is still the list of record, and a server folder without the file gets one.
+        allowlist.unlink()
+        api.is_running = False
+        code, _, api, host = self.cli_start("--allowlist-file", str(self.allowlist_file([])), api=api)
+        self.assertEqual((code, json.loads(allowlist.read_text())), (0, []))
+        self.assertEqual(stat.S_IMODE(allowlist.stat().st_mode), 0o644)
+
+    def test_the_cli_start_refuses_a_shared_or_malformed_allowlist_file_without_echoing_it(self):
+        allowlist = self.server / "whitelist.json"
+        allowlist.write_text(json.dumps([RENAMED]))
+        elsewhere = self.root / "elsewhere.json"
+        elsewhere.write_text(json.dumps([JAVA]))
+        elsewhere.chmod(0o600)
+        cases = {
+            "readable by others": ([JAVA], 0o644),
+            "not JSON": ("Sample_Java", 0o600),
+            "one player, not a list": (JAVA, 0o600),
+            "a UUID without dashes": ([{"uuid": JAVA["uuid"].replace("-", ""), "name": "Sample_Java"}], 0o600),
+            "a UUID in capitals": ([{"uuid": JAVA["uuid"].upper(), "name": "Sample_Java"}], 0o600),
+            "no name": ([{"uuid": JAVA["uuid"]}], 0o600),
+            "an empty name": ([{"uuid": JAVA["uuid"], "name": ""}], 0o600),
+            "a name of 33 characters": ([{"uuid": JAVA["uuid"], "name": "S" * 33}], 0o600),
+            "a field the game does not write": ([{**JAVA, "level": 4}], 0o600),
+            "a link": (elsewhere, 0o600),
+        }
+        for case, (value, mode) in cases.items():
+            with self.subTest(case=case):
+                if isinstance(value, Path):
+                    path = self.root / "allowlist.json"
+                    path.unlink(missing_ok=True)
+                    path.symlink_to(value)
+                else:
+                    path = self.allowlist_file(value, mode)
+                code, answer, api, host = self.cli_start("--allowlist-file", str(path))
+                self.assertEqual((code, set(answer)), (1, {"error"}))
+                self.assertNotIn("Sample_Java", answer["error"])
+                self.assertEqual((host.calls, api.log), ([], []))
+                self.assertEqual(json.loads(allowlist.read_text()), [RENAMED])
 
     def test_the_cli_renders_the_compose_file_the_installer_writes(self):
         output = io.BytesIO()
@@ -1303,8 +1488,10 @@ class ContentTests(unittest.TestCase):
             code = crafty.main(["render-compose", "--manifest", str(ROOT / "runtime" / "crafty" / "server.json"),
                                 "--data-root", "/srv/minecraft"])
         self.assertEqual(code, 0)
-        self.assertEqual(output.getvalue(), crafty.render_compose(crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json"),
-                                                                  Path("/srv/minecraft/crafty")))
+        # Only the base decides it, so it is the file every world's start renders.
+        manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
+        for world in manifest["worlds"]:
+            self.assertEqual(output.getvalue(), crafty.render_compose(crafty.world_content(manifest, world["id"]), Path("/srv/minecraft/crafty")))
 
 
 class AllowlistTests(unittest.TestCase):
@@ -1997,6 +2184,209 @@ class SetupAPIKeyTests(unittest.TestCase):
         self.assertEqual(len(self.api.sent), 1)
 
 
+class FakeNewCrafty(FakeFreshCrafty):
+    """Crafty as a new world host first starts it: its first admin login, no server, and an import that unpacks the
+    staged archive into the server's folder."""
+
+    def __init__(self, root: Path):
+        super().__init__()
+        self.name, self.root, self.no_servers, self.unpacks = "survival", root, True, True
+
+    def request(self, method, path, body=None, text=None):
+        answer = super().request(method, path, body, text)
+        if (method, path) == ("POST", "/api/v2/servers") and self.unpacks:
+            archive = body["minecraft_java_create_data"]["import_server_create_data"]["archive_name"]
+            with zipfile.ZipFile(self.root / "crafty" / "import" / "upload" / archive) as bundle:
+                bundle.extractall(self.root / "crafty" / "servers" / SERVER_ID)
+        return answer
+
+
+class ProvisionTests(unittest.TestCase):
+    """The first start on a new or replaced world host sets Crafty and the server up before it starts the game."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        (self.root / "etc").mkdir()
+        self.token_file = self.root / "etc" / "crafty-api.token"
+        self.config = dict(config(self.root, "survival"), token_file=str(self.token_file))
+        self.manifest = content_manifest()
+        self.server = self.root / "crafty" / "servers" / SERVER_ID
+        self.marker = self.root / "crafty" / "state" / "survival-provisioned"
+        self.creds = self.root / "crafty" / "config" / "default-creds.txt"
+        self.api = FakeNewCrafty(self.root)
+        self.host = FakeHost(self.api)
+        self.host.compose = self.root / "compose.yaml"
+        # User data has finished, and Crafty writes its first login when the service first starts it.
+        self.host.bootstrapped = self.root / "bootstrapped"
+        self.host.bootstrapped.write_bytes(b"")
+        self.host.on_start_service = self.crafty_starts
+        for artifact in self.manifest["artifacts"]:
+            self.host.artifacts[artifact["url"]] = jar(artifact)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def crafty_starts(self):
+        if not self.token_file.exists() and not self.creds.exists():
+            self.creds.parent.mkdir(parents=True, exist_ok=True)
+            self.creds.write_text(json.dumps({"username": "admin", "password": FIRST_ADMIN_PHRASE}))
+
+    def adapter(self):
+        return crafty.Adapter(self.config, self.api, self.host, self.manifest)
+
+    def archive(self, stamp: str, level: bytes, verified: bool = True) -> str:
+        """Store an archive of the world as an earlier host's stop stored it, with a jar no start wants any more."""
+        members = [member("survival", tarfile.DIRTYPE), member("survival/paper.jar", data=b"an older paper"),
+                   member("survival/plugins", tarfile.DIRTYPE), member("survival/plugins/Old.jar", data=b"old"),
+                   member("survival/survival", tarfile.DIRTYPE), member("survival/survival/level.dat", data=level)]
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+            for info, data in members:
+                bundle.addfile(info, None if data is None else io.BytesIO(data))
+        key = f"instances/survival/crafty/{stamp}.tar.gz"
+        self.host.stored[key] = buffer.getvalue()
+        if verified:
+            self.host.stored[key + ".sha256"] = f"{hashlib.sha256(buffer.getvalue()).hexdigest()}  {stamp}.tar.gz\n".encode()
+        return key
+
+    def test_the_first_start_sets_crafty_up_and_starts_a_fresh_world(self):
+        # The start arrives while user data still runs, and Crafty takes a while to write its first login.
+        self.host.bootstrapped.unlink()
+        self.host.on_start_service = None
+        waits = []
+
+        def sleep(seconds):
+            waits.append(seconds)
+            FakeHost.sleep(self.host, seconds)
+            if len(waits) == 2:
+                self.host.bootstrapped.write_bytes(b"")
+            if len(waits) == 4:
+                self.crafty_starts()
+
+        self.host.sleep = sleep
+        path = self.root / "operator.json"
+        path.write_text(json.dumps(self.config))
+        pinned = self.root / "server.json"
+        pinned.write_text(json.dumps(pinned_manifest()))
+        output = io.StringIO()
+        # Run as the host runs it: the new host has no API token yet, so main makes the client without one.
+        with unittest.mock.patch.object(crafty, "CraftyAPI", return_value=self.api) as client, contextlib.redirect_stdout(output):
+            code = crafty.main(["--config", str(path), "start", "survival"], host=self.host, manifest=pinned)
+        client.assert_called_once_with("https://127.0.0.1:8443", None)
+        answer = json.loads(output.getvalue())
+        self.assertEqual((code, answer["instance"], answer["application"], answer["ready"]), (0, "survival", "running", True))
+        # Nothing ran before user data finished; then the Compose file, the service, and the adapter's own API key.
+        self.assertEqual(self.host.calls[:2], [("compose", "write"), ("service", "start")])
+        self.assertEqual(self.host.compose.read_bytes(), crafty.render_compose(self.manifest, self.root / "crafty"))
+        self.assertEqual(self.token_file.read_text(), FakeNewCrafty.KEY)
+        self.assertFalse(self.creds.exists())
+        # One server named for the world, created from the staged content, which is then cleared away.
+        (body,) = self.api.created
+        imported = body["minecraft_java_create_data"]["import_server_create_data"]
+        self.assertEqual((body["name"], imported["archive_name"], imported["mem_max"], imported["server_properties_port"]),
+                         ("survival", "survival.zip", 5, 25565))
+        self.assertEqual([path.name for path in (self.root / "crafty" / "import").rglob("*")], ["upload"])
+        properties = (self.server / "server.properties").read_text()
+        self.assertIn("level-name=survival\n", properties)
+        self.assertIn("white-list=true\n", properties)
+        self.assertEqual(sorted(path.name for path in (self.server / "plugins").glob("*.jar")),
+                         ["GSit-3.8.0.jar", "Geyser-Spigot.jar", "GriefPrevention-16.18.8.jar", "floodgate-spigot.jar"])
+        # S3 held nothing for the world, so nothing was restored, and the marker went last.
+        self.assertFalse(any(call[:2] == ("s3", "cp-down") for call in self.host.calls))
+        self.assertEqual(json.loads(self.marker.read_text()), {"restored": None})
+        self.assertEqual(self.api.actions, ["start_server"])
+        # The next start finds the host set up.
+        self.api.is_running = False
+        self.host.calls.clear()
+        self.adapter().start("survival")
+        self.assertNotIn(("service", "start"), self.host.calls)
+        self.assertEqual(len(self.api.created), 1)
+
+    def test_a_replaced_host_brings_back_the_newest_archive_with_its_checksum(self):
+        self.archive("20261009T180000Z", b"an earlier session")
+        newest = self.archive("20261010T180000Z", b"the last session")
+        self.archive("20261011T180000Z", b"an upload that never got its checksum", verified=False)
+        result = self.adapter().start("survival", [JAVA])
+        self.assertTrue(result["ready"])
+        self.assertEqual((self.server / "survival" / "level.dat").read_bytes(), b"the last session")
+        self.assertEqual([call for call in self.host.calls if call[:2] == ("s3", "cp-down")], [("s3", "cp-down", newest)])
+        self.assertEqual(json.loads(self.marker.read_text()), {"restored": newest})
+        # The server created for the import held no play, so nothing of it is kept.
+        self.assertEqual(list((self.root / "crafty" / "staging").iterdir()), [])
+        # The start then applies the pinned content and the allowlist to the restored world as to any other.
+        self.assertEqual((self.server / "paper.jar").read_bytes(), jar(self.manifest["artifacts"][0]))
+        self.assertFalse((self.server / "plugins" / "Old.jar").exists())
+        self.assertEqual(json.loads((self.server / "whitelist.json").read_text()), [JAVA])
+        self.assertEqual(len(self.api.created), 1)
+
+    def test_objects_without_a_verified_archive_fail_the_start(self):
+        # A world existed here: starting a fresh one would bury it under new archives.
+        self.archive("20261011T180000Z", b"an upload that never got its checksum", verified=False)
+        for attempt in range(2):
+            with self.assertRaisesRegex(crafty.CraftyError, "no archive with its SHA-256"):
+                self.adapter().start("survival")
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(self.api.actions, [])
+        self.assertEqual(len(self.api.created), 1)
+
+    def test_a_host_whose_setup_never_finishes_fails_the_start(self):
+        self.host.bootstrapped.unlink()
+        with self.assertRaisesRegex(crafty.CraftyError, "^the host's setup did not finish$"):
+            self.adapter().start("survival")
+        self.assertEqual(self.host.clock, 600)
+        self.assertEqual(self.host.calls, [])
+        self.assertEqual(self.api.sent, [])
+
+    def test_a_second_start_carries_on_where_the_first_ran_out_of_time(self):
+        newest = self.archive("20261010T180000Z", b"the last session")
+        download = self.host.download
+        self.host.download = lambda *arguments: (_ for _ in ()).throw(crafty.CraftyError("AWS download did not finish"))
+        with self.assertRaisesRegex(crafty.CraftyError, "AWS download did not finish"):
+            self.adapter().start("survival")
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(self.api.actions, [])
+        # Stopped as it is, the host archives nothing: the empty server must not become the world's newest archive.
+        stored = dict(self.host.stored)
+        self.assertEqual(self.adapter().host_drain()["instances"]["survival"],
+                         {"instance": "survival", "application": "stopped", "backup": "not-required"})
+        self.assertEqual(self.host.stored, stored)
+        # Started again, it keeps the key and the server it has and goes on to the restore.
+        self.host.boot, self.host.download = "boot-2", download
+        self.host.calls.clear()
+        self.assertTrue(self.adapter().start("survival")["ready"])
+        self.assertEqual(len(self.api.created), 1)
+        self.assertEqual(sum(sent[:2] == ("POST", "/api/v2/auth/login") for sent in self.api.sent), 1)
+        self.assertNotIn(("compose", "write"), self.host.calls)
+        self.assertEqual((self.server / "survival" / "level.dat").read_bytes(), b"the last session")
+        self.assertEqual(json.loads(self.marker.read_text()), {"restored": newest})
+
+    def test_a_second_start_waits_for_an_import_crafty_has_not_finished(self):
+        self.api.unpacks = False
+        with self.assertRaisesRegex(crafty.CraftyError, "has not finished unpacking"):
+            self.adapter().start("survival")
+        self.assertFalse(self.marker.exists())
+        # Crafty finishes meanwhile; the archive it read from stayed in place until then.
+        archive = self.root / "crafty" / "import" / "upload" / "survival.zip"
+        with zipfile.ZipFile(archive) as bundle:
+            bundle.extractall(self.server)
+        self.assertTrue(self.adapter().start("survival")["ready"])
+        self.assertEqual(len(self.api.created), 1)
+        self.assertFalse(archive.exists())
+
+    def test_the_cli_drains_a_new_host_that_has_no_api_token(self):
+        path = self.root / "operator.json"
+        path.write_text(json.dumps(self.config))
+        for action in ("host-drain", "host-status"):
+            output = io.StringIO()
+            with self.subTest(action=action), contextlib.redirect_stdout(output):
+                code = crafty.main(["--config", str(path), action], host=self.host)
+                answer = json.loads(output.getvalue())
+                self.assertEqual((code, answer["draining"]), (0, True))
+                self.assertEqual({key: answer["instances"]["survival"][key] for key in ("instance", "application", "backup")},
+                                 {"instance": "survival", "application": "stopped", "backup": "not-required"})
+
+
 class CraftyAPITests(unittest.TestCase):
     def api(self, answer):
         api = crafty.CraftyAPI("https://127.0.0.1:8443/", "token")
@@ -2222,54 +2612,109 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["instances"]["family"]["application"], "stopped")
 
 
+MANIFEST = ROOT / "runtime" / "crafty" / "server.json"
+
+
 class ManifestTests(unittest.TestCase):
     def test_repository_manifest_is_valid_and_pinned(self):
-        manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
-        names = {artifact["name"] for artifact in manifest["artifacts"]}
-        self.assertTrue({"paper", "geyser", "floodgate", "multiverse-core", "multiverse-inventories",
-                         "multiverse-portals", "multiverse-netherportals"} <= names)
-        # ViaVersion left with the Paper 26.3 pin (#27): Geyser 2.12.1 and Floodgate 2.2.5 speak Java 26.3 themselves.
-        self.assertNotIn("viaversion", names)
+        manifest = crafty.load_manifest(MANIFEST)
+        self.assertEqual({artifact["name"] for artifact in manifest["base"]["artifacts"]}, {"paper", "geyser", "floodgate"})
         self.assertEqual(manifest["minecraft_version"], "26.3")
-        self.assertTrue(manifest["server_properties"]["white-list"])
-        self.assertTrue(manifest["server_properties"]["online-mode"])
+        self.assertTrue(manifest["base"]["server_properties"]["white-list"])
+        self.assertTrue(manifest["base"]["server_properties"]["online-mode"])
         # Craig approved both Bedrock transports with built-in signaling on 2026-10-03 (#30), activated by #26.
-        self.assertEqual(crafty.bedrock_transport(manifest), "both")
-        self.assertEqual(manifest["managed_files"][0]["sha256"], "261b82a68cbdb7054e2071ef290027ca360cb5193d381c017796d97d54e4d5df")
-        # Bedrock clients list the family server's own name and limit when Geyser cannot read them from Paper.
-        motd = manifest["managed_files"][0]["content"]["motd"]
-        self.assertEqual(motd["primary-motd"], manifest["server_properties"]["motd"])
-        self.assertEqual(motd["max-players"], manifest["server_properties"]["max-players"])
+        self.assertEqual(crafty.bedrock_transport(manifest["base"]), "both")
+        self.assertEqual(manifest["base"]["managed_files"][0]["sha256"], "261b82a68cbdb7054e2071ef290027ca360cb5193d381c017796d97d54e4d5df")
+        # Bedrock clients list the family server's own limit when Geyser cannot read it from Paper.
+        self.assertEqual(manifest["base"]["managed_files"][0]["content"]["motd"]["max-players"], manifest["base"]["server_properties"]["max-players"])
+        # One host per world (ADR 0009): the first is the default, and each has the mods it starts with.
+        self.assertEqual([world["id"] for world in manifest["worlds"]], ["survival", "creative", "adventure"])
+        self.assertEqual({world["id"]: sorted(name for name, default in world["mods"].items() if default) for world in manifest["worlds"]},
+                         {"survival": ["griefprevention", "gsit"], "creative": ["fawe", "griefprevention"],
+                          "adventure": ["auraskills", "decentholograms", "griefprevention"]})
+        # Multiverse left with the worlds' own hosts.
+        self.assertFalse([path for path in (mod["path"] for mod in manifest["mods"].values()) if "multiverse" in path.lower()])
+
+    def test_a_world_s_content_is_the_base_with_its_own_properties_and_the_mods_that_are_on(self):
+        manifest = crafty.load_manifest(MANIFEST)
+        base = manifest["base"]
+        creative = crafty.world_content(manifest, "creative")
+        self.assertEqual([artifact["name"] for artifact in creative["artifacts"]], ["paper", "geyser", "floodgate", "fawe", "griefprevention"])
+        self.assertEqual([item["path"] for item in creative["managed_files"]],
+                         [crafty.GEYSER_CONFIG, "permissions.yml", "plugins/GriefPreventionData/config.yml"])
+        self.assertEqual(creative["server_properties"], {**base["server_properties"], "level-name": "creative", "gamemode": "creative",
+                                                         "force-gamemode": True, "motd": "Creative"})
+        self.assertEqual(creative["crafty"], manifest["crafty"])
+        # The mods named replace the defaults, and none leaves the base alone.
+        self.assertEqual([artifact["name"] for artifact in crafty.world_content(manifest, "creative", ["griefprevention"])["artifacts"]],
+                         ["paper", "geyser", "floodgate", "griefprevention"])
+        bare = crafty.world_content(manifest, "adventure", [])
+        self.assertEqual((bare["artifacts"], bare["managed_files"]), (base["artifacts"], base["managed_files"]))
+        self.assertEqual(bare["server_properties"]["gamemode"], "survival")
+        # Only a mod the manifest lists for the world can be on there, and only a world it holds.
+        for world, mods in (("survival", ["fawe"]), ("survival", ["gsit", "worldedit"]), ("family", None)):
+            with self.subTest(world=world, mods=mods), self.assertRaises(crafty.CraftyError):
+                crafty.world_content(manifest, world, mods)
+        self.assertEqual(manifest, json.loads(MANIFEST.read_text()))  # the manifest itself is left as loaded
+
+    def refused(self, change, message):
+        manifest = json.loads(MANIFEST.read_text())
+        change(manifest)
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(manifest, handle)
+            handle.flush()
+            with self.assertRaisesRegex(crafty.CraftyError, message):
+                crafty.load_manifest(Path(handle.name))
 
     def test_managed_file_outside_the_server_folder_is_refused(self):
-        manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())
-        manifest["managed_files"][0]["path"] = "../../etc/cron.d/x"
-        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
-            json.dump(manifest, handle)
-            handle.flush()
-            with self.assertRaises(crafty.CraftyError):
-                crafty.load_manifest(Path(handle.name))
+        self.refused(lambda manifest: manifest["base"]["managed_files"][0].update(path="../../etc/cron.d/x"), "plain relative paths")
+        self.refused(lambda manifest: manifest["mods"]["fawe"]["managed_files"][0].update(path="/etc/cron.d/x"), "plain relative paths")
+
+    def test_a_mod_s_managed_file_must_match_its_checksum(self):
+        self.refused(lambda manifest: manifest["mods"]["fawe"]["managed_files"][0]["content"].update(extra={"default": True}),
+                     "checksum mismatch")
 
     def test_an_artifact_name_that_is_not_a_plain_word_is_refused(self):
-        manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())
-        manifest["artifacts"].append(dict(manifest["artifacts"][2], name="../../servers/x", path="plugins/Extra.jar"))
-        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
-            json.dump(manifest, handle)
-            handle.flush()
-            with self.assertRaisesRegex(crafty.CraftyError, "plain unique name"):
-                crafty.load_manifest(Path(handle.name))
+        self.refused(lambda manifest: manifest["base"]["artifacts"].append(
+            dict(manifest["base"]["artifacts"][2], name="../../servers/x", path="plugins/Extra.jar")), "plain unique name")
 
     def test_unpinned_image_is_refused(self):
-        manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())
-        manifest["crafty"]["image"] = "registry.gitlab.com/crafty-controller/crafty-4:latest"
-        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
-            json.dump(manifest, handle)
-            handle.flush()
-            with self.assertRaises(crafty.CraftyError):
-                crafty.load_manifest(Path(handle.name))
+        self.refused(lambda manifest: manifest["crafty"].update(image="registry.gitlab.com/crafty-controller/crafty-4:latest"),
+                     "pin the Crafty image by digest")
+
+    def test_an_earlier_schema_is_refused(self):
+        self.refused(lambda manifest: manifest.update(schema_version=1), "schema 2")
+        self.refused(lambda manifest: manifest.update(base=None, **manifest["base"]), "base content")
+
+    def test_the_base_must_hold_paper_geyser_and_floodgate(self):
+        self.refused(lambda manifest: manifest["base"]["artifacts"].pop(2), "Paper, Geyser and Floodgate")
+
+    def test_a_mod_is_a_pinned_jar_in_plugins_from_an_allowed_host(self):
+        mod = lambda change: lambda manifest: manifest["mods"]["gsit"].update(change)  # noqa: E731
+        self.refused(mod({"path": "GSit-3.8.0.jar"}), "a jar in plugins/")
+        self.refused(mod({"path": "plugins/GSit/GSit-3.8.0.jar"}), "jar path")
+        self.refused(mod({"path": "plugins/floodgate-spigot.jar"}), "unique")
+        self.refused(mod({"url": "https://mods.example.net/GSit-3.8.0.jar"}), "exact HTTPS URL")
+        self.refused(mod({"url": "https://github.com/Gecolay/GSit/releases/latest/download/GSit.jar"}), "exact HTTPS URL")
+        self.refused(mod({"sha256": "unchecked"}), "SHA-256")
+        self.refused(lambda manifest: manifest["mods"].update({"G Sit": manifest["mods"].pop("gsit")}), "plain unique name")
+        self.refused(lambda manifest: manifest["mods"].update({"0gsit": manifest["mods"].pop("gsit")}), "an id of the kind a world has")
+        self.refused(lambda manifest: manifest["mods"].update(geyser=manifest["mods"].pop("gsit")), "unique")
+
+    def test_a_world_has_a_unique_id_its_own_properties_and_mods_from_the_catalog(self):
+        world = lambda change: lambda manifest: manifest["worlds"][1].update(change)  # noqa: E731
+        for change in ({"id": "survival"}, {"id": "Creative"}, {"id": "../creative"}, {"name": ""}, {"mods": {"worldedit": True}},
+                       {"mods": {"fawe": "on"}}, {"mods": ["fawe"]}, {"server_properties": None}):
+            with self.subTest(change=change):
+                self.refused(world(change), "every world needs")
+        # What every world shares stays the base's: the port Crafty publishes and who may join.
+        for key in ("server-port", "online-mode", "white-list", "enforce-whitelist", "enable-rcon", "enable-query"):
+            with self.subTest(key=key):
+                self.refused(lambda manifest: manifest["worlds"][1]["server_properties"].update({key: False}), "every world needs")
+        self.refused(lambda manifest: manifest.update(worlds=[]), "at least one world")
 
     def test_stage_import_writes_verified_files_and_refuses_reuse(self):
-        manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
+        manifest = crafty.world_content(crafty.load_manifest(MANIFEST), "survival")
         fetched = []
 
         def fetch(url, sha256, target):
@@ -2289,8 +2734,18 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaises(crafty.CraftyError):
                 crafty.stage_import(manifest, destination, fetch=fetch)
 
+    def test_the_cli_stages_the_world_it_is_given_with_its_default_mods(self):
+        arguments = ["stage-import", "--manifest", str(MANIFEST), "--destination", "/nonexistent/creative"]
+        with unittest.mock.patch.object(crafty, "stage_import", return_value=Path("/nonexistent/creative")) as staged, \
+                contextlib.redirect_stdout(io.StringIO()):
+            code = crafty.main([*arguments, "--world", "creative"])
+        self.assertEqual(code, 0)
+        self.assertEqual(staged.call_args.args[0], crafty.world_content(crafty.load_manifest(MANIFEST), "creative"))
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            crafty.main(arguments)
+
     def test_failed_stage_import_leaves_nothing_behind(self):
-        manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
+        manifest = crafty.world_content(crafty.load_manifest(MANIFEST), "survival")
 
         def fetch(url, sha256, target):
             raise crafty.CraftyError("download failed")
@@ -2302,7 +2757,7 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(list(Path(directory).iterdir()), [])
 
     def test_stage_import_archive_holds_the_server_files_at_its_root(self):
-        manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
+        manifest = crafty.world_content(crafty.load_manifest(MANIFEST), "survival")
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "family"
             archive = Path(directory) / "upload" / "family.zip"
@@ -2313,7 +2768,7 @@ class ManifestTests(unittest.TestCase):
             self.assertLessEqual({"paper.jar", "eula.txt", "server.properties", "plugins/Geyser-Spigot/config.yml"}, names)
 
     def test_stage_import_refuses_a_planted_archive_link(self):
-        manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
+        manifest = crafty.world_content(crafty.load_manifest(MANIFEST), "survival")
         with tempfile.TemporaryDirectory() as directory:
             archive = Path(directory) / "family.zip"
             archive.symlink_to(Path(directory) / "elsewhere")  # dangling, so exists() alone would miss it
@@ -2323,7 +2778,7 @@ class ManifestTests(unittest.TestCase):
             self.assertFalse((Path(directory) / "elsewhere").exists())
 
     def test_stage_import_refuses_a_linked_archive_folder(self):
-        manifest = crafty.load_manifest(ROOT / "runtime" / "crafty" / "server.json")
+        manifest = crafty.world_content(crafty.load_manifest(MANIFEST), "survival")
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "elsewhere").mkdir()
             (Path(directory) / "upload").symlink_to(Path(directory) / "elsewhere")

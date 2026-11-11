@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -72,10 +74,12 @@ type SSMAPI interface {
 	DescribeInstanceInformation(context.Context, *ssm.DescribeInstanceInformationInput, ...func(*ssm.Options)) (*ssm.DescribeInstanceInformationOutput, error)
 }
 
-// Config is supplied by the function's environment.
+// Config is one world's, supplied by the function's environment and the pinned server content.
 type Config struct {
-	HostID                 string
-	Instance               string
+	HostID string
+	// Instance is the world's id, which also names the one instance its host runs.
+	Instance string
+	// ServerName is the world's display name.
 	ServerName             string
 	PublicHostname         string
 	BedrockPort            int
@@ -109,7 +113,8 @@ type Session struct {
 	RestoreSentAt    time.Time `json:"restore_sent_at,omitzero"`
 }
 
-// Status is the answer to GET /server, POST /server/start, POST /server/stop and POST /server/restore.
+// Status is one world as players see it: the answer to POST /server/start, POST /server/stop and
+// POST /server/restore, and each world's part of the answer to GET /server.
 type Status struct {
 	Name       string     `json:"name"`
 	State      string     `json:"state"`
@@ -127,8 +132,8 @@ type Endpoint struct {
 	Port    int    `json:"port,omitempty"`
 }
 
-// Launcher answers the site and the operator's workflow, and starts, stops, restores and allowlists the server
-// the way the workstation and host commands do.
+// Launcher runs one world. It reports the world's state to the site and the operator's workflow, and starts,
+// stops and restores its host and game the way the workstation and host commands do.
 type Launcher struct {
 	Config Config
 	EC2    EC2API
@@ -142,9 +147,11 @@ type Launcher struct {
 	FollowUp func(ctx context.Context) error
 	// FollowUpStop runs FinishStop outside the request, and again when a run ends before the stop does.
 	FollowUpStop func(ctx context.Context) error
-	// LookupPlayer resolves a Java name or Bedrock gamertag to the account the server knows.
-	LookupPlayer func(ctx context.Context, edition, name string) (Player, error)
-	// Adapter is the host adapter this launcher installs before it starts the game or changes the allowlist.
+	// Mods answers the ids of the mods that are on for this world, sorted.
+	Mods func(ctx context.Context) ([]string, error)
+	// Whitelist answers the family's allowlist as the whitelist.json a start carries to the host.
+	Whitelist func(ctx context.Context) ([]byte, error)
+	// Adapter is the host adapter this launcher installs before each command that needs it.
 	Adapter *HostAdapter
 	Now     func() time.Time
 }
@@ -610,7 +617,16 @@ func (l *Launcher) startGame(ctx context.Context) error {
 			return errors.New("too little time is left to start the game")
 		}
 	}
-	id, err := l.sendCommand(ctx, l.onHost(remoteCommand+" start "+l.Config.Instance), "minecraft launcher start", timeout)
+	// The mods and the allowlist are read now, so a switch or a change made up to this moment reaches the game.
+	mods, err := l.Mods(ctx)
+	if err != nil {
+		return err
+	}
+	whitelist, err := l.Whitelist(ctx)
+	if err != nil {
+		return err
+	}
+	id, err := l.sendCommand(ctx, l.onHost(startScript(l.Config.Instance, mods, whitelist)), "minecraft launcher start", timeout)
 	if err != nil {
 		return fmt.Errorf("send game start: %w", err)
 	}
@@ -631,6 +647,21 @@ func (l *Launcher) startGame(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// startScript writes the family's allowlist to a private file on the host (mktemp creates it with mode 0600),
+// starts the game with it and with the mods that are on, and removes it. The adapter writes the list over the
+// stopped server's whitelist.json, so a restored archive never brings a removed player back. Like a player's
+// identity (allowlistScript), the list travels base64-encoded, so the script carries only characters the single
+// quotes keep literal; the world's and the mods' ids are the manifest's, which LoadManifest checked. It runs
+// under `set -eu` after the adapter's installation (onHost).
+func startScript(instance string, mods []string, whitelist []byte) string {
+	return strings.Join([]string{
+		`allowlist="$(mktemp)"`,
+		`trap 'rm -f "$allowlist"' EXIT`,
+		"printf '%s' '" + base64.StdEncoding.EncodeToString(whitelist) + "' | base64 -d > \"$allowlist\"",
+		remoteCommand + " start " + instance + " --mods=" + strings.Join(mods, ",") + ` --allowlist-file "$allowlist"`,
+	}, "\n")
 }
 
 // sendCommand runs one shell command on the host through SSM and returns its command identity. The command

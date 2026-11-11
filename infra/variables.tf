@@ -124,7 +124,7 @@ variable "backup_bucket_name" {
 }
 
 variable "instance_ids" {
-  description = "Instance IDs authorized for separate backup namespaces. Initially only survival; adding an ID does not deploy a runtime."
+  description = "The family host's instance IDs, each authorized a separate backup namespace. The worlds of runtime/crafty/server.json get theirs without being named here; adding an ID does not deploy a runtime."
   type        = set(string)
   default     = ["survival"]
   validation {
@@ -167,7 +167,7 @@ variable "additional_game_ingress" {
 }
 
 variable "public_hostname" {
-  description = "DNS hostname that players use. The operator command points its existing Cloudflare A record at the running host and parks it while the host is stopped."
+  description = "DNS hostname of the family host. Each world is reached at <world>.<public_hostname>, whose existing Cloudflare A record the launcher points at the world's running host and parks while it is stopped."
   type        = string
   validation {
     condition     = length(var.public_hostname) <= 253 && can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.public_hostname))
@@ -205,17 +205,13 @@ variable "budget_notification_email" {
 }
 
 variable "idle_stop" {
-  description = "Optional scheduled function that drains and stops an idle host. It parks DNS with the launcher's Cloudflare token SecureString. package_path is the zip built by `task lambda:package`, unless package_dir names the directory holding it; permissions_boundary_arn defaults to the launcher's boundary, which allows everything the function does; null deploys none of its resources."
+  description = "Optional scheduled function that drains and stops each world's host once it is idle. It parks DNS with the launcher's Cloudflare token SecureString. package_path is the zip built by `task lambda:package`, unless package_dir names the directory holding it; permissions_boundary_arn defaults to the launcher's boundary, which allows everything the function does; null deploys none of its resources."
   type = object({
     package_path             = optional(string)
     idle_minutes             = optional(number, 30)
     permissions_boundary_arn = optional(string)
   })
   default = null
-  validation {
-    condition     = var.idle_stop == null || length(var.instance_ids) == 1
-    error_message = "idle_stop supports exactly one game instance on Java port 25565."
-  }
   validation {
     condition     = var.idle_stop == null || var.package_dir != null || try(var.idle_stop.package_path, null) != null
     error_message = "idle_stop.package_path is required unless package_dir names the directory holding idle-stop.zip."
@@ -231,7 +227,7 @@ variable "idle_stop" {
 }
 
 variable "launcher" {
-  description = "Optional backend for The Lobby's Minecraft Launcher: status, start and stop through a Function URL only the site, and the operator's control role when control_role_arn is set, may call. sites maps each Lobby environment the launcher serves (dev, prod) to that site's IAM role, and gets one function per environment, named <resource_prefix>-<environment>-launcher, all sharing one start record because they start the same host. permissions_boundary_arn is the administrator-created launcher boundary; control_role_arn admits the operator's server control role beside the sites. package_path is the zip built by `task lambda:package:launcher`, unless package_dir names the directory holding it. null deploys none of its resources."
+  description = "Optional backend for The Lobby's Minecraft Launcher: status, start and stop through a Function URL only the site, and the operator's control role when control_role_arn is set, may call. sites maps each Lobby environment the launcher serves (dev, prod) to that site's IAM role, and gets one function per environment, named <resource_prefix>-<environment>-launcher, all sharing each world's start record because they start the same world hosts. server_name is still accepted and no longer used: a world's name comes from runtime/crafty/server.json. permissions_boundary_arn is the administrator-created launcher boundary; control_role_arn admits the operator's server control role beside the sites. package_path is the zip built by `task lambda:package:launcher`, unless package_dir names the directory holding it. null deploys none of its resources."
   type = object({
     package_path               = optional(string)
     sites                      = map(string)
@@ -268,10 +264,6 @@ variable "launcher" {
   validation {
     condition     = var.launcher == null || try(length(trimspace(var.launcher.server_name)) > 0 && length(var.launcher.server_name) <= 60, false)
     error_message = "launcher.server_name must be 1 to 60 characters."
-  }
-  validation {
-    condition     = var.launcher == null || length(var.instance_ids) == 1
-    error_message = "launcher supports exactly one game instance on Java port 25565."
   }
   validation {
     condition     = var.launcher == null || try(can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", var.launcher.permissions_boundary_arn)) && split(":", var.launcher.permissions_boundary_arn)[4] == var.account_id, false)

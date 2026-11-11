@@ -55,8 +55,8 @@ run "additional_creative_listener_and_backup_namespace" {
     error_message = "Creative must use its own Java/RakNet listeners without replacing the existing bindings."
   }
   assert {
-    condition     = toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[0].Condition.StringLike["s3:prefix"]) == toset(["instances/survival/*", "instances/creative/*"])
-    error_message = "Each configured world must have its own authorized backup namespace."
+    condition     = toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[0].Condition.StringLike["s3:prefix"]) == toset(["instances/survival/*", "instances/creative/*", "instances/adventure/*"])
+    error_message = "Each configured instance and each world must have its own authorized backup namespace."
   }
 }
 
@@ -239,13 +239,13 @@ run "host_credentials_only_manage_named_backups_and_ssm_channels" {
   }
 
   assert {
-    condition     = toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[1].Resource) == toset(["arn:aws:s3:::minecraft-test-example-backups/instances/survival/*"]) && toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[1].Action) == toset(["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"])
-    error_message = "The host may manage current objects only in survival's backup namespace, without deleting retained versions or managing buckets."
+    condition     = jsondecode(aws_iam_role_policy.backups.policy).Statement[1].Resource == ["arn:aws:s3:::minecraft-test-example-backups/instances/survival/*", "arn:aws:s3:::minecraft-test-example-backups/instances/creative/*", "arn:aws:s3:::minecraft-test-example-backups/instances/adventure/*"] && toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[1].Action) == toset(["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"])
+    error_message = "The hosts may manage current objects only in the family instance's and the worlds' backup namespaces, without deleting retained versions or managing buckets."
   }
 
   assert {
-    condition     = jsondecode(aws_iam_role_policy.backups.policy).Statement[0].Condition.StringLike["s3:prefix"] == ["instances/survival/*"] && jsondecode(aws_iam_role_policy.backups.policy).Statement[0].Action == ["s3:ListBucket"]
-    error_message = "Backup listing must be restricted to the configured instance prefix."
+    condition     = jsondecode(aws_iam_role_policy.backups.policy).Statement[0].Condition.StringLike["s3:prefix"] == ["instances/survival/*", "instances/creative/*", "instances/adventure/*"] && jsondecode(aws_iam_role_policy.backups.policy).Statement[0].Action == ["s3:ListBucket"]
+    error_message = "Backup listing must be restricted to the configured instance's and the worlds' prefixes."
   }
 
   assert {
@@ -308,8 +308,8 @@ run "additional_named_instance_gets_separate_paths_and_prefix" {
     instance_ids = ["survival", "creative-2"]
   }
   assert {
-    condition     = output.deployment.instances["creative-2"].data_path == "/srv/minecraft/instances/creative-2/data" && output.deployment.instances["creative-2"].backup_prefix == "instances/creative-2/" && toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[1].Resource) == toset(["arn:aws:s3:::minecraft-test-example-backups/instances/survival/*", "arn:aws:s3:::minecraft-test-example-backups/instances/creative-2/*"])
-    error_message = "Adding a future instance ID must preserve separate data directories and authorize only its own backup prefix."
+    condition     = output.deployment.instances["creative-2"].data_path == "/srv/minecraft/instances/creative-2/data" && output.deployment.instances["creative-2"].backup_prefix == "instances/creative-2/" && toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[1].Resource) == toset(["arn:aws:s3:::minecraft-test-example-backups/instances/survival/*", "arn:aws:s3:::minecraft-test-example-backups/instances/creative-2/*", "arn:aws:s3:::minecraft-test-example-backups/instances/creative/*", "arn:aws:s3:::minecraft-test-example-backups/instances/adventure/*"])
+    error_message = "Adding a future instance ID must preserve separate data directories and authorize only its own backup prefix beside the worlds'."
   }
 }
 
@@ -381,12 +381,12 @@ run "idle_stop_is_absent_unless_configured" {
   command = plan
 
   assert {
-    condition     = length(aws_lambda_function.idle_stop) == 0 && length(aws_iam_role.idle_stop) == 0 && length(aws_cloudwatch_event_rule.idle_stop) == 0 && length(aws_sns_topic.idle_stop_alerts) == 0
+    condition     = length(aws_lambda_function.idle_stop) == 0 && length(aws_iam_role.idle_stop) == 0 && length(aws_cloudwatch_event_rule.idle_stop) == 0 && length(aws_cloudwatch_event_target.idle_stop) == 0 && length(aws_ssm_parameter.world_idle_stop_state) == 0 && length(aws_sns_topic.idle_stop_alerts) == 0
     error_message = "The idle stop must deploy nothing until its package is configured."
   }
 }
 
-run "idle_stop_drains_and_stops_only_this_host" {
+run "idle_stop_drains_and_stops_only_the_world_hosts" {
   command = plan
 
   variables {
@@ -396,6 +396,11 @@ run "idle_stop_drains_and_stops_only_this_host" {
   override_resource {
     target = aws_instance.host
     values = { id = "i-0123456789abcdef0" }
+  }
+
+  override_resource {
+    target = aws_instance.world
+    values = { id = "i-0fedcba9876543210" }
   }
 
   assert {
@@ -411,20 +416,34 @@ run "idle_stop_drains_and_stops_only_this_host" {
   assert {
     condition = toset([for statement in jsondecode(aws_iam_role_policy.idle_stop[0].policy).Statement : jsonencode(statement)]) == toset([
       jsonencode({ Sid = "ObserveHost", Effect = "Allow", Action = ["ec2:DescribeInstances"], Resource = "*" }),
-      jsonencode({ Sid = "StopOnlyThisHost", Effect = "Allow", Action = ["ec2:StopInstances"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0123456789abcdef0"] }),
-      jsonencode({ Sid = "DrainOnlyThisHostWithShellDocument", Effect = "Allow", Action = ["ssm:SendCommand"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0123456789abcdef0", "arn:aws:ssm:us-west-2::document/AWS-RunShellScript"] }),
+      jsonencode({ Sid = "StopOnlyWorldHosts", Effect = "Allow", Action = ["ec2:StopInstances"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210", "arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210", "arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210"] }),
+      jsonencode({ Sid = "DrainOnlyWorldHostsWithShellDocument", Effect = "Allow", Action = ["ssm:SendCommand"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210", "arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210", "arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210", "arn:aws:ssm:us-west-2::document/AWS-RunShellScript"] }),
       jsonencode({ Sid = "FollowDrain", Effect = "Allow", Action = ["ssm:GetCommandInvocation"], Resource = "*" }),
-      jsonencode({ Sid = "OwnStateOnly", Effect = "Allow", Action = ["ssm:GetParameter", "ssm:PutParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/idle-stop/state"] }),
+      jsonencode({ Sid = "OwnStateOnly", Effect = "Allow", Action = ["ssm:GetParameter", "ssm:PutParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/idle-stop/worlds/survival/state", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/idle-stop/worlds/creative/state", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/idle-stop/worlds/adventure/state"] }),
       jsonencode({ Sid = "ReadOnlyCloudflareToken", Effect = "Allow", Action = ["ssm:GetParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/cloudflare-token"] }),
       jsonencode({ Sid = "DecryptTokenThroughSsmOnly", Effect = "Allow", Action = ["kms:Decrypt"], Resource = ["arn:aws:kms:us-west-2:111122223333:key/*"], Condition = { StringEquals = { "kms:ViaService" = "ssm.us-west-2.amazonaws.com" }, "ForAnyValue:StringEquals" = { "kms:ResourceAliases" = "alias/aws/ssm" } } }),
       jsonencode({ Sid = "OwnLogsOnly", Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = ["arn:aws:logs:us-west-2:111122223333:log-group:/aws/lambda/minecraft-test-idle-stop:*"] }),
     ])
-    error_message = "The idle stop may stop and drain only this host, and touch only its own state and logs."
+    error_message = "The idle stop may stop and drain only the world hosts, and touch only its own per-world state and logs."
   }
 
   assert {
-    condition     = aws_lambda_function.idle_stop[0].environment[0].variables == tomap({ HOST_ID = "i-0123456789abcdef0", STATE_PARAMETER = "/minecraft-test/idle-stop/state", PUBLIC_HOSTNAME = "mc.example.com", CLOUDFLARE_ZONE_ID = "0123456789abcdef0123456789abcdef", CLOUDFLARE_TOKEN_PARAMETER = "/minecraft-test/launcher/cloudflare-token", IDLE_MINUTES = "30", INSTANCES = "survival", LAUNCHER_STATE_PARAMETER = "" })
-    error_message = "The function must target this host, its own state, the game endpoint and the configured instances, with a 30-minute default."
+    condition     = !strcontains(aws_iam_role_policy.idle_stop[0].policy, "i-0123456789abcdef0") && !strcontains(aws_iam_role_policy.idle_stop[0].policy, "/minecraft-test/idle-stop/state")
+    error_message = "The idle stop must not reach the family host or its record."
+  }
+
+  assert {
+    condition     = toset(keys(aws_lambda_function.idle_stop[0].environment[0].variables)) == toset(["WORLDS", "CLOUDFLARE_ZONE_ID", "CLOUDFLARE_TOKEN_PARAMETER", "IDLE_MINUTES"]) && aws_lambda_function.idle_stop[0].environment[0].variables["CLOUDFLARE_ZONE_ID"] == "0123456789abcdef0123456789abcdef" && aws_lambda_function.idle_stop[0].environment[0].variables["CLOUDFLARE_TOKEN_PARAMETER"] == "/minecraft-test/launcher/cloudflare-token" && aws_lambda_function.idle_stop[0].environment[0].variables["IDLE_MINUTES"] == "30"
+    error_message = "The function must take the worlds, the zone, the token's parameter and a 30-minute default, and nothing of the family host."
+  }
+
+  assert {
+    condition = jsondecode(aws_lambda_function.idle_stop[0].environment[0].variables["WORLDS"]) == {
+      adventure = { host_id = "i-0fedcba9876543210", hostname = "adventure.mc.example.com", launcher_state_parameter = "", idle_stop_state_parameter = "/minecraft-test/idle-stop/worlds/adventure/state" }
+      creative  = { host_id = "i-0fedcba9876543210", hostname = "creative.mc.example.com", launcher_state_parameter = "", idle_stop_state_parameter = "/minecraft-test/idle-stop/worlds/creative/state" }
+      survival  = { host_id = "i-0fedcba9876543210", hostname = "survival.mc.example.com", launcher_state_parameter = "", idle_stop_state_parameter = "/minecraft-test/idle-stop/worlds/survival/state" }
+    }
+    error_message = "WORLDS must give each world's host, address and idle-stop record, and no launcher record while the launcher is not deployed."
   }
 
   assert {
@@ -438,13 +457,23 @@ run "idle_stop_drains_and_stops_only_this_host" {
   }
 
   assert {
+    condition     = { for id, target in aws_cloudwatch_event_target.idle_stop : id => jsondecode(target.input) } == { adventure = { world = "adventure" }, creative = { world = "creative" }, survival = { world = "survival" } } && alltrue([for target in aws_cloudwatch_event_target.idle_stop : target.rule == "minecraft-test-idle-stop"])
+    error_message = "The one schedule must check each world with its own target, told which world it is for."
+  }
+
+  assert {
     condition     = aws_cloudwatch_metric_alarm.idle_stop_errors[0].metric_name == "Errors" && aws_cloudwatch_metric_alarm.idle_stop_errors[0].treat_missing_data == "notBreaching" && aws_sns_topic_subscription.idle_stop_alerts[0].protocol == "email" && aws_sns_topic_subscription.idle_stop_alerts[0].endpoint == "operator@example.invalid"
     error_message = "A failing or blocked idle stop must email the private budget recipient."
   }
 
   assert {
-    condition     = aws_ssm_parameter.idle_stop_state[0].type == "String" && aws_cloudwatch_log_group.idle_stop[0].retention_in_days == 14
-    error_message = "State must be a plain parameter and logs must expire."
+    condition     = { for id, parameter in aws_ssm_parameter.world_idle_stop_state : id => "${parameter.type} ${parameter.name} ${parameter.value}" } == { adventure = "String /minecraft-test/idle-stop/worlds/adventure/state {}", creative = "String /minecraft-test/idle-stop/worlds/creative/state {}", survival = "String /minecraft-test/idle-stop/worlds/survival/state {}" } && aws_cloudwatch_log_group.idle_stop[0].retention_in_days == 14
+    error_message = "Each world's state must be a plain parameter of its own and logs must expire."
+  }
+
+  assert {
+    condition     = aws_ssm_parameter.idle_stop_state[0].name == "/minecraft-test/idle-stop/state"
+    error_message = "The family host's idle-stop record must stay declared until that host is retired."
   }
 }
 
@@ -548,13 +577,61 @@ run "reject_a_malformed_cloudflare_zone_id" {
   expect_failures = [var.cloudflare_zone_id]
 }
 
-run "reject_idle_stop_for_multiple_game_instances" {
+run "functions_accept_any_number_of_family_instance_ids" {
   command = plan
   variables {
     instance_ids = ["survival", "creative"]
     idle_stop    = { package_path = "tests/fixtures/idle-stop.placeholder" }
+    launcher     = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
   }
-  expect_failures = [var.idle_stop]
+  assert {
+    condition     = length(aws_lambda_function.idle_stop) == 1 && length(aws_lambda_function.launcher) == 1
+    error_message = "The functions drive the world hosts, so the family host's instance IDs no longer limit them."
+  }
+}
+
+run "each_manifest_world_gets_its_own_host_without_a_data_disk" {
+  command = plan
+
+  assert {
+    condition     = toset(keys(aws_instance.world)) == toset([for world in jsondecode(file("${path.module}/../runtime/crafty/server.json")).worlds : world.id]) && toset(keys(aws_instance.world)) == toset(["adventure", "creative", "survival"])
+    error_message = "Each world of the pinned server content must get one host of its own."
+  }
+
+  assert {
+    condition     = { for id, host in aws_instance.world : id => host.tags } == { adventure = tomap({ Name = "minecraft-test-adventure", World = "adventure", Purpose = "replaceable-host" }), creative = tomap({ Name = "minecraft-test-creative", World = "creative", Purpose = "replaceable-host" }), survival = tomap({ Name = "minecraft-test-survival", World = "survival", Purpose = "replaceable-host" }) }
+    error_message = "A world host must be named and tagged for its world."
+  }
+
+  assert {
+    condition     = alltrue([for id, host in aws_instance.world : host.instance_type == "m7g.large" && host.instance_initiated_shutdown_behavior == "stop" && host.user_data_replace_on_change && host.associate_public_ip_address && host.availability_zone == "us-west-2a" && host.root_block_device[0].encrypted && host.root_block_device[0].volume_type == "gp3" && host.root_block_device[0].volume_size == 20 && host.root_block_device[0].delete_on_termination && host.root_block_device[0].tags == tomap({ Name = "minecraft-test-${id}-root", Purpose = "replaceable-root" })])
+    error_message = "A world lives on its host's encrypted 20 GiB root disk, and a host that powers itself off after its setup must stop, not terminate."
+  }
+
+  assert {
+    condition     = alltrue([for host in aws_instance.world : host.metadata_options[0].http_tokens == "required" && host.metadata_options[0].http_put_response_hop_limit == 1 && host.metadata_options[0].instance_metadata_tags == "disabled" && host.iam_instance_profile == "minecraft-test-host"])
+    error_message = "A world host must take the family host's instance profile and require IMDSv2 without an extra hop."
+  }
+
+  assert {
+    condition = alltrue([for id, host in aws_instance.world : host.user_data_base64 == base64gzip(templatefile("${path.module}/../scripts/world-bootstrap.sh.tftpl", {
+      aws_cli_script_base64 = filebase64("${path.module}/../scripts/install_aws_cli.sh")
+      world_id              = id
+      backup_bucket         = "minecraft-test-example-backups"
+      region                = "us-west-2"
+    })) && length(host.user_data_base64) < 12000])
+    error_message = "A world host's user data must carry only its world, the bucket, the region and the AWS CLI installer, well inside EC2's 16 KiB."
+  }
+
+  assert {
+    condition     = aws_instance.host.tags == tomap({ Name = "minecraft-test-host", Purpose = "replaceable-host" }) && aws_ebs_volume.data.tags == tomap({ Name = "minecraft-test-data", Purpose = "retained-instance-data" }) && aws_volume_attachment.data.device_name == "/dev/sdf"
+    error_message = "The family host and its retained data disk must stay declared as they are."
+  }
+
+  assert {
+    condition     = { for id, world in output.deployment.worlds : id => "${world.hostname} ${world.backup_prefix}" } == { adventure = "adventure.mc.example.com instances/adventure/", creative = "creative.mc.example.com instances/creative/", survival = "survival.mc.example.com instances/survival/" }
+    error_message = "The private deployment contract must give each world's address and backup prefix beside its host."
+  }
 }
 
 run "default_bootstrap_bytes_remain_identical" {
@@ -573,12 +650,12 @@ run "launcher_is_absent_unless_configured" {
   command = plan
 
   assert {
-    condition     = length(aws_lambda_function.launcher) == 0 && length(aws_iam_role.launcher) == 0 && length(aws_lambda_function_url.launcher) == 0 && length(aws_lambda_permission.launcher_url) == 0 && length(aws_ssm_parameter.launcher_state) == 0 && length(output.launchers) == 0
+    condition     = length(aws_lambda_function.launcher) == 0 && length(aws_iam_role.launcher) == 0 && length(aws_lambda_function_url.launcher) == 0 && length(aws_lambda_permission.launcher_url) == 0 && length(aws_ssm_parameter.launcher_state) == 0 && length(aws_ssm_parameter.world_launcher_state) == 0 && length(aws_ssm_parameter.launcher_mods) == 0 && length(aws_ssm_parameter.launcher_allowlist) == 0 && length(output.launchers) == 0
     error_message = "The launcher must deploy nothing until its package is configured."
   }
 }
 
-run "launcher_starts_only_this_host_for_only_the_site" {
+run "launcher_starts_only_the_world_hosts_for_only_the_site" {
   command = plan
 
   variables {
@@ -590,6 +667,11 @@ run "launcher_starts_only_this_host_for_only_the_site" {
     values = { id = "i-0123456789abcdef0" }
   }
 
+  override_resource {
+    target = aws_instance.world
+    values = { id = "i-0fedcba9876543210" }
+  }
+
   assert {
     condition     = jsondecode(aws_iam_role.launcher["dev"].assume_role_policy).Statement == [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" } }] && aws_iam_role.launcher["dev"].permissions_boundary == "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary"
     error_message = "Only Lambda may assume the launcher role, inside the administrator's launcher boundary."
@@ -598,22 +680,41 @@ run "launcher_starts_only_this_host_for_only_the_site" {
   assert {
     condition = toset([for statement in jsondecode(aws_iam_role_policy.launcher["dev"].policy).Statement : jsonencode(statement)]) == toset([
       jsonencode({ Sid = "ObserveHost", Effect = "Allow", Action = ["ec2:DescribeInstances"], Resource = "*" }),
-      jsonencode({ Sid = "StartOnlyThisHost", Effect = "Allow", Action = ["ec2:StartInstances"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0123456789abcdef0"] }),
-      jsonencode({ Sid = "StopOnlyThisHost", Effect = "Allow", Action = ["ec2:StopInstances"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0123456789abcdef0"] }),
-      jsonencode({ Sid = "StartGameOnlyOnThisHostWithShellDocument", Effect = "Allow", Action = ["ssm:SendCommand"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0123456789abcdef0", "arn:aws:ssm:us-west-2::document/AWS-RunShellScript"] }),
+      jsonencode({ Sid = "StartOnlyWorldHosts", Effect = "Allow", Action = ["ec2:StartInstances"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210", "arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210", "arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210"] }),
+      jsonencode({ Sid = "StopOnlyWorldHosts", Effect = "Allow", Action = ["ec2:StopInstances"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210", "arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210", "arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210"] }),
+      jsonencode({ Sid = "StartGameOnlyOnWorldHostsWithShellDocument", Effect = "Allow", Action = ["ssm:SendCommand"], Resource = ["arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210", "arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210", "arn:aws:ec2:us-west-2:111122223333:instance/i-0fedcba9876543210", "arn:aws:ssm:us-west-2::document/AWS-RunShellScript"] }),
       jsonencode({ Sid = "FollowStart", Effect = "Allow", Action = ["ssm:GetCommandInvocation", "ssm:DescribeInstanceInformation"], Resource = "*" }),
-      jsonencode({ Sid = "OwnStateOnly", Effect = "Allow", Action = ["ssm:GetParameter", "ssm:PutParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/state"] }),
+      jsonencode({ Sid = "OwnStateOnly", Effect = "Allow", Action = ["ssm:GetParameter", "ssm:PutParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/worlds/survival/state", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/worlds/creative/state", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/worlds/adventure/state", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/mods", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/allowlist"] }),
       jsonencode({ Sid = "ReadOnlyCloudflareToken", Effect = "Allow", Action = ["ssm:GetParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/cloudflare-token"] }),
       jsonencode({ Sid = "DecryptTokenThroughSsmOnly", Effect = "Allow", Action = ["kms:Decrypt"], Resource = ["arn:aws:kms:us-west-2:111122223333:key/*"], Condition = { StringEquals = { "kms:ViaService" = "ssm.us-west-2.amazonaws.com" }, "ForAnyValue:StringEquals" = { "kms:ResourceAliases" = "alias/aws/ssm" } } }),
       jsonencode({ Sid = "FollowUpInItself", Effect = "Allow", Action = ["lambda:InvokeFunction"], Resource = ["arn:aws:lambda:us-west-2:111122223333:function:minecraft-test-dev-launcher"] }),
       jsonencode({ Sid = "OwnLogsOnly", Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = ["arn:aws:logs:us-west-2:111122223333:log-group:/aws/lambda/minecraft-test-dev-launcher:*"] }),
     ])
-    error_message = "The launcher may start and stop only this host and drive only its game, and read only its own state, token and logs."
+    error_message = "The launcher may start and stop only the world hosts and drive only their games, and reach only its own records, token and logs."
   }
 
   assert {
-    condition     = aws_lambda_function.launcher["dev"].environment[0].variables == tomap({ HOST_ID = "i-0123456789abcdef0", INSTANCE = "survival", SERVER_NAME = "Family server", PUBLIC_HOSTNAME = "mc.example.com", BEDROCK_PORT = "19132", STATE_PARAMETER = "/minecraft-test/launcher/state", CLOUDFLARE_ZONE_ID = "0123456789abcdef0123456789abcdef", CLOUDFLARE_TOKEN_PARAMETER = "/minecraft-test/launcher/cloudflare-token", IDLE_STOP_STATE_PARAMETER = "", SITE_ROLE_ARNS = "arn:aws:iam::111122223333:role/site-dev-server" })
-    error_message = "The function must target this host, its one instance, the players' hostname and its own state, naming the token only by parameter."
+    condition     = !strcontains(aws_iam_role_policy.launcher["dev"].policy, "i-0123456789abcdef0") && !strcontains(aws_iam_role_policy.launcher["dev"].policy, "/minecraft-test/launcher/state")
+    error_message = "The launcher must not reach the family host or its start record."
+  }
+
+  assert {
+    condition     = { for name, value in aws_lambda_function.launcher["dev"].environment[0].variables : name => value if name != "WORLDS" } == { MODS_PARAMETER = "/minecraft-test/launcher/mods", ALLOWLIST_PARAMETER = "/minecraft-test/launcher/allowlist", BEDROCK_PORT = "19132", CLOUDFLARE_ZONE_ID = "0123456789abcdef0123456789abcdef", CLOUDFLARE_TOKEN_PARAMETER = "/minecraft-test/launcher/cloudflare-token", SITE_ROLE_ARNS = "arn:aws:iam::111122223333:role/site-dev-server" }
+    error_message = "The function must name the mods and allowlist records and the token only by parameter, and nothing of the family host."
+  }
+
+  assert {
+    condition = jsondecode(aws_lambda_function.launcher["dev"].environment[0].variables["WORLDS"]) == {
+      adventure = { host_id = "i-0fedcba9876543210", hostname = "adventure.mc.example.com", launcher_state_parameter = "/minecraft-test/launcher/worlds/adventure/state", idle_stop_state_parameter = "" }
+      creative  = { host_id = "i-0fedcba9876543210", hostname = "creative.mc.example.com", launcher_state_parameter = "/minecraft-test/launcher/worlds/creative/state", idle_stop_state_parameter = "" }
+      survival  = { host_id = "i-0fedcba9876543210", hostname = "survival.mc.example.com", launcher_state_parameter = "/minecraft-test/launcher/worlds/survival/state", idle_stop_state_parameter = "" }
+    }
+    error_message = "WORLDS must give each world's host, its own address and its own start record, and no idle-stop record while the idle stop is not deployed."
+  }
+
+  assert {
+    condition     = { for id, parameter in aws_ssm_parameter.world_launcher_state : id => "${parameter.type} ${parameter.name} ${parameter.value}" } == { adventure = "String /minecraft-test/launcher/worlds/adventure/state {}", creative = "String /minecraft-test/launcher/worlds/creative/state {}", survival = "String /minecraft-test/launcher/worlds/survival/state {}" } && aws_ssm_parameter.launcher_mods[0].type == "String" && aws_ssm_parameter.launcher_mods[0].value == "{}" && aws_ssm_parameter.launcher_allowlist[0].type == "String" && aws_ssm_parameter.launcher_allowlist[0].value == "[]"
+    error_message = "Each world must have a plain start record of its own, beside one record of switched mods and one family allowlist, both empty at first."
   }
 
   assert {
@@ -627,8 +728,8 @@ run "launcher_starts_only_this_host_for_only_the_site" {
   }
 
   assert {
-    condition     = aws_ssm_parameter.launcher_state[0].type == "String" && aws_cloudwatch_log_group.launcher["dev"].retention_in_days == 30 && toset([for query in aws_cloudwatch_metric_alarm.launcher_failing["dev"].metric_query : "${query.metric[0].namespace}/${query.metric[0].metric_name}/${query.metric[0].dimensions["FunctionName"]}" if length(query.metric) > 0]) == toset(["AWS/Lambda/Errors/minecraft-test-dev-launcher", "AWS/Lambda/AsyncEventsDropped/minecraft-test-dev-launcher", "Minecraft/Launcher/StartFailures/minecraft-test-dev-launcher", "Minecraft/Launcher/StopFailures/minecraft-test-dev-launcher"]) && aws_sns_topic_subscription.launcher_alerts["dev"].endpoint == "operator@example.invalid"
-    error_message = "State must be a plain parameter, logs must expire after 30 days, and a failed start or stop must email the private budget recipient."
+    condition     = aws_ssm_parameter.launcher_state[0].name == "/minecraft-test/launcher/state" && aws_ssm_parameter.launcher_state[0].type == "String" && aws_cloudwatch_log_group.launcher["dev"].retention_in_days == 30 && toset([for query in aws_cloudwatch_metric_alarm.launcher_failing["dev"].metric_query : "${query.metric[0].namespace}/${query.metric[0].metric_name}/${query.metric[0].dimensions["FunctionName"]}" if length(query.metric) > 0]) == toset(["AWS/Lambda/Errors/minecraft-test-dev-launcher", "AWS/Lambda/AsyncEventsDropped/minecraft-test-dev-launcher", "Minecraft/Launcher/StartFailures/minecraft-test-dev-launcher", "Minecraft/Launcher/StopFailures/minecraft-test-dev-launcher"]) && aws_sns_topic_subscription.launcher_alerts["dev"].endpoint == "operator@example.invalid"
+    error_message = "The family host's start record must stay declared, logs must expire after 30 days, and a failed start or stop must email the private budget recipient."
   }
 }
 
@@ -640,9 +741,28 @@ run "launcher_sees_the_idle_stop_drain" {
     idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder" }
   }
 
+  override_resource {
+    target = aws_instance.world
+    values = { id = "i-0fedcba9876543210" }
+  }
+
   assert {
-    condition     = aws_lambda_function.launcher["dev"].environment[0].variables["IDLE_STOP_STATE_PARAMETER"] == "/minecraft-test/idle-stop/state" && aws_lambda_function.launcher["dev"].environment[0].variables["CLOUDFLARE_TOKEN_PARAMETER"] == "/minecraft-test/cloudflare/token" && aws_lambda_function.launcher["dev"].environment[0].variables["SERVER_NAME"] == "Our server"
-    error_message = "The launcher must read the idle stop's progress and the configured token parameter and name."
+    condition = jsondecode(aws_lambda_function.launcher["dev"].environment[0].variables["WORLDS"]) == {
+      adventure = { host_id = "i-0fedcba9876543210", hostname = "adventure.mc.example.com", launcher_state_parameter = "/minecraft-test/launcher/worlds/adventure/state", idle_stop_state_parameter = "/minecraft-test/idle-stop/worlds/adventure/state" }
+      creative  = { host_id = "i-0fedcba9876543210", hostname = "creative.mc.example.com", launcher_state_parameter = "/minecraft-test/launcher/worlds/creative/state", idle_stop_state_parameter = "/minecraft-test/idle-stop/worlds/creative/state" }
+      survival  = { host_id = "i-0fedcba9876543210", hostname = "survival.mc.example.com", launcher_state_parameter = "/minecraft-test/launcher/worlds/survival/state", idle_stop_state_parameter = "/minecraft-test/idle-stop/worlds/survival/state" }
+    }
+    error_message = "With both functions deployed, WORLDS must name both of each world's records."
+  }
+
+  assert {
+    condition     = aws_lambda_function.idle_stop[0].environment[0].variables["WORLDS"] == aws_lambda_function.launcher["dev"].environment[0].variables["WORLDS"]
+    error_message = "The launcher and the idle stop must read the same WORLDS."
+  }
+
+  assert {
+    condition     = aws_lambda_function.launcher["dev"].environment[0].variables["CLOUDFLARE_TOKEN_PARAMETER"] == "/minecraft-test/cloudflare/token" && !contains(keys(aws_lambda_function.launcher["dev"].environment[0].variables), "SERVER_NAME")
+    error_message = "The launcher must read the configured token parameter; server_name is accepted and no longer used."
   }
 
   assert {
@@ -651,13 +771,13 @@ run "launcher_sees_the_idle_stop_drain" {
   }
 
   assert {
-    condition     = one([for statement in jsondecode(aws_iam_role_policy.launcher["dev"].policy).Statement : statement if statement.Sid == "ReadIdleStopProgress"]) == { Sid = "ReadIdleStopProgress", Effect = "Allow", Action = ["ssm:GetParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/idle-stop/state"] }
-    error_message = "The launcher may only read the idle stop's state, never write it."
+    condition     = one([for statement in jsondecode(aws_iam_role_policy.launcher["dev"].policy).Statement : statement if statement.Sid == "ReadIdleStopProgress"]) == { Sid = "ReadIdleStopProgress", Effect = "Allow", Action = ["ssm:GetParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/idle-stop/worlds/survival/state", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/idle-stop/worlds/creative/state", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/idle-stop/worlds/adventure/state"] }
+    error_message = "The launcher may only read each world's idle-stop state, never write it."
   }
 
   assert {
-    condition     = one([for statement in jsondecode(aws_iam_role_policy.idle_stop[0].policy).Statement : statement if statement.Sid == "ReadLauncherProgress"]) == { Sid = "ReadLauncherProgress", Effect = "Allow", Action = ["ssm:GetParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/state"] } && aws_lambda_function.idle_stop[0].environment[0].variables["LAUNCHER_STATE_PARAMETER"] == "/minecraft-test/launcher/state"
-    error_message = "The idle stop may only read the launcher's state, never write it, so it stands aside while the launcher stops the host."
+    condition     = one([for statement in jsondecode(aws_iam_role_policy.idle_stop[0].policy).Statement : statement if statement.Sid == "ReadLauncherProgress"]) == { Sid = "ReadLauncherProgress", Effect = "Allow", Action = ["ssm:GetParameter"], Resource = ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/worlds/survival/state", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/worlds/creative/state", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/worlds/adventure/state"] }
+    error_message = "The idle stop may only read each world's launcher state, never write it, so it stands aside while the launcher stops a host."
   }
 
   assert {
@@ -728,7 +848,7 @@ run "reject_a_package_dir_with_a_trailing_slash" {
   expect_failures = [var.package_dir]
 }
 
-run "launcher_serves_every_site_from_one_start_record" {
+run "launcher_serves_every_site_from_the_same_start_records" {
   command = plan
   variables {
     launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server", prod = "arn:aws:iam::111122223333:role/site-prod-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
@@ -742,12 +862,12 @@ run "launcher_serves_every_site_from_one_start_record" {
     error_message = "Each environment's function may be called only by that environment's site role, through its signed Function URL."
   }
   assert {
-    condition     = length(aws_ssm_parameter.launcher_state) == 1 && aws_lambda_function.launcher["dev"].environment[0].variables == aws_lambda_function.launcher["prod"].environment[0].variables && aws_lambda_function.launcher["prod"].environment[0].variables["STATE_PARAMETER"] == "/minecraft-test/launcher/state"
-    error_message = "Every environment's function must start the same host from the same start record and token, so a start from one site shows on the others."
+    condition     = length(aws_ssm_parameter.world_launcher_state) == 3 && length(aws_ssm_parameter.launcher_mods) == 1 && length(aws_ssm_parameter.launcher_allowlist) == 1 && aws_lambda_function.launcher["dev"].environment[0].variables == aws_lambda_function.launcher["prod"].environment[0].variables
+    error_message = "Every environment's function must start the same world hosts from the same start records and token, so a start from one site shows on the others."
   }
   assert {
-    condition     = one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "FollowUpInItself"]).Resource == ["arn:aws:lambda:us-west-2:111122223333:function:minecraft-test-prod-launcher"] && one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "OwnLogsOnly"]).Resource == ["arn:aws:logs:us-west-2:111122223333:log-group:/aws/lambda/minecraft-test-prod-launcher:*"] && one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "OwnStateOnly"]).Resource == ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/state"]
-    error_message = "A function may finish starts only in itself and write only its own logs, while sharing the one start record."
+    condition     = one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "FollowUpInItself"]).Resource == ["arn:aws:lambda:us-west-2:111122223333:function:minecraft-test-prod-launcher"] && one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "OwnLogsOnly"]).Resource == ["arn:aws:logs:us-west-2:111122223333:log-group:/aws/lambda/minecraft-test-prod-launcher:*"] && one([for statement in jsondecode(aws_iam_role_policy.launcher["prod"].policy).Statement : statement if statement.Sid == "OwnStateOnly"]).Resource == ["arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/worlds/survival/state", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/worlds/creative/state", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/worlds/adventure/state", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/mods", "arn:aws:ssm:us-west-2:111122223333:parameter/minecraft-test/launcher/allowlist"]
+    error_message = "A function may finish starts only in itself and write only its own logs, while sharing the worlds' start records."
   }
   assert {
     condition     = toset([for query in aws_cloudwatch_metric_alarm.launcher_failing["prod"].metric_query : query.metric[0].dimensions["FunctionName"] if length(query.metric) > 0]) == toset(["minecraft-test-prod-launcher"])
@@ -763,15 +883,6 @@ run "reject_launcher_without_sites" {
   command = plan
   variables {
     launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = {}, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
-  }
-  expect_failures = [var.launcher]
-}
-
-run "reject_launcher_for_multiple_game_instances" {
-  command = plan
-  variables {
-    instance_ids = ["survival", "creative"]
-    launcher     = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
   }
   expect_failures = [var.launcher]
 }

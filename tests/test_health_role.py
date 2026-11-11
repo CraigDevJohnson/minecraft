@@ -48,10 +48,15 @@ class HealthRoleTests(unittest.TestCase):
 
     def test_workflow_has_no_untrusted_checkout_or_pr_entry_point(self):
         text = (ROOT / ".github/workflows/minecraft-health.yml").read_text()
-        for denied in ["schedule:", "cron:", "push:", "pull_request:", "pull_request_target:", "workflow_call:", "inputs:", "aws-access-key-id:", "aws-secret-access-key:"]:
+        for denied in ["schedule:", "cron:", "push:", "pull_request:", "pull_request_target:", "workflow_call:", "aws-access-key-id:", "aws-secret-access-key:"]:
             self.assertNotIn(denied, text)
         for required in ["workflow_dispatch:", "github.event_name == 'workflow_dispatch'", "github.ref == 'refs/heads/main'", "github.repository_id == '1359070973'", "github.repository_owner_id == '42454849'", "persist-credentials: false", "role-duration-seconds: 900", "allowed-account-ids: '793680745829'", "timeout-minutes: 5"]:
             self.assertIn(required, text)
+        # The one input is a choice of world, which reaches the script through the environment; the script
+        # checks only a world the pinned content names.
+        self.assertEqual(text.count("inputs."), 1)
+        self.assertIn("WORLD: ${{ inputs.world }}", text)
+        self.assertIn("type: choice", text)
         self.assertEqual(text.count("id-token: write"), 1)
         self.assertEqual(text.count("secrets."), 1)
         self.assertIn("secrets.MINECRAFT_HEALTH_ROLE_ID", text)

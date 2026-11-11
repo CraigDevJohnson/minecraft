@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Sets up a world's host (ADR 0009): Docker, the AWS CLI, the folders and the service the world's first start
+# builds on. It holds nothing from the pinned server content, which arrives with that start.
+set -euo pipefail
+
+marker=/var/lib/minecraft/bootstrapped
+again=/var/lib/cloud/scripts/per-boot/minecraft-world-bootstrap
+if [[ -e "$marker" ]]; then
+	exit 0
+fi
+[[ "$(id -u)" == 0 ]]
+
+# The run the launch causes powers the host off when it is done, so a new host costs nothing until its world
+# is started. A failed run powers off too, and the next boot tries again. A later boot that finishes stays up:
+# a start is waiting for it.
+finish() {
+	local status=$?
+	if [[ "$status" != 0 ]]; then
+		printf 'world host bootstrap failed; the next boot tries again. Inspect the cloud-init logs.\n' >&2
+	fi
+	if [[ "$status" != 0 || "$0" != "$again" ]]; then
+		shutdown -h now
+	fi
+}
+trap finish EXIT
+if [[ "$0" != "$again" ]]; then
+	install -D -m 0700 "$0" "$again"
+fi
+
+# shellcheck source=/dev/null
+source /etc/os-release
+[[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 && "$(uname -m)" == aarch64 ]]
+
+# The launcher installs the adapter into this folder before each command, and refuses a folder anyone but
+# root may write. A start can arrive while the packages below are still installing, so it comes first.
+install -d -m 0755 /usr/local/sbin /opt/minecraft-crafty /opt/minecraft-crafty/scripts
+install -d -m 0700 /etc/minecraft
+for directory in backups logs servers config import state staging; do
+	install -d -m 0770 "/srv/minecraft/crafty/$directory"
+done
+chmod 0700 /srv/minecraft/crafty/state /srv/minecraft/crafty/staging
+
+cat >/etc/minecraft/operator.json <<'OPERATOR_CONFIG'
+{"schema_version":1,"runtime":"crafty","crafty_url":"https://127.0.0.1:8443","token_file":"/etc/minecraft/crafty-api.token","data_root":"/srv/minecraft","instances":{"${world_id}":{"server_name":"${world_id}","java_port":25565}},"backup":{"bucket":"${backup_bucket}","region":"${region}"}}
+OPERATOR_CONFIG
+chmod 0600 /etc/minecraft/operator.json
+
+cat >/usr/local/sbin/minecraft-instance <<'LAUNCHER'
+#!/bin/sh
+exec /usr/bin/python3 -B /opt/minecraft-crafty/scripts/minecraft_crafty.py "$@"
+LAUNCHER
+chmod 0755 /usr/local/sbin/minecraft-instance
+
+# Stopping the unit (including an EC2 stop without the launcher's drain) archives first. The containers always
+# stop afterwards, but a failed drain or a failed container stop fails the unit, so it shows in the journal.
+# The stop timeout covers the adapter's own limits: 300 seconds for the server to stop and 1800 for the upload.
+# The Compose file arrives with the world's first start; until then there is nothing to bring up.
+cat >/etc/systemd/system/minecraft-crafty.service <<'UNIT'
+[Unit]
+Description=Crafty Controller for this world's Minecraft server
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/minecraft-crafty/compose.yaml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/docker compose -f /opt/minecraft-crafty/compose.yaml up --detach --wait
+ExecStop=/bin/sh -c '/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json host-drain; drained=$$?; /usr/bin/docker compose -f /opt/minecraft-crafty/compose.yaml stop; stopped=$$?; [ $$drained -eq 0 ] || exit $$drained; exit $$stopped'
+TimeoutStartSec=600
+TimeoutStopSec=2400
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+export DEBIAN_FRONTEND=noninteractive
+timeout --kill-after=10s 300s apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 update
+timeout --kill-after=10s 600s apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 install --yes --no-install-recommends docker.io docker-compose-v2
+
+# The reviewed scripts/install_aws_cli.sh: the adapter stores and restores the world's archives with it.
+base64 --decode >/usr/local/sbin/minecraft-install-aws-cli <<'AWS_CLI_SCRIPT'
+${aws_cli_script_base64}
+AWS_CLI_SCRIPT
+chmod 0755 /usr/local/sbin/minecraft-install-aws-cli
+timeout --kill-after=10s 900s /usr/local/sbin/minecraft-install-aws-cli
+
+timeout --kill-after=10s 30s systemctl daemon-reload
+timeout --kill-after=10s 120s systemctl enable --now docker.service
+timeout --kill-after=10s 30s systemctl enable minecraft-crafty.service
+timeout --kill-after=10s 30s docker compose version
+
+# Last: the adapter's first start waits for this marker before it does anything else.
+install -d -m 0755 /var/lib/minecraft
+touch "$marker"
+sync
+printf 'World host prerequisites are ready; the world is set up at its first start.\n'

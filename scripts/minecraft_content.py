@@ -12,8 +12,8 @@ import json
 # Geyser 2.12.1 build 1280 removed RakNet alone (configuration version 12): it loads "raknet" as NetherNet alone.
 RAKNET_ALONE_LAST_VERSION = 11
 # What Bedrock clients list when Geyser cannot read the MOTD and player limit from Paper. Geyser's own fallback is
-# "Geyser" with 100 slots, which Bedrock showed after the Paper 26.3 upgrade, so from version 12 the family server's
-# name and limit (server_properties in runtime/crafty/server.json) take its place.
+# "Geyser" with 100 slots, which Bedrock showed after the Paper 26.3 upgrade, so from version 12 the family's name and
+# the player limit of every world's server (base.server_properties in runtime/crafty/server.json) take its place.
 FAMILY_MOTD = {"primary-motd": "Family Minecraft", "secondary-motd": "Family Minecraft", "max-players": 10}
 
 
