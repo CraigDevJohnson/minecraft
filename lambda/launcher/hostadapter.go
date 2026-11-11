@@ -17,8 +17,8 @@ import (
 // were written for (ADR 0007). The package script puts the files in the function's adapter folder.
 const adapterDirectory = "/opt/minecraft-crafty/scripts"
 
-// adapterFiles are the files scripts/install_crafty.sh puts in adapterDirectory, in the order they are swapped
-// in: the modules the adapter imports and the pinned server content it applies on each start (ADR 0008) first, the
+// adapterFiles are the files the launcher installs in adapterDirectory (and world-bootstrap.sh.tftpl prepares the
+// folder for), in the order they are swapped in: the modules the adapter imports and the pinned server content it applies on each start (ADR 0008) first, the
 // adapter itself last. scripts/package_idle_stop.py packs the same list, which tests/test_launcher_package.py checks.
 var adapterFiles = []string{"minecraft_access.py", "minecraft_content.py", "server.json", "minecraft_crafty.py"}
 

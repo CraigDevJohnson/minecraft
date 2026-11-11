@@ -108,7 +108,7 @@ The family server passed its own acceptance in October 2026 (#53, #26, #27): joi
 
 ## The retired family host's build by hand
 
-The family host of [ADR 0004](../adr/0004-crafty-multiverse-rebuild.md) was built by hand in October 2026, and these were its steps. That host was retired in November 2026 ([worlds](worlds.md#the-family-hosts-retirement)), and `scripts/install_crafty.sh` went with it; the steps are kept as a record of what a world's first start now does itself. A world host needs none of this; its first start does the same work itself ([above](#how-a-world-host-sets-itself-up)).
+The family host of [ADR 0004](../adr/0004-crafty-multiverse-rebuild.md) was built by hand in October 2026, and these were its steps. That host is removed from the configuration and retired by the Deploy in [worlds](worlds.md#the-family-hosts-retirement), and `scripts/install_crafty.sh` was removed with it; the steps are kept as a record of what a world's first start now does itself. A world host needs none of this; its first start does the same work itself ([above](#how-a-world-host-sets-itself-up)).
 
 ### Install Crafty on the host
 

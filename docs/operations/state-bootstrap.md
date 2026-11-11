@@ -34,7 +34,7 @@ The first deployment's operator and host roles predate the boundary. Adopt it in
 2. Create the host boundary policy and add its ARN as `host_permissions_boundary_arn` to the private infrastructure tfvars.
 3. Save the operator's current policy document for rollback, then replace it with the reviewed one.
 4. Immediately smoke-test as the operator, with a world host running: `aws ec2 describe-instances --instance-ids <host ID>` must answer it. (In October 2026 this step ran the family host's `status` command, retired with that host.) If Session Manager is used, also start a session with `aws ssm start-session --target <host ID>` and, from a second shell, end it with `aws ssm terminate-session --session-id <ID>` (from `aws ssm describe-sessions --state Active`). If either fails, restore the saved document.
-5. Apply the boundary on its own. In October 2026 a full plan from that revision also replaced the family host, whose user data embedded its storage script; that host is retired. Target only the role, confirm the saved plan updates `aws_iam_role.host` in place to add `permissions_boundary` and changes nothing else, and apply it after Craig approves that plan:
+5. Apply the boundary on its own. In October 2026 a full plan from that revision also replaced the family host, whose user data embedded its storage script; that host is removed from the configuration and retired by the Deploy in [worlds](worlds.md#the-family-hosts-retirement). Target only the role, confirm the saved plan updates `aws_iam_role.host` in place to add `permissions_boundary` and changes nothing else, and apply it after Craig approves that plan:
 
    ```sh
    "$repo_dir/.tools/bin/tofu" -chdir="$private_dir/infrastructure/infra" plan -target=aws_iam_role.host \

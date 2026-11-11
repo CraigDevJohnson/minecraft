@@ -1,6 +1,6 @@
 # Host and retained infrastructure
 
-Issue #4 implements the offline contract in the [approved Agent Brief](https://github.com/CraigDevJohnson/minecraft/issues/4#issuecomment-5579966412). It supplies no game runtime, live resources, or demonstrated recovery. Since 2026-11-10 the root declares one host per world ([ADR 0009](../adr/0009-one-host-per-world.md), [worlds](worlds.md)): `infra/worlds.tf` makes a world host for each world id in `runtime/crafty/server.json`. The family host of ADR 0004, with its retained data disk, its disk set-up and its zero-fill, was retired in November 2026 ([worlds](worlds.md#the-family-hosts-retirement)); its archives stay in the backup bucket. World and instance IDs follow `^[a-z][a-z0-9-]{0,31}$`.
+Issue #4 implements the offline contract in the [approved Agent Brief](https://github.com/CraigDevJohnson/minecraft/issues/4#issuecomment-5579966412). It supplies no game runtime, live resources, or demonstrated recovery. Since 2026-11-10 the root declares one host per world ([ADR 0009](../adr/0009-one-host-per-world.md), [worlds](worlds.md)): `infra/worlds.tf` makes a world host for each world id in `runtime/crafty/server.json`. The family host of ADR 0004, with its retained data disk, its disk set-up and its zero-fill, is removed from the configuration and retired by the Deploy in [worlds](worlds.md#the-family-hosts-retirement); its archives stay in the backup bucket. World and instance IDs follow `^[a-z][a-z0-9-]{0,31}$`.
 
 ## Ownership and inventory
 

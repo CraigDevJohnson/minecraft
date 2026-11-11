@@ -11,7 +11,7 @@ TFVARS = '''account_id         = "111122223333"
 environment        = "family"
 region             = "us-west-2"
 backup_bucket_name = "private-backup-bucket"
-instance_ids       = ["survival"]
+public_hostname    = "mc.example.invalid"
 monthly_budget_usd = 25
 budget_notification_email = "operator@example.invalid"
 launcher = {
@@ -41,7 +41,7 @@ class MaskPrivateInputsTests(unittest.TestCase):
             completed = subprocess.run([sys.executable, str(ROOT / "scripts" / "mask_private_inputs.py"), str(tfvars), str(backend)],
                                        capture_output=True, text=True, check=True)
         masked = completed.stdout.splitlines()
-        for value in ["111122223333", "family", "us-west-2", "private-backup-bucket", "survival", "operator@example.invalid",
+        for value in ["111122223333", "family", "us-west-2", "private-backup-bucket", "mc.example.invalid", "operator@example.invalid",
                       "arn:aws:iam::111122223333:role/site-dev-server", "private-state-bucket", "minecraft/infra.tfstate",
                       'a "quoted" value']:
             self.assertIn(f"::add-mask::{value}", masked)
