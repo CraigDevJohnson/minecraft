@@ -64,7 +64,7 @@ jobs:
           fi
 
           if [[ -z "$hold_reason" ]]; then
-            required="$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${BASE_REF}" --jq '[.[] | select(.type == "required_status_checks")] | length')"
+            required="$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${BASE_REF}" --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?] | length')"
             if [[ "$required" == "0" ]]; then
               hold_reason="${BASE_REF} has no required status checks, so auto-merge would not wait for CI"
             fi
