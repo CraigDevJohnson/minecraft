@@ -104,9 +104,9 @@ Restoring an older archive by hand needs a world host that has finished its firs
 The worlds ran Paper until [ADR 0010](../adr/0010-fabric-and-neoforge-worlds.md). The move needs one Deploy, with every world stopped, and then one start of each world. Its plan shows the Launcher functions' new package and nothing about a host.
 
 1. **The last stop on Paper is the way back.** Each world's newest archive holds it as Paper left it. Note each world's newest key under `instances/<world>/crafty/` before the first start.
-2. **Start each world.** The adapter adds the loader's jars and mods, changes Crafty's launch command to the loader's jar, and leaves the world, player data and everything of Paper's in place. The first launch downloads Minecraft's server and the loader's libraries, and on `adventure` runs NeoForge's installer, so it takes a few minutes longer. If it passes the start deadline, run `start` again.
+2. **Start each world.** The adapter adds the loader's jars and mods, changes Crafty's launch command to the loader's jar, and moves the five files Paper keeps with the overworld (the seed, game rules, weather, scheduled events and wandering trader) to the world's data folder. The rest of the world, player data and everything of Paper's stay in place. The first launch downloads Minecraft's server and the loader's libraries, and on `adventure` runs NeoForge's installer, so it takes a few minutes longer. If it passes the start deadline, run `start` again.
 3. **Run the [proof run](#the-proof-run-for-a-world)** for each world: the health workflow, a Java and a Bedrock join, a stop and a start. A Bedrock device asks once more whether to trust each world, because Geyser keeps a new NetherNet identity under its loader's folder.
-4. **Check the world is the one from before**: what was built is still there, in the Nether and the End as well as the Overworld.
+4. **Check the world is the one from before**: what was built is still there, in the Nether and the End as well as the Overworld, and newly explored land joins the old without a seam.
 5. **Claims start empty.** GriefPrevention's claims do not carry over to Flan, which claims with a golden hoe; players claim again.
 
 To go back, revert the pull request, Deploy, and [restore](crafty.md#recover-from-an-archive) each world's archive from step 1.

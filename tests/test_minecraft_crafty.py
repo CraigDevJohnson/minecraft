@@ -1337,6 +1337,15 @@ class ContentTests(unittest.TestCase):
         (self.server / "paper.jar").write_bytes(b"paper")
         (self.server / "plugins").mkdir()
         (self.server / "plugins" / "Old.jar").write_bytes(b"old")
+        # Paper keeps the world's seed, game rules and weather with its overworld; the game keeps them in data/.
+        papers = self.server / "survival" / "dimensions" / "minecraft" / "overworld" / "data" / "minecraft"
+        papers.mkdir(parents=True)
+        for name in crafty.PAPER_WORLD_FILES:
+            (papers / name).write_bytes(name.encode())
+        (papers / "raids.dat").write_bytes(b"the overworld's own")
+        games = self.server / "survival" / "data" / "minecraft"
+        games.mkdir(parents=True)
+        (games / "weather.dat").write_bytes(b"already here")
         api = FakeAPI()
         api.command = "java -Xms1024M -Xmx5120M -jar paper.jar nogui"
         adapter, api, host = self.adapter(api)
@@ -1344,6 +1353,7 @@ class ContentTests(unittest.TestCase):
         with self.assertRaisesRegex(crafty.CraftyError, "archive"):
             adapter.start("family")
         self.assertFalse((self.server / "fabric-server-launch.jar").exists())
+        self.assertTrue((papers / "world_gen_settings.dat").exists())
         adapter.record("family", backup="complete", fingerprint=crafty.fingerprint(self.server))
         adapter.start("family")
         self.assertEqual(api.command, "java -Xms1024M -Xmx5120M -DgeyserAdvertiseAddresses=34.212.10.20 -jar fabric-server-launch.jar nogui")
@@ -1352,6 +1362,10 @@ class ContentTests(unittest.TestCase):
         self.assertEqual((self.server / "survival" / "level.dat").read_bytes(), b"world")
         self.assertEqual((self.server / "plugins" / "Old.jar").read_bytes(), b"old")
         self.assertEqual((self.server / "paper.jar").read_bytes(), b"paper")
+        # The world's settings are where the loader reads them; a file already there and the overworld's own stay.
+        for name in crafty.PAPER_WORLD_FILES:
+            self.assertEqual((games / name).read_bytes(), b"already here" if name == "weather.dat" else name.encode())
+        self.assertEqual(sorted(path.name for path in papers.iterdir()), ["raids.dat", "weather.dat"])
 
     def test_a_new_neoforge_installer_runs_at_the_next_launch(self):
         manifest = content_manifest(world="adventure")
@@ -1361,6 +1375,7 @@ class ContentTests(unittest.TestCase):
         adapter.start("family")
         # The starter jar runs the installer beside it only when it finds no run script.
         self.assertFalse((self.server / "run.sh").exists())
+        self.assertLess(api.log.index("patch"), api.log.index("start_server"))
         self.assertEqual((self.server / "neoforge-installer.jar").read_bytes(), jar(manifest["artifacts"][1]))
         self.assertEqual(api.command, "java -Xms1024M -Xmx5120M -DgeyserAdvertiseAddresses=34.212.10.20 -jar server.jar nogui")
         self.assertEqual(sorted(path.name for path in (self.server / "mods").iterdir()),

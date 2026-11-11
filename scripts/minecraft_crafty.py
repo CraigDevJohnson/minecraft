@@ -59,6 +59,8 @@ GEYSER_CONFIG = re.compile(r"config/Geyser-(?:Fabric|NeoForge)/config\.yml")
 GEYSER_CONFIG_VERSIONS = (8, 11, 12)
 # NetherNet's WebRTC candidates carry the host's public address, which changes with every EC2 start.
 ADVERTISE = re.compile(r" -DgeyserAdvertiseAddresses=\S*")
+# What Paper keeps under a world's overworld and the game itself keeps in the world's data folder.
+PAPER_WORLD_FILES = ("game_rules.dat", "scheduled_events.dat", "wandering_trader.dat", "weather.dat", "world_gen_settings.dat")
 LAUNCHED = re.compile(r" -jar \S+")
 INSTANCE_ID = re.compile(r"[a-z][a-z0-9-]{0,31}")
 UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
@@ -1034,6 +1036,10 @@ class Adapter:
                     # Downloads take a while; never change the jars under a server someone started meanwhile.
                     if self.running(server):
                         raise CraftyError("the server started while its content was downloading; stop it, then start it again")
+                    if any(artifact["path"].endswith("installer.jar") for artifact in loader):
+                        # NeoForge's starter runs the installer beside it only when it finds no run script. The
+                        # script goes before the new installer arrives, so a start cut off here still installs it.
+                        folder.remove("run.sh")
                     for artifact in changed:
                         with open(staged[artifact["path"]], "rb") as jar:
                             folder.write(artifact["path"], iter(lambda: jar.read(1024 * 1024), b""), artifact["sha256"])
@@ -1041,11 +1047,15 @@ class Adapter:
                         folder.write(item["path"], [_managed_file_bytes(item)], item["sha256"])
                     for path in stale:
                         folder.remove(path)
-                    if any(artifact["path"].endswith("installer.jar") for artifact in loader):
-                        # NeoForge's starter runs the installer beside it only when it finds no run script.
-                        folder.remove("run.sh")
                 finally:
                     shutil.rmtree(work, ignore_errors=True)
+            # Paper keeps these of a world's files with its overworld. Fabric and NeoForge read them from the
+            # world's own data folder, where the game keeps them, and would otherwise start the world with a new
+            # seed, default game rules and clear weather (Paper's guide to migrating from Paper).
+            level = self.manifest["server_properties"].get("level-name")
+            if isinstance(level, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", level):
+                for name in PAPER_WORLD_FILES:
+                    folder.move(f"{level}/dimensions/minecraft/overworld/data/minecraft/{name}", f"{level}/data/minecraft/{name}")
 
     def apply_allowlist(self, server: dict, entries: list) -> None:
         """Write the family allowlist the launcher carried over the stopped server's whitelist.json, as the managed
@@ -1380,6 +1390,35 @@ class _ServerFolder:
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
         return digest.hexdigest()
+
+    def move(self, source: str, target: str) -> bool:
+        """Move the regular file at source to target, unless something is already there. Answers whether it moved."""
+        try:
+            origin, name = self._parent(source)
+        except FileNotFoundError:
+            return False
+        try:
+            try:
+                if not stat.S_ISREG(os.stat(name, dir_fd=origin, follow_symlinks=False).st_mode):
+                    return False
+            except FileNotFoundError:
+                return False
+            destination, new = self._parent(target, create=True)
+            try:
+                try:
+                    os.stat(new, dir_fd=destination, follow_symlinks=False)
+                    return False
+                except FileNotFoundError:
+                    pass
+                os.rename(name, new, src_dir_fd=origin, dst_dir_fd=destination)
+                os.fsync(destination)
+            except OSError as exc:
+                raise CraftyError(f"{source} could not be moved in the server folder") from exc
+            finally:
+                os.close(destination)
+        finally:
+            os.close(origin)
+        return True
 
     def mod_jars(self) -> list:
         """The path of every jar directly in mods/, whatever put it there. Folders are never listed."""
