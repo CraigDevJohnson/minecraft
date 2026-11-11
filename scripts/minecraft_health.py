@@ -213,8 +213,9 @@ def pinned_content() -> tuple[list[str], bool]:
     try:
         manifest = json.loads(MANIFEST.read_text())
         worlds = [world["id"] for world in manifest["worlds"]]
-        [bedrock] = [item["content"]["bedrock"] for item in manifest["base"]["managed_files"]
-                     if item["path"] == "plugins/Geyser-Spigot/config.yml"]
+        # Every loader's Geyser configuration selects the same transport (the adapter refuses a manifest otherwise).
+        bedrock = [item["content"]["bedrock"] for loader in manifest["loaders"].values() for item in loader["managed_files"]
+                   if re.fullmatch(r"config/Geyser-(?:Fabric|NeoForge)/config\.yml", item["path"])][0]
         if not worlds or not all(isinstance(world, str) and re.fullmatch(WORLD_ID, world) for world in worlds):
             raise ValueError
         return worlds, bedrock.get("transport") == "both"

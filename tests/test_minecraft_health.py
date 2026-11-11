@@ -362,9 +362,9 @@ class MinecraftHealthTests(unittest.TestCase):
 
     def test_a_raknet_only_server_is_not_asked_for_signaling(self):
         manifest = json.loads((ROOT / "runtime" / "crafty" / "server.json").read_text())
-        bedrock = manifest["base"]["managed_files"][0]["content"]["bedrock"]
-        for key in ("transport", "webrtc-port", "signaling"):
-            bedrock.pop(key, None)
+        for loader in manifest["loaders"].values():
+            for key in ("transport", "webrtc-port", "signaling"):
+                loader["managed_files"][0]["content"]["bedrock"].pop(key, None)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "server.json"
             path.write_text(json.dumps(manifest))

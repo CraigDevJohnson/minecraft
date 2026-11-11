@@ -19,7 +19,7 @@ Open the repository's **Actions** tab (or the GitHub mobile app), choose **Serve
 | `action` | `status`, `start`, `stop`, `restore`, `mods`, `mod-on`, `mod-off`, `allowlist-add`, `allowlist-remove` |
 | `world` | `none`, `survival`, `creative` or `adventure`. With `none`, `status` lists every world and `start`, `stop` and `restore` act on the first world. `mod-on` and `mod-off` need a world. `mods` and the allowlist actions take none. |
 | `nobody_playing` | For `stop`. Unticked, the stop is refused while anyone is online or while the game does not answer and the count is unknown. Ticked, the stop goes ahead (the launcher's `force`). |
-| `mod` | For `mod-on` and `mod-off`: the mod's id as `mods` lists it, such as `fawe`. The switch applies at that world's next start. |
+| `mod` | For `mod-on` and `mod-off`: the mod's id as `mods` lists it, such as `worldedit`. The switch applies at that world's next start. |
 | `archive` | For `restore`: the archive's name in S3, among that world's archives, such as `20261016T031500Z.tar.gz` ([crafty](crafty.md#recover-from-an-archive)). An S3 URI or key that ends in it works too. |
 | `edition`, `player` | For the allowlist actions: `java` with the account name, or `bedrock` with the gamertag. One change covers every world, running or not. |
 
@@ -39,7 +39,7 @@ WORLD=creative task server:start      # without WORLD, the first world
 WORLD=creative task server:stop       # FORCE=1 stops over players or an unanswering game
 WORLD=creative task server:restore ARCHIVE=20261016T031500Z.tar.gz
 task server:mods                      # each world's mods and whether each is on
-WORLD=creative MOD=fawe task server:mod-off   # server:mod-on switches it back; applies at the next start
+WORLD=creative MOD=worldedit task server:mod-off   # server:mod-on switches it back; applies at the next start
 task server:allowlist OP=add EDITION=java PLAYER=Steve
 task server:allowlist OP=remove EDITION=bedrock PLAYER="Sample Player"
 ```

@@ -7,11 +7,12 @@ The Compose-era manifest loader, artifact staging and Compose renderer that live
 from __future__ import annotations
 
 import json
+import re
 
 
 # Geyser 2.12.1 build 1280 removed RakNet alone (configuration version 12): it loads "raknet" as NetherNet alone.
 RAKNET_ALONE_LAST_VERSION = 11
-# What Bedrock clients list when Geyser cannot read the MOTD and player limit from Paper. Geyser's own fallback is
+# What Bedrock clients list when Geyser cannot read the MOTD and player limit from the server. Geyser's own fallback is
 # "Geyser" with 100 slots, which Bedrock showed after the Paper 26.3 upgrade, so from version 12 the family's name and
 # the player limit of every world's server (base.server_properties in runtime/crafty/server.json) take its place.
 FAMILY_MOTD = {"primary-motd": "Family Minecraft", "secondary-motd": "Family Minecraft", "max-players": 10}
@@ -41,6 +42,15 @@ def _approved_geyser(config_version: int, *, dual_transport: bool = False, webrt
 
 
 def _managed_file_bytes(managed: dict) -> bytes:
-    """canonical-json-v1: sorted keys, compact UTF-8 JSON, and one final LF."""
+    """canonical-json-v1: sorted keys, compact UTF-8 JSON, and one final LF. properties-v1, for a mod that reads
+    Java properties: one key=value line per key, sorted, with true and false for booleans."""
+    if managed.get("format") == "properties-v1":
+        lines = []
+        for key, value in sorted(managed["content"].items()):
+            text = ("true" if value else "false") if isinstance(value, bool) else str(value)
+            if not re.fullmatch(r"[a-z0-9.-]+", key) or not re.fullmatch(r"[A-Za-z0-9 ._,-]*", text):
+                raise ValueError("a properties file holds simple key/value pairs")
+            lines.append(f"{key}={text}\n")
+        return "".join(lines).encode()
     return (json.dumps(managed["content"], sort_keys=True, separators=(",", ":"),
                        ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")

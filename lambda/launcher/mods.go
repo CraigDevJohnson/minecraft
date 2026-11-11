@@ -7,7 +7,7 @@ import (
 	"slices"
 )
 
-// A mod is a Paper plugin the manifest pins. Each world lists the mods it may run, each on or off by default,
+// A mod is a Fabric or NeoForge mod the manifest pins. Each world lists the mods it may run, each on or off by default,
 // and a Member with the site's minecraft-admin grant switches them. The parameter holds only the switches that
 // differ from the manifest's defaults, as {"creative":{"fawe":false}}, and a switch applies at that world's next
 // start, whose command names the mods that are on. An id the manifest does not list for a world is never sent,

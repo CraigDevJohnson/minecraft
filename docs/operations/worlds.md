@@ -2,35 +2,38 @@
 
 Each world runs on an EC2 host of its own ([ADR 0009](../adr/0009-one-host-per-world.md)). [`runtime/crafty/server.json`](../../runtime/crafty/server.json) names the worlds and pins everything they run, and OpenTofu makes one host per world from that list. This runbook covers what the file holds, how to add a mod or a world, the first Deploy, the proof run for a world, and the record of the old family host's retirement. Day-to-day starts and stops are in [cloud controls](cloud-controls.md).
 
-Status: the first Deploy ran on 2026-11-11 (Deploy runs 42983546750 and 42985094870), and the same day every world started, passed the Minecraft health check (run 42993895587), took Java and Bedrock joins, idle-stopped with an archive and a parked address, started again, and switched a mod off and on. Which plugins each server loaded has not been read on a host.
+Status: the first Deploy ran on 2026-11-11 (Deploy runs 42983546750 and 42985094870), and the same day every world started, passed the Minecraft health check (run 42993895587), took Java and Bedrock joins, idle-stopped with an archive and a parked address, started again, and switched a mod off and on. Which plugins each server loaded has not been read on a host. That proof was on Paper. The move to Fabric and NeoForge ([below](#the-move-from-paper)) is built and checked offline, with every pin downloaded and checked; no world has started on its loader yet.
 
 ## What the pinned content holds
 
-`server.json` is schema 2 and has three parts.
+`server.json` is schema 3 and has four parts ([ADR 0010](../adr/0010-fabric-and-neoforge-worlds.md)).
 
-- **`base`** is what every world's server holds: Paper, Geyser and Floodgate, Geyser's approved configuration, and the server properties the worlds share (the port, the allowlist switches, `max-players`, and so on).
-- **`mods`** is the catalog. A mod is a Paper plugin with an id, a `name`, a `version`, a jar `path` under `plugins/`, a `url`, a `sha256`, a `summary` and a `bedrock` note for the mods page, and optionally `managed_files`: configuration the adapter writes at each start while the mod is on. A managed file a mod wrote stays in place when the mod is off.
-- **`worlds`** is an ordered list. Its order is the display order, and the first world is the one a request that names no world means. Each world has an `id`, a `name`, `server_properties` of its own (`level-name`, `gamemode`, `motd`), and `mods`: each catalog id the world may run, with `true` or `false` for its default.
+- **`base`** is the server properties the worlds share (the port, the allowlist switches, `max-players`, and so on).
+- **`loaders`** is what each loader's server holds. `fabric` has Fabric's server launcher (the `jar` Crafty launches), Fabric API, and Geyser and Floodgate for Fabric. `neoforge` has NeoForge's starter jar (the `jar` Crafty launches), NeoForge's installer, and Geyser and Floodgate for NeoForge. Each also has Geyser's approved configuration, under that loader's own folder in `config/`.
+- **`mods`** is the catalog. A mod is a Fabric or NeoForge mod with an id, a `name`, a `version`, the `loaders` it runs on, a jar `path` under `mods/`, a `url`, a `sha256`, a `summary` and a `bedrock` note for the mods page, and optionally `managed_files`: configuration the adapter writes at each start while the mod is on. A managed file a mod wrote stays in place when the mod is off.
+- **`worlds`** is an ordered list. Its order is the display order, and the first world is the one a request that names no world means. Each world has an `id`, a `name`, its `loader`, `server_properties` of its own (`level-name`, `gamemode`, `motd`), and `mods`: each catalog id the world may run, with `true` or `false` for its default. A world may list only mods that run on its loader.
 
-| World | Game mode | Mods on by default |
-| --- | --- | --- |
-| `survival` | survival | GriefPrevention, GSit |
-| `creative` | creative, forced | GriefPrevention, FastAsyncWorldEdit |
-| `adventure` | survival | GriefPrevention, AuraSkills, DecentHolograms |
+| World | Loader | Game mode | Mods on by default |
+| --- | --- | --- | --- |
+| `survival` | Fabric | survival | Flan, Sit |
+| `creative` | Fabric | creative, forced | Flan, WorldEdit |
+| `adventure` | NeoForge | survival | Flan |
+
+Sit and WorldEdit are also listed for `adventure`, off by default. Flan has a build for each loader, so the catalog holds it twice: `flan` for the Fabric worlds and `flan-neoforge` for `adventure`.
 
 World and mod ids match `^[a-z][a-z0-9-]{0,31}$`, because they travel unquoted in the commands the Launcher sends. A world may not set `server-port`, `online-mode`, `white-list`, `enforce-whitelist`, `enable-rcon` or `enable-query`. The adapter refuses a manifest that breaks these rules, and the Launcher refuses to start up unless the manifest's world ids are exactly the worlds OpenTofu gave it.
 
-Only a mod a world lists can be switched on for it. A Member with the site's `minecraft-admin` grant switches mods on the site; an operator can use the [Server control workflow](cloud-controls.md#the-server-control-workflow) or `task server:mod-on` and `task server:mod-off`. The Launcher keeps only the switches that differ from the defaults, in `/<resource_prefix>/launcher/mods`, and a switch applies at that world's next start. At that start the adapter downloads and checks any jar it lacks, writes the managed files of the mods that are on, and removes every other jar directly in `plugins/`. A mod's own data folder, `plugins/<Name>/`, stays, so switching a mod back on brings its data back.
+Only a mod a world lists can be switched on for it. A Member with the site's `minecraft-admin` grant switches mods on the site; an operator can use the [Server control workflow](cloud-controls.md#the-server-control-workflow) or `task server:mod-on` and `task server:mod-off`. The Launcher keeps only the switches that differ from the defaults, in `/<resource_prefix>/launcher/mods`, and a switch applies at that world's next start. At that start the adapter downloads and checks any jar it lacks, writes the managed files of the mods that are on, and removes every other jar directly in `mods/`. A mod's own configuration under `config/` and its data in the world folder stay, so switching a mod back on brings its data back.
 
 ## Add a mod
 
 A mod is added by pull request. Nothing reaches a world that is not pinned here.
 
-1. **Check that it fits.** It must be a Paper plugin for the pinned Minecraft version, and it must not need a client-side mod or a Bedrock add-on. Read what its project says about Geyser and Floodgate.
-2. **Find the pin.** Use the exact release file's HTTPS URL, with no query string and no `latest` in the path, on one of the download hosts the adapter allows: `github.com`, `cdn.modrinth.com`, `download.geysermc.org` or `fill-data.papermc.io`. For a mod Modrinth hosts, run the **Pins** workflow by hand with `modrinth_version` set to the version's eight-character id. It prints the file's URL, its name and the SHA-256 of the file as downloaded, after checking the download against the SHA-512 Modrinth publishes. For a GitHub release, download the jar once and take its SHA-256 (`sha256sum <file>`).
-3. **Add it to `mods`** in `server.json` under a new id, with its `name`, `version`, `path` (`plugins/<file>.jar`), `url`, `sha256`, a one-sentence `summary` and a `bedrock` note. Write "Not yet tried on Bedrock." until someone has tried it.
+1. **Check that it fits.** It must be a Fabric mod (for `survival` and `creative`) or a NeoForge mod (for `adventure`) for the pinned Minecraft version, and it must run on the server alone. A mod that adds blocks, items or creatures needs the same mod in each player's Minecraft, which a Bedrock player cannot install: pin one only for a world meant for Java players who have it. Read what its project says about Geyser and Floodgate, and which other mods it requires: each of those is pinned too.
+2. **Find the pin.** Use the exact release file's HTTPS URL, with no query string and no `latest` in the path, on one of the download hosts the adapter allows: `github.com`, `cdn.modrinth.com`, `download.geysermc.org`, `meta.fabricmc.net` or `maven.neoforged.net`. For a mod Modrinth hosts, run the **Pins** workflow by hand with `modrinth_version` set to the version's eight-character id. It prints the file's URL, its name and the SHA-256 of the file as downloaded, after checking the download against the SHA-512 Modrinth publishes. For a GitHub release, download the jar once and take its SHA-256 (`sha256sum <file>`).
+3. **Add it to `mods`** in `server.json` under a new id, with its `name`, `version`, `loaders` (`fabric`, `neoforge` or both), `path` (`mods/<file>.jar`), `url`, `sha256`, a one-sentence `summary` and a `bedrock` note. Write "Not yet tried on Bedrock." until someone has tried it.
 4. **List it under the worlds that may run it**, in each world's `mods`, with `true` to have it on by default or `false` to leave it for a Member to switch on.
-5. **Give it managed files only if it needs them.** A managed file is canonical JSON (`"format": "canonical-json-v1"`), which is also valid YAML, with the SHA-256 of its rendered bytes. The adapter refuses a manifest whose checksum does not match.
+5. **Give it managed files only if it needs them.** A managed file is canonical JSON (`"format": "canonical-json-v1"`), which is also valid YAML, or Java properties (`"format": "properties-v1"`: one `key=value` line per key), with the SHA-256 of its rendered bytes. The adapter refuses a manifest whose checksum does not match.
 6. **Change the `revision`** string, run `.tools/bin/task check`, and open the pull request. `task check` is offline and can only tell that a pin is well formed. The Pins workflow runs on the pull request, downloads every pinned file and fails on a SHA-256 that does not match. Do not merge with it red.
 7. **Deploy** after the merge, with every world stopped ([cloud controls](cloud-controls.md#deploys)). The plan shows the Launcher functions' new package and nothing about a host. The mod reaches each world that lists it at that world's next start.
 
@@ -38,8 +41,8 @@ Updating a mod is the same edit to its `version`, `path`, `url` and `sha256`. Th
 
 ## Add a world
 
-1. **Add it to `worlds`** in `server.json`: an `id`, a `name`, its `server_properties` and its `mods`. Put it where it should appear on the page. The first entry is the default world, so add a new one after it unless the default should change.
-2. **Tell GriefPrevention about it**, if the world lists that mod: add the world's three level names (`<id>`, `<id>_nether`, `<id>_the_end`) to the claims modes in the mod's managed `config.yml`, and update that file's `sha256`.
+1. **Add it to `worlds`** in `server.json`: an `id`, a `name`, its `loader`, its `server_properties` and its `mods`. Put it where it should appear on the page. The first entry is the default world, so add a new one after it unless the default should change.
+2. **List Flan for it**, if it should have land claims: `flan` for a Fabric world, `flan-neoforge` for a NeoForge one.
 3. **Add the id to the two workflow choices**, which GitHub needs written out: the `world` input of `.github/workflows/server-control.yml` and of `.github/workflows/minecraft-health.yml`.
 4. **Run `.tools/bin/task check`.** Several tests name the worlds on purpose (the mocked plan in `infra/tests/infrastructure.tftest.hcl`, `tests/test_minecraft_crafty.py`, `lambda/launcher/worlds_test.go`); update them to the new list.
 5. **Create the world's DNS record** before its first start: an A record named `<id>.<the public hostname>`, DNS only, TTL 60, on `192.0.2.1` ([below](#the-first-deploy)).
@@ -88,13 +91,25 @@ Run it once for each world after the first Deploy, and again for a new world. Us
 2. **Check the address.** `status` shows the world `ready` with `<world>.<the public hostname>` for Java and for Bedrock on port 19132.
 3. **Run the [Minecraft health](unattended-health.md) workflow** with the same world. Expect `healthy`, with `dns_matches_host`, `java_status_ok`, `bedrock_discovery_ok` and `nethernet_signaling_ok` all true.
 4. **Join.** A Java client and a Bedrock client join the address, and an account that is not on the allowlist is refused. The Bedrock player should be one added while the world was stopped: that proves Floodgate admits a player from the entry the start wrote, which no test can show. A Bedrock client accepts the trust prompt once for each world.
-5. **Check the world is the right one.** Players are in the world's game mode. In a [shell on the host](crafty.md#open-a-shell-on-the-host), `sudo /usr/local/sbin/minecraft-instance console <world> 'plugins'` lists Geyser, Floodgate and the world's default mods, and no other.
+5. **Check the world is the right one.** Players are in the world's game mode. In a [shell on the host](crafty.md#open-a-shell-on-the-host), `sudo ls /srv/minecraft/crafty/servers/*/mods` lists Geyser, Floodgate, the loader's own jars and the world's default mods, and no other, and the top of the server's log (`logs/latest.log` beside `mods`) names each as loaded.
 6. **Stop it** with nobody playing. Expect `stopped`, an archive and its `.sha256` under `instances/<world>/crafty/` in the backup bucket, and the hostname back on `192.0.2.1`.
 7. **Start it again.** What was built in step 4 is still there.
-8. **Switch a mod** off with `mod-off`, stop and start the world, and check with `plugins` that it is gone; then switch it back on the same way.
+8. **Switch a mod** off with `mod-off`, stop and start the world, and check in `mods` that it is gone; then switch it back on the same way.
 9. **Leave it empty** for the idle time once, and see the idle stop take it to `stopped` with a new archive.
 
 Restoring an older archive by hand needs a world host that has finished its first start; on a rebuilt host, start the world once (it restores the newest archive), stop it, then restore. The restore on a rebuilt host is proven the first time a Deploy replaces the world hosts, which any change to the first-boot script causes: after that apply, start the world and check that it is the world from its last stop, not a fresh one.
+
+## The move from Paper
+
+The worlds ran Paper until [ADR 0010](../adr/0010-fabric-and-neoforge-worlds.md). The move needs one Deploy, with every world stopped, and then one start of each world. Its plan shows the Launcher functions' new package and nothing about a host.
+
+1. **The last stop on Paper is the way back.** Each world's newest archive holds it as Paper left it. Note each world's newest key under `instances/<world>/crafty/` before the first start.
+2. **Start each world.** The adapter adds the loader's jars and mods, changes Crafty's launch command to the loader's jar, and leaves the world, player data and everything of Paper's in place. The first launch downloads Minecraft's server and the loader's libraries, and on `adventure` runs NeoForge's installer, so it takes a few minutes longer. If it passes the start deadline, run `start` again.
+3. **Run the [proof run](#the-proof-run-for-a-world)** for each world: the health workflow, a Java and a Bedrock join, a stop and a start. A Bedrock device asks once more whether to trust each world, because Geyser keeps a new NetherNet identity under its loader's folder.
+4. **Check the world is the one from before**: what was built is still there, in the Nether and the End as well as the Overworld.
+5. **Claims start empty.** GriefPrevention's claims do not carry over to Flan, which claims with a golden hoe; players claim again.
+
+To go back, revert the pull request, Deploy, and [restore](crafty.md#recover-from-an-archive) each world's archive from step 1.
 
 ## The family host's retirement
 

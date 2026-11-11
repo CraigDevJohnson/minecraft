@@ -51,22 +51,24 @@ MANIFEST = Path(__file__).resolve().parent / "server.json"
 COMPOSE = Path("/opt/minecraft-crafty/compose.yaml")
 # What a world host's user data writes last, once Docker, the folders and minecraft-crafty.service are in place.
 BOOTSTRAPPED = Path("/var/lib/minecraft/bootstrapped")
-GEYSER_CONFIG = "plugins/Geyser-Spigot/config.yml"
+# Geyser's configuration in the server folder, under the name its Fabric or NeoForge build keeps it.
+GEYSER_CONFIG = re.compile(r"config/Geyser-(?:Fabric|NeoForge)/config\.yml")
 # Geyser 2.11 reads config version 8; 2.12, the first with Bedrock 26.60, adds keys the family server leaves at their
 # defaults and would rewrite an older file, so a manifest pins the version its Geyser build writes: 11 until 2.12.1
 # build 1280, 12 from it.
 GEYSER_CONFIG_VERSIONS = (8, 11, 12)
 # NetherNet's WebRTC candidates carry the host's public address, which changes with every EC2 start.
 ADVERTISE = re.compile(r" -DgeyserAdvertiseAddresses=\S*")
+LAUNCHED = re.compile(r" -jar \S+")
 INSTANCE_ID = re.compile(r"[a-z][a-z0-9-]{0,31}")
 UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
-JAR_PATH = re.compile(r"(?:plugins/)?[A-Za-z0-9._-]+\.jar")
+JAR_PATH = re.compile(r"(?:mods/)?[A-Za-z0-9._-]+\.jar")
 JAVA_NAME = re.compile(r"[A-Za-z0-9_]{3,16}")
 # A Crafty session or API token: it goes into an Authorization header, so one printable word.
 TOKEN = re.compile(r"[\x21-\x7e]{16,4096}")
 CONTAINER_SERVERS = "/crafty/servers/"
-ARTIFACT_HOSTS = {"fill-data.papermc.io", "download.geysermc.org", "github.com", "cdn.modrinth.com"}
+ARTIFACT_HOSTS = {"meta.fabricmc.net", "maven.neoforged.net", "download.geysermc.org", "github.com", "cdn.modrinth.com"}
 # What every world takes from the base: the port Crafty publishes, and who may join and how the server is reached.
 SHARED_PROPERTIES = {"server-port", "online-mode", "white-list", "enforce-whitelist", "enable-rcon", "enable-query"}
 # The most memory a server Crafty creates may use, of an m7g.large host's 8 GiB.
@@ -82,12 +84,13 @@ LOG_LIMIT = 1024 * 1024
 CONSOLE_WAIT = 3
 CONSOLE_LOG_LIMIT = 64 * 1024
 CONSOLE_LOG_LINES = 200
-# The game's console answers to `whitelist reload` and `whitelist list`, whole lines as Paper's logs/latest.log
-# records them ("[12:00:00] [Server thread/INFO]: Reloaded the whitelist"). Paper puts a logger's name before the
-# text only for loggers outside the game's own, which these answers do not come from; one is accepted anyway, but
-# only a dotted Java name. Chat ("<Name> text") and /say ("[Name] text") put their sender before the text, and no
-# player name holds a dot after a letter, so a player cannot write either line.
-LOG_LINE = r"\[[^\]]*\] \[[^\]]*\]: (?:\[(?:[a-z][a-z0-9_]*\.)+[A-Za-z0-9_$]+\] )?"
+# The game's console answers to `whitelist reload` and `whitelist list`, whole lines as logs/latest.log records
+# them. Fabric writes the game's own line ("[12:00:00] [Server thread/INFO]: Reloaded the whitelist"); NeoForge
+# puts the logger's name in a third bracket before the colon ("[11Nov2026 12:00:00.000] [Server thread/INFO]
+# [net.minecraft.server.MinecraftServer/]: Reloaded the whitelist"). A logger's name after the colon is accepted
+# too, but only a dotted Java name. Chat ("<Name> text") and /say ("[Name] text") put their sender after the
+# colon and before the text, and no player name holds a dot after a letter, so a player cannot write either line.
+LOG_LINE = r"\[[^\]]*\] \[[^\]]*\](?: \[[A-Za-z0-9_.$/]*\])?: (?:\[(?:[a-z][a-z0-9_]*\.)+[A-Za-z0-9_$]+\] )?"
 RELOADED = re.compile(LOG_LINE + r"Reloaded the whitelist")
 LISTED = re.compile(LOG_LINE + r"There are (?:no whitelisted players|\d+ whitelisted player\(s\): (.*))")
 
@@ -485,7 +488,7 @@ class Adapter:
         if self.created(instance):
             # A rerun after a slow import resumes the wait; a finished server is never imported twice.
             server = self.server(instance)
-            if (self.server_dir(server) / "paper.jar").is_file() and not self._importing(server):
+            if (self.server_dir(server) / self.manifest["jar"]).is_file() and not self._importing(server):
                 raise CraftyError(f"Crafty already has a server named {settings['server_name']}")
             return self._await_import(instance, server)
         created = self.api.request("POST", "/api/v2/servers", {
@@ -493,7 +496,7 @@ class Adapter:
             "minecraft_java_monitoring_data": {"host": "127.0.0.1", "port": settings["java_port"]},
             "create_type": "minecraft_java",
             "minecraft_java_create_data": {"create_type": "import_server", "import_server_create_data": {
-                "archive_name": archive_name, "archive_internal_path": "", "jarfile": "paper.jar",
+                "archive_name": archive_name, "archive_internal_path": "", "jarfile": self.manifest["jar"],
                 "mem_min": 1, "mem_max": max_memory_gb, "server_properties_port": settings["java_port"]}},
         }).get("data")
         server_id = created.get("new_server_id") if isinstance(created, dict) else None
@@ -508,9 +511,9 @@ class Adapter:
     def _await_import(self, instance: str, server: dict) -> dict:
         # Crafty unpacks the archive in a background thread after the request returns. The archive
         # must stay in place until then, so wait until Crafty clears its importing flag and the jar is there.
-        jar = self.server_dir(server) / "paper.jar"
+        jar = self.server_dir(server) / self.manifest["jar"]
         self.wait(lambda: not self._importing(server) and jar.is_file(), self.timeouts["start"],
-                  "Crafty has not finished unpacking the archive; rerun import-server to keep waiting, "
+                  "Crafty has not finished unpacking the archive; start the world again to keep waiting, "
                   "or delete the server in Crafty if its import log shows a failure")
         return {"instance": instance, "server_id": server["server_id"]}
 
@@ -1004,21 +1007,23 @@ class Adapter:
 
     def apply_files(self, instance: str, server: dict) -> None:
         """Replace each jar and managed file that differs from its pin, and remove every other jar directly in
-        plugins/: a mod that is off, or a jar a restored archive or an earlier manifest left, since a rebuilt host
-        keeps no record of earlier pins. A plugin's own data folder stays, and so does the file a mod that is now
-        off managed. Downloads finish before the server folder changes."""
+        mods/: a mod that is off, or a jar a restored archive or an earlier manifest left, since a rebuilt host
+        keeps no record of earlier pins. A mod's own data and configuration stay, and so does the file a mod that
+        is now off managed. Downloads finish before the server folder changes."""
         artifacts = self.manifest["artifacts"]
         wanted = {artifact["path"] for artifact in artifacts}
         with _ServerFolder(self.server_dir(server)) as folder:
-            # Paper first, so a later failure never leaves a new Paper for the next start to find unarchived.
+            # The loader's own jars sit beside mods/, and go first, so a later failure never leaves a new loader for
+            # the next start to find unarchived.
             changed = sorted((artifact for artifact in artifacts if folder.digest(artifact["path"]) != artifact["sha256"]),
-                             key=lambda artifact: artifact["name"] != "paper")
+                             key=lambda artifact: "/" in artifact["path"])
+            loader = [artifact for artifact in changed if "/" not in artifact["path"]]
             managed = [item for item in self.manifest.get("managed_files", []) if folder.digest(item["path"]) != item["sha256"]]
-            stale = [path for path in folder.plugin_jars() if path not in wanted]
+            stale = [path for path in folder.mod_jars() if path not in wanted]
             if changed or managed or stale:
-                # A new Paper upgrades the world on its first start, so the last archive must hold the world as it is.
-                if any(artifact["name"] == "paper" for artifact in changed) and not self.unchanged(instance):
-                    raise CraftyError("a new Paper needs an archive of the world as it is; stop the server once, then start it")
+                # A new loader may upgrade the world on its first start, so the last archive must hold the world as it is.
+                if loader and not self.unchanged(instance):
+                    raise CraftyError("a new loader needs an archive of the world as it is; stop the server once, then start it")
                 staging = self.root / "crafty" / "staging"
                 staging.mkdir(mode=0o700, parents=True, exist_ok=True)
                 work = Path(tempfile.mkdtemp(dir=staging, prefix="content-"))
@@ -1036,6 +1041,9 @@ class Adapter:
                         folder.write(item["path"], [_managed_file_bytes(item)], item["sha256"])
                     for path in stale:
                         folder.remove(path)
+                    if any(artifact["path"].endswith("installer.jar") for artifact in loader):
+                        # NeoForge's starter runs the installer beside it only when it finds no run script.
+                        folder.remove("run.sh")
                 finally:
                     shutil.rmtree(work, ignore_errors=True)
 
@@ -1084,7 +1092,7 @@ class Adapter:
         current = current.get("execution_command") if isinstance(current, dict) else None
         if not isinstance(current, str):
             raise CraftyError("Crafty did not report the server's launch command")
-        wanted = launch_command(current, address)
+        wanted = launch_command(current, address, self.manifest["jar"])
         if wanted == current:
             return
         self.api.request("PATCH", path, {"execution_command": wanted})
@@ -1373,15 +1381,15 @@ class _ServerFolder:
                 digest.update(chunk)
         return digest.hexdigest()
 
-    def plugin_jars(self) -> list:
-        """The path of every jar directly in plugins/, whatever put it there. Folders are never listed."""
+    def mod_jars(self) -> list:
+        """The path of every jar directly in mods/, whatever put it there. Folders are never listed."""
         try:
-            folder, _ = self._parent("plugins/jar")
+            folder, _ = self._parent("mods/jar")
         except FileNotFoundError:
             return []
         try:
             with os.scandir(folder) as entries:
-                return sorted(f"plugins/{entry.name}" for entry in entries
+                return sorted(f"mods/{entry.name}" for entry in entries
                               if entry.name.endswith(".jar") and not entry.is_dir(follow_symlinks=False))
         finally:
             os.close(folder)
@@ -1532,18 +1540,20 @@ def sync_folder(path: Path) -> None:
 # First setup: stage the reviewed server files for Crafty's "import from folder" ------------
 
 def load_manifest(path: Path) -> dict:
-    """The pinned server content, schema 2: the base every world's server holds, the catalog of mods, and the worlds
-    in display order, each with its own server properties and the mods that may be switched on it."""
+    """The pinned server content, schema 3: the server properties every world shares, what each loader's server
+    holds, the catalog of mods, and the worlds in display order, each with its loader, its own server properties
+    and the mods that may be switched on it."""
     try:
         manifest = json.loads(Path(path).read_text())
     except (OSError, ValueError) as exc:
         raise CraftyError("cannot read the pinned server content") from exc
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 2 or not re.fullmatch(
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 3 or not re.fullmatch(
             r"registry\.gitlab\.com/crafty-controller/crafty-4@sha256:[0-9a-f]{64}", manifest.get("crafty", {}).get("image", "")):
-        raise CraftyError("manifest must be schema 2 and pin the Crafty image by digest")
-    base, mods, worlds = manifest.get("base"), manifest.get("mods"), manifest.get("worlds")
-    if not isinstance(base, dict) or not isinstance(mods, dict) or not isinstance(worlds, list) or not worlds:
-        raise CraftyError("manifest must hold the base content, the mods and at least one world")
+        raise CraftyError("manifest must be schema 3 and pin the Crafty image by digest")
+    base, loaders, mods, worlds = manifest.get("base"), manifest.get("loaders"), manifest.get("mods"), manifest.get("worlds")
+    if (not isinstance(base, dict) or not isinstance(loaders, dict) or not loaders or not isinstance(mods, dict)
+            or not isinstance(worlds, list) or not worlds):
+        raise CraftyError("manifest must hold the base content, the loaders, the mods and at least one world")
     names, paths = set(), set()
 
     def pin(name: str, artifact: dict) -> None:
@@ -1557,20 +1567,32 @@ def load_manifest(path: Path) -> dict:
         names.add(name)
         paths.add(path)
 
-    for artifact in base.get("artifacts", []):
-        pin(artifact.get("name", ""), artifact)
-    if not {"paper", "geyser", "floodgate"} <= names:
-        raise CraftyError("manifest must include Paper, Geyser and Floodgate")
+    for loader in loaders.values():
+        artifacts = loader.get("artifacts") if isinstance(loader, dict) else None
+        if not isinstance(artifacts, list):
+            raise CraftyError("every loader needs its artifacts")
+        for artifact in artifacts:
+            pin(artifact.get("name", ""), artifact)
+        # The jar Crafty launches, then Geyser and Floodgate for Bedrock players.
+        held = {artifact["name"].split("-")[0] for artifact in artifacts}
+        if loader.get("jar") not in {artifact["path"] for artifact in artifacts} or "/" in loader["jar"] or not {"geyser", "floodgate"} <= held:
+            raise CraftyError("every loader must include the jar it launches, Geyser and Floodgate")
     for name, mod in mods.items():
         # A mod's id names its jar among the artifacts of a world it is on for (world_content).
         pin(name, mod)
-        if not INSTANCE_ID.fullmatch(name) or not mod["path"].startswith("plugins/"):
-            raise CraftyError("every mod needs an id of the kind a world has and a jar in plugins/")
-    for managed in [*base.get("managed_files", []), *(item for mod in mods.values() for item in mod.get("managed_files", []))]:
+        if (not INSTANCE_ID.fullmatch(name) or not mod["path"].startswith("mods/")
+                or not isinstance(mod.get("loaders"), list) or not mod["loaders"] or not set(mod["loaders"]) <= set(loaders)):
+            raise CraftyError("every mod needs an id of the kind a world has, a jar in mods/ and the loaders it runs on")
+    for managed in [*(item for loader in loaders.values() for item in loader.get("managed_files", [])),
+                    *(item for mod in mods.values() for item in mod.get("managed_files", []))]:
         # Written under sudo, so only plain relative paths inside the server folder are accepted.
         if not re.fullmatch(r"(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*", str(managed.get("path", ""))):
             raise CraftyError("managed file paths must be plain relative paths")
-        if hashlib.sha256(_managed_file_bytes(managed)).hexdigest() != managed.get("sha256"):
+        try:
+            rendered = _managed_file_bytes(managed)
+        except ValueError as exc:
+            raise CraftyError(f"managed configuration cannot be written: {exc}") from exc
+        if hashlib.sha256(rendered).hexdigest() != managed.get("sha256"):
             raise CraftyError("managed configuration checksum mismatch")
     if not isinstance(base.get("server_properties"), dict) or type(base["server_properties"].get("server-port")) is not int:
         raise CraftyError("manifest must include server properties with the Java port")
@@ -1580,18 +1602,23 @@ def load_manifest(path: Path) -> dict:
         if (not INSTANCE_ID.fullmatch(str(world.get("id", ""))) or world["id"] in ids
                 or not isinstance(world.get("name"), str) or not world["name"]
                 or not isinstance(properties, dict) or SHARED_PROPERTIES & set(properties)
+                or world.get("loader") not in loaders
                 or not isinstance(switches, dict) or not set(switches) <= set(mods)
+                or any(world["loader"] not in mods[name]["loaders"] for name in switches)
                 or any(type(default) is not bool for default in switches.values())):
-            raise CraftyError("every world needs a unique id, a name, server properties of its own and mods from the catalog")
+            raise CraftyError("every world needs a unique id, a name, a loader, server properties of its own and mods "
+                              "from the catalog that run on its loader")
         ids.add(world["id"])
-    bedrock_transport(base)
+    if len({bedrock_transport(loader) for loader in loaders.values()}) != 1:
+        raise CraftyError("every loader's Geyser configuration must select the same Bedrock transport")
     return manifest
 
 
 def world_content(manifest: dict, world: str, mods: list | None = None) -> dict:
-    """What one world's server holds with mods switched on, as one server's content: the base's artifacts and
-    managed files with each mod's jar and files, and the base's server properties under the world's own. Without
-    mods, the world's defaults are on. A mod the manifest does not list for the world is refused."""
+    """What one world's server holds with mods switched on, as one server's content: its loader's artifacts and
+    managed files with each mod's jar and files, the jar Crafty launches, and the base's server properties under
+    the world's own. Without mods, the world's defaults are on. A mod the manifest does not list for the world is
+    refused."""
     entry = next((item for item in manifest["worlds"] if item["id"] == world), None)
     if entry is None:
         raise CraftyError("the pinned server content has no such world")
@@ -1599,16 +1626,16 @@ def world_content(manifest: dict, world: str, mods: list | None = None) -> dict:
         mods = [name for name, default in entry["mods"].items() if default]
     if not set(mods) <= set(entry["mods"]):
         raise CraftyError("the pinned server content lists no such mod for this world")
-    base, on = manifest["base"], [manifest["mods"][name] | {"name": name} for name in sorted(set(mods))]
-    return {"crafty": manifest["crafty"], "artifacts": base["artifacts"] + on,
-            "managed_files": base.get("managed_files", []) + [item for mod in on for item in mod.get("managed_files", [])],
-            "server_properties": base["server_properties"] | entry["server_properties"]}
+    loader, on = manifest["loaders"][entry["loader"]], [manifest["mods"][name] | {"name": name} for name in sorted(set(mods))]
+    return {"crafty": manifest["crafty"], "jar": loader["jar"], "artifacts": loader["artifacts"] + on,
+            "managed_files": loader.get("managed_files", []) + [item for mod in on for item in mod.get("managed_files", [])],
+            "server_properties": manifest["base"]["server_properties"] | entry["server_properties"]}
 
 
 def bedrock_transport(manifest: dict) -> str:
     """The Bedrock transport the manifest's Geyser configuration selects, which must be one Craig approved (#30):
     RakNet alone, or both, which adds NetherNet's built-in signaling on TCP 19132 and WebRTC on UDP 19133."""
-    configs = [item.get("content") for item in manifest.get("managed_files", []) if item.get("path") == GEYSER_CONFIG]
+    configs = [item.get("content") for item in manifest.get("managed_files", []) if GEYSER_CONFIG.fullmatch(str(item.get("path")))]
     for version in GEYSER_CONFIG_VERSIONS:
         if version <= RAKNET_ALONE_LAST_VERSION and configs == [_approved_geyser(version)]:
             return "raknet"
@@ -1634,9 +1661,15 @@ def render_compose(manifest: dict, crafty_root: Path) -> bytes:
     return ("\n".join(lines) + "\n").encode()
 
 
-def launch_command(current: str, address: str | None) -> str:
-    """Crafty's launch command with the NetherNet address flag for address before -jar, or with no flag for None."""
+def launch_command(current: str, address: str | None, jar: str | None = None) -> str:
+    """Crafty's launch command with the NetherNet address flag for address before -jar, or with no flag for None,
+    launching jar when one is named: a server Crafty imported under an earlier loader keeps that loader's jar in
+    its command until this replaces it."""
     command = ADVERTISE.sub("", current)
+    if jar is not None:
+        if len(LAUNCHED.findall(command)) != 1:
+            raise CraftyError("the server's launch command names no single jar to launch")
+        command = LAUNCHED.sub(f" -jar {jar}", command)
     if address is None:
         return command
     try:
@@ -1689,7 +1722,7 @@ def stage_import(manifest: dict, destination: Path, *, fetch=download, archive: 
     partial = Path(tempfile.mkdtemp(prefix=f".{destination.name}.partial-", dir=destination.parent))
     created = None
     try:
-        (partial / "plugins").mkdir()
+        (partial / "mods").mkdir()
         for artifact in manifest["artifacts"]:
             fetch(artifact["url"], artifact["sha256"], partial / artifact["path"])
         for managed in manifest.get("managed_files", []):
@@ -1749,10 +1782,6 @@ def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
     compose = commands.add_parser("render-compose", help="print the Compose file the pinned server content calls for")
     compose.add_argument("--manifest", type=Path, required=True)
     compose.add_argument("--data-root", type=Path, required=True)
-    create = commands.add_parser("import-server", help="create the Crafty server from a staged archive in import/upload")
-    create.add_argument("instance")
-    create.add_argument("--archive-name", required=True)
-    create.add_argument("--max-memory-gb", type=int, default=MAX_MEMORY_GB)
     restore = commands.add_parser("restore", help="replace the stopped server folder with a verified archive from S3")
     restore.add_argument("instance")
     restore.add_argument("--key", required=True)
@@ -1773,7 +1802,7 @@ def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
             return 0
         if args.action == "render-compose":
             pinned = load_manifest(args.manifest)
-            sys.stdout.buffer.write(render_compose(pinned | pinned["base"], args.data_root / "crafty"))  # the same for every world
+            sys.stdout.buffer.write(render_compose(world_content(pinned, pinned["worlds"][0]["id"]), args.data_root / "crafty"))  # the same for every world
             return 0
         config = load_config(args.config)
         if getattr(args, "instance", None) is not None and args.instance not in config["instances"]:
@@ -1804,8 +1833,6 @@ def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
             output = adapter.console_command(args.instance, args.line)
         elif args.action == "setup-api-key":
             output = adapter.setup_api_key()
-        elif args.action == "import-server":
-            output = adapter.import_server(args.instance, args.archive_name, args.max_memory_gb)
         elif args.action == "host-drain":
             output = adapter.host_drain()
         else:

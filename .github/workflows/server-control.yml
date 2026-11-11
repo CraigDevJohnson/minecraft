@@ -32,7 +32,7 @@ on:
         type: string
         default: ''
       mod:
-        description: For mod-on and mod-off, the mod's id as the mods action lists it, such as fawe
+        description: For mod-on and mod-off, the mod's id as the mods action lists it, such as worldedit
         type: string
         default: ''
       edition:
