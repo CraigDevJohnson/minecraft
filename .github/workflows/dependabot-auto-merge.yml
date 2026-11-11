@@ -3,6 +3,9 @@
 # updates, minor updates of a 0.x dependency (which can break), updates whose
 # type Dependabot does not report, and any update while main has no
 # required status checks (auto-merge would then not wait for CI).
+# GitHub Actions updates are always held: they skip the auto-merge job
+# entirely, so a new action release never runs here with write access before
+# Craig has read it.
 name: Dependabot auto-merge
 
 on:
@@ -18,7 +21,7 @@ concurrency:
 jobs:
   auto-merge:
     name: Dependabot auto-merge
-    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'CraigDevJohnson/minecraft'
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'CraigDevJohnson/minecraft' && !startsWith(github.head_ref, 'dependabot/github_actions/')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -80,3 +83,19 @@ jobs:
 
           echo "Turning on auto-merge (${MERGE_METHOD}) for a ${UPDATE_TYPE#version-update:} update."
           gh pr merge "$PR_URL" --auto "--${MERGE_METHOD}"
+
+  hold-actions:
+    name: Hold GitHub Actions update
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'CraigDevJohnson/minecraft' && startsWith(github.head_ref, 'dependabot/github_actions/') && github.event.action == 'opened'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write # comment when holding
+    steps:
+      - name: Note the hold
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_URL" --body "Held for review: GitHub Actions updates always wait for a person, because they run in jobs that hold credentials. Auto-merge is not turned on for this pull request."
