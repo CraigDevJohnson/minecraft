@@ -21,7 +21,7 @@ UPDATE = ("aws_iam_role.launcher", {"actions": ["update"], "before": ROLE,
                                     "after": {"name": "launcher", "tags": {"owner": "minecraft"}}, "after_unknown": {}})
 DELETE = ("aws_lambda_permission.site", {"actions": ["delete"], "before": {"id": "AllowSite", "action": "lambda:InvokeFunctionUrl"},
                                         "after": None, "after_unknown": {}})
-HOST = ("aws_instance.host", {"actions": ["no-op"], "before": {"instance_state": "running"}, "after": {"instance_state": "running"}})
+HOST = ('aws_instance.world["survival"]', {"actions": ["no-op"], "before": {"instance_state": "running"}, "after": {"instance_state": "running"}})
 
 
 class PlanDigestTests(unittest.TestCase):
@@ -51,7 +51,7 @@ class PlanDigestTests(unittest.TestCase):
         # Starting or stopping the server between the plan run and the apply run changes only what the plan
         # starts from: unchanged resources and the values before each change.
         base = digest(plan(UPDATE, HOST))
-        stopped = ("aws_instance.host", {"actions": ["no-op"], "before": {"instance_state": "stopped"}, "after": {"instance_state": "stopped"}})
+        stopped = ('aws_instance.world["survival"]', {"actions": ["no-op"], "before": {"instance_state": "stopped"}, "after": {"instance_state": "stopped"}})
         drifted = ("aws_iam_role.launcher", {**UPDATE[1], "before": {**ROLE, "tags": {"edited": "by hand"},
                                                                       "role_last_used": [{"last_used_date": "2026-10-12T10:00:00Z"}]}})
         self.assertEqual(base, digest(plan(UPDATE, stopped)))

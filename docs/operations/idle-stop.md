@@ -53,7 +53,7 @@ That takes the defaults for every world: 30 idle minutes, the launcher's token S
 
 The token SecureString already exists for the launcher; never put the token in deployment inputs, environment variables, source, or user data. Before the first plan, an administrator puts the operator role's updated `launcher` inline policy from [`launcher-operator.json.example`](operator-role/launcher-operator.json.example), the same `put-role-policy` as in the [launcher runbook](launcher.md): it adds the EventBridge schedule rule and its target to what the operator may manage.
 
-Plan and apply through the [Deploy workflow](cloud-controls.md#deploys). Expect creates for the function and its role and inline policy, each world's state parameter, the log group, the schedule rule, one target per world and the permission, the SNS topic and email subscription, and the alarm. Each launcher also changes in place: its inline policy gains `ReadIdleStopProgress` and its `WORLDS` setting names each world's idle-stop state parameter. Any other change, and any change to a host, the family host's data volume, buckets, or network, is a stop condition. A deployment from before the worlds keeps its old `/<resource_prefix>/idle-stop/state` parameter, which the function no longer reads, until the family host is retired. After the approved apply, confirm the SNS subscription email so the alarm can reach you.
+Plan and apply through the [Deploy workflow](cloud-controls.md#deploys). Expect creates for the function and its role and inline policy, each world's state parameter, the log group, the schedule rule, one target per world and the permission, the SNS topic and email subscription, and the alarm. Each launcher also changes in place: its inline policy gains `ReadIdleStopProgress` and its `WORLDS` setting names each world's idle-stop state parameter. Any other change, and any change to a host, buckets, or network, is a stop condition. A deployment from before the worlds kept its old `/<resource_prefix>/idle-stop/state` parameter, which the function no longer read; the [family host's retirement](worlds.md#the-family-hosts-retirement) removes it. After the approved apply, confirm the SNS subscription email so the alarm can reach you.
 
 ## Permissions
 
@@ -67,7 +67,7 @@ The function role allows:
 - Writing to its own log group.
 - `ssm:GetParameter` on the launcher's Cloudflare token SecureString, and `kms:Decrypt` on the AWS managed `aws/ssm` key through SSM only.
 
-It cannot start instances, run commands on other hosts, including the family host, or read backups.
+It cannot start instances, run commands on any host but a world's, or read backups.
 
 The operator creates the `<resource_prefix>-idle-stop` role under the launcher's permissions boundary, which already allows everything above for the project's hosts, parameters and logs, so no boundary of its own is needed. The operator role's `launcher` policy covers the function, its role, logs, alarm, SNS topic and state parameter; the version in [`launcher-operator.json.example`](operator-role/launcher-operator.json.example) adds the schedule rule and its target. Nothing is created by local verification.
 

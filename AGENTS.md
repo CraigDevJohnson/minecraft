@@ -2,7 +2,7 @@
 
 ## Working here
 
-- The repository runs one EC2 host per world (`survival`, `creative`, `adventure`), each with its own mods; `runtime/crafty/server.json` names the worlds and pins everything they run ([ADR 0009](docs/adr/0009-one-host-per-world.md)). The older family host is still declared: leave `aws_instance.host`, its data disk, `scripts/host-bootstrap.sh.tftpl` and `scripts/minecraft_storage.py` alone until its retirement pull request.
+- The repository runs one EC2 host per world (`survival`, `creative`, `adventure`), each with its own mods; `runtime/crafty/server.json` names the worlds and pins everything they run ([ADR 0009](docs/adr/0009-one-host-per-world.md)).
 - Read `README.md`, `CONTEXT.md` for the domain terms, and the ADRs in `docs/adr/` before changing behaviour.
 - Install the pinned tools with `python3 scripts/bootstrap_tools.py`, then run `.tools/bin/task check` before every push. `.tools/bin/task fmt` fixes shell, OpenTofu and Go formatting. None of these needs AWS credentials.
 - Work on a feature branch and open a pull request with the template. `main` takes squash merges only.

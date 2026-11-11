@@ -204,7 +204,7 @@ class MinecraftHealthTests(unittest.TestCase):
                     "Name=tag:Purpose,Values=replaceable-host", "Name=tag:World,Values=survival",
                     "Name=tag:Name,Values=minecraft-family-survival"):
             self.assertIn(tag, inventory[inventory.index("--filters"):inventory.index("--max-items")])
-        # The old family host has the project's tags and no world, so no read may name it.
+        # A host without a World tag, such as the retired family host was, is never read as a world.
         self.assertNotIn("Name=tag:Name,Values=minecraft-family-host", inventory)
         self.assertEqual(inventory[inventory.index("--max-items") + 1], "2")
 

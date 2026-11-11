@@ -21,4 +21,4 @@ Consequences:
 - Clients can reach the old address briefly after a start. Nothing may pin the raw address; use the hostname everywhere.
 - The recovery rehearsal deployment has no hostname, so it can never take over the family record.
 
-This conflicts with no earlier ADR; [ADR 0001](0001-independent-server-instances.md) is unaffected. Operating details are in [host commands](../operations/host-commands.md#public-hostname).
+This conflicts with no earlier ADR; [ADR 0001](0001-independent-server-instances.md) is unaffected. Operating details were in the host commands runbook, removed with the family host by its retirement pull request; each world's record is now kept by the [launcher](../operations/launcher.md).

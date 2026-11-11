@@ -153,7 +153,7 @@ Later changes to these roles are the same commands again: a new boundary version
 
 ## Hands-on work on the host
 
-Nothing runs on a workstation, and nothing forwards a port to it. Restoring a world from an archive is the workflow's `restore` ([crafty](crafty.md#recover-from-an-archive)). A new or replaced world host sets Crafty up itself at its world's first start, so nothing is installed by hand. The Crafty console and a hands-on emergency use a Session Manager shell opened from the AWS console in a browser ([crafty](crafty.md#open-a-shell-on-the-host)): the adapter's `console` action sends a console command through Crafty's loopback API. The [host commands](host-commands.md) and `scripts/minecraft_host.py` know only the family host and go with it.
+Nothing runs on a workstation, and nothing forwards a port to it. Restoring a world from an archive is the workflow's `restore` ([crafty](crafty.md#recover-from-an-archive)). A new or replaced world host sets Crafty up itself at its world's first start, so nothing is installed by hand. The Crafty console and a hands-on emergency use a Session Manager shell opened from the AWS console in a browser ([crafty](crafty.md#open-a-shell-on-the-host)): the adapter's `console` action sends a console command through Crafty's loopback API. The host commands and `scripts/minecraft_host.py`, which knew only the family host, were removed with it.
 
 ## Evidence limits
 

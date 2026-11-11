@@ -1,10 +1,5 @@
 mock_provider "aws" {
   override_resource {
-    target = aws_ebs_volume.data
-    values = { id = "vol-0123456789abcdef0" }
-  }
-
-  override_resource {
     target = aws_iam_role.idle_stop
     values = { arn = "arn:aws:iam::111122223333:role/minecraft-test-idle-stop" }
   }
@@ -44,7 +39,6 @@ run "additional_creative_listener_and_backup_namespace" {
   command = plan
   variables {
     bedrock_transport = "both"
-    instance_ids      = ["survival", "creative"]
     additional_game_ingress = {
       creative_java    = { protocol = "tcp", port = 25566 }
       creative_bedrock = { protocol = "udp", port = 19134 }
@@ -56,7 +50,7 @@ run "additional_creative_listener_and_backup_namespace" {
   }
   assert {
     condition     = toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[0].Condition.StringLike["s3:prefix"]) == toset(["instances/survival/*", "instances/creative/*", "instances/adventure/*"])
-    error_message = "Each configured instance and each world must have its own authorized backup namespace."
+    error_message = "Each world must have its own authorized backup namespace."
   }
 }
 
@@ -79,7 +73,6 @@ run "raknet_keeps_independent_creative_listeners" {
   command = plan
   variables {
     bedrock_transport = "raknet"
-    instance_ids      = ["survival", "creative"]
     additional_game_ingress = {
       creative_java    = { protocol = "tcp", port = 25566 }
       creative_bedrock = { protocol = "udp", port = 19134 }
@@ -162,43 +155,11 @@ variables {
   availability_zone             = "us-west-2a"
   ami_id                        = "ami-0123456789abcdef0"
   ami_owner_account_id          = "099720109477"
-  data_filesystem_uuid          = "12345678-1234-4234-8234-123456789abc"
-  data_volume_size_gib          = 5
   backup_bucket_name            = "minecraft-test-example-backups"
   budget_notification_email     = "operator@example.invalid"
   host_permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-host-boundary"
   public_hostname               = "mc.example.com"
   cloudflare_zone_id            = "0123456789abcdef0123456789abcdef"
-}
-
-run "retained_encrypted_data_and_replaceable_root" {
-  command = plan
-
-  assert {
-    condition     = aws_ebs_volume.data.encrypted && aws_ebs_volume.data.type == "gp3" && aws_ebs_volume.data.size == 5
-    error_message = "The retained data disk must be encrypted gp3 at the configured 5 GiB."
-  }
-
-  assert {
-    condition     = aws_instance.host.root_block_device[0].encrypted && aws_instance.host.root_block_device[0].volume_size == 20 && aws_instance.host.root_block_device[0].delete_on_termination
-    error_message = "The replaceable root disk must be encrypted 20 GiB and deleted on host termination."
-  }
-
-  assert {
-    condition     = aws_volume_attachment.data.force_detach == false && aws_volume_attachment.data.skip_destroy == false
-    error_message = "Normal host replacement must use an orderly detach of the independent retained disk."
-  }
-}
-
-run "retained_data_disk_size_follows_the_private_input" {
-  command = plan
-  variables {
-    data_volume_size_gib = 8
-  }
-  assert {
-    condition     = aws_ebs_volume.data.size == 8 && aws_instance.host.root_block_device[0].volume_size == 20
-    error_message = "The retained data disk must take its size from data_volume_size_gib and leave the root disk at 20 GiB."
-  }
 }
 
 run "backups_remain_private_and_completed_points_do_not_age_out" {
@@ -240,12 +201,12 @@ run "host_credentials_only_manage_named_backups_and_ssm_channels" {
 
   assert {
     condition     = jsondecode(aws_iam_role_policy.backups.policy).Statement[1].Resource == ["arn:aws:s3:::minecraft-test-example-backups/instances/survival/*", "arn:aws:s3:::minecraft-test-example-backups/instances/creative/*", "arn:aws:s3:::minecraft-test-example-backups/instances/adventure/*"] && toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[1].Action) == toset(["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"])
-    error_message = "The hosts may manage current objects only in the family instance's and the worlds' backup namespaces, without deleting retained versions or managing buckets."
+    error_message = "The hosts may manage current objects only in the worlds' backup namespaces, without deleting retained versions or managing buckets."
   }
 
   assert {
     condition     = jsondecode(aws_iam_role_policy.backups.policy).Statement[0].Condition.StringLike["s3:prefix"] == ["instances/survival/*", "instances/creative/*", "instances/adventure/*"] && jsondecode(aws_iam_role_policy.backups.policy).Statement[0].Action == ["s3:ListBucket"]
-    error_message = "Backup listing must be restricted to the configured instance's and the worlds' prefixes."
+    error_message = "Backup listing must be restricted to the worlds' prefixes, and the retired family host's namespace is no longer granted."
   }
 
   assert {
@@ -273,17 +234,17 @@ run "game_only_ingress_and_ssm_only_administration" {
   }
 
   assert {
-    condition     = aws_instance.host.metadata_options[0].http_tokens == "required" && aws_instance.host.metadata_options[0].http_put_response_hop_limit == 1 && aws_instance.host.metadata_options[0].instance_metadata_tags == "disabled"
+    condition     = alltrue([for host in aws_instance.world : host.metadata_options[0].http_tokens == "required" && host.metadata_options[0].http_put_response_hop_limit == 1 && host.metadata_options[0].instance_metadata_tags == "disabled"])
     error_message = "Host credentials must require IMDSv2 and must not be exposed through an extra container-network hop."
   }
 
   assert {
-    condition     = !aws_subnet.public.map_public_ip_on_launch && aws_instance.host.associate_public_ip_address && aws_route.internet.destination_cidr_block == "0.0.0.0/0"
-    error_message = "Only the host may take a public IPv4 address, assigned at launch and on each start, with a public internet route."
+    condition     = !aws_subnet.public.map_public_ip_on_launch && alltrue([for host in aws_instance.world : host.associate_public_ip_address]) && aws_route.internet.destination_cidr_block == "0.0.0.0/0"
+    error_message = "Only a world host may take a public IPv4 address, assigned at launch and on each start, with a public internet route."
   }
 }
 
-run "budget_notifies_on_account_cost_and_output_uses_instance_paths" {
+run "budget_notifies_on_account_cost_and_output_describes_only_the_worlds" {
   command = plan
 
   assert {
@@ -292,33 +253,14 @@ run "budget_notifies_on_account_cost_and_output_uses_instance_paths" {
   }
 
   assert {
-    condition     = output.deployment.region == "us-west-2" && output.deployment.mount_path == "/srv/minecraft" && output.deployment.instances.survival.data_path == "/srv/minecraft/instances/survival/data" && output.deployment.instances.survival.backup_prefix == "instances/survival/" && output.deployment.data_filesystem_uuid == "12345678-1234-4234-8234-123456789abc"
-    error_message = "The private deployment contract must preserve filesystem identity and separate named-instance directories and backup prefixes."
+    condition     = output.deployment.schema_version == 3 && output.deployment.region == "us-west-2" && output.deployment.mount_path == "/srv/minecraft" && length(setintersection(toset(keys(output.deployment)), toset(["host_id", "data_volume_id", "data_volume_size_gib", "data_filesystem_uuid", "instances"]))) == 0
+    error_message = "The private deployment contract must describe only the world hosts: nothing of the retired family host or its data disk."
   }
 
   assert {
     condition     = output.deployment.public_hostname == "mc.example.com" && output.deployment.cloudflare_zone_id == "0123456789abcdef0123456789abcdef" && !contains(keys(output.deployment), "elastic_ip") && !contains(keys(output.deployment), "elastic_ip_id")
     error_message = "The private deployment contract must name the hostname and zone the operator command updates, and no Elastic IP."
   }
-}
-
-run "additional_named_instance_gets_separate_paths_and_prefix" {
-  command = plan
-  variables {
-    instance_ids = ["survival", "creative-2"]
-  }
-  assert {
-    condition     = output.deployment.instances["creative-2"].data_path == "/srv/minecraft/instances/creative-2/data" && output.deployment.instances["creative-2"].backup_prefix == "instances/creative-2/" && toset(jsondecode(aws_iam_role_policy.backups.policy).Statement[1].Resource) == toset(["arn:aws:s3:::minecraft-test-example-backups/instances/survival/*", "arn:aws:s3:::minecraft-test-example-backups/instances/creative-2/*", "arn:aws:s3:::minecraft-test-example-backups/instances/creative/*", "arn:aws:s3:::minecraft-test-example-backups/instances/adventure/*"])
-    error_message = "Adding a future instance ID must preserve separate data directories and authorize only its own backup prefix beside the worlds'."
-  }
-}
-
-run "reject_invalid_instance_id" {
-  command = plan
-  variables {
-    instance_ids = ["../survival"]
-  }
-  expect_failures = [var.instance_ids]
 }
 
 run "reject_an_operator_role_in_another_account" {
@@ -361,20 +303,12 @@ run "reject_a_host_permissions_boundary_whose_path_hides_a_prefixed_name" {
   expect_failures = [var.host_permissions_boundary_arn]
 }
 
-run "reject_data_disk_az_outside_region" {
+run "reject_availability_zone_outside_region" {
   command = plan
   variables {
     availability_zone = "us-east-1a"
   }
   expect_failures = [var.availability_zone]
-}
-
-run "reject_ambiguous_filesystem_identity" {
-  command = plan
-  variables {
-    data_filesystem_uuid = "auto"
-  }
-  expect_failures = [var.data_filesystem_uuid]
 }
 
 run "idle_stop_is_absent_unless_configured" {
@@ -391,11 +325,6 @@ run "idle_stop_drains_and_stops_only_the_world_hosts" {
 
   variables {
     idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder" }
-  }
-
-  override_resource {
-    target = aws_instance.host
-    values = { id = "i-0123456789abcdef0" }
   }
 
   override_resource {
@@ -428,13 +357,8 @@ run "idle_stop_drains_and_stops_only_the_world_hosts" {
   }
 
   assert {
-    condition     = !strcontains(aws_iam_role_policy.idle_stop[0].policy, "i-0123456789abcdef0") && !strcontains(aws_iam_role_policy.idle_stop[0].policy, "/minecraft-test/idle-stop/state")
-    error_message = "The idle stop must not reach the family host or its record."
-  }
-
-  assert {
     condition     = toset(keys(aws_lambda_function.idle_stop[0].environment[0].variables)) == toset(["WORLDS", "CLOUDFLARE_ZONE_ID", "CLOUDFLARE_TOKEN_PARAMETER", "IDLE_MINUTES"]) && aws_lambda_function.idle_stop[0].environment[0].variables["CLOUDFLARE_ZONE_ID"] == "0123456789abcdef0123456789abcdef" && aws_lambda_function.idle_stop[0].environment[0].variables["CLOUDFLARE_TOKEN_PARAMETER"] == "/minecraft-test/launcher/cloudflare-token" && aws_lambda_function.idle_stop[0].environment[0].variables["IDLE_MINUTES"] == "30"
-    error_message = "The function must take the worlds, the zone, the token's parameter and a 30-minute default, and nothing of the family host."
+    error_message = "The function must take the worlds, the zone, the token's parameter and a 30-minute default, and nothing else."
   }
 
   assert {
@@ -470,11 +394,6 @@ run "idle_stop_drains_and_stops_only_the_world_hosts" {
     condition     = { for id, parameter in aws_ssm_parameter.world_idle_stop_state : id => "${parameter.type} ${parameter.name} ${parameter.value}" } == { adventure = "String /minecraft-test/idle-stop/worlds/adventure/state {}", creative = "String /minecraft-test/idle-stop/worlds/creative/state {}", survival = "String /minecraft-test/idle-stop/worlds/survival/state {}" } && aws_cloudwatch_log_group.idle_stop[0].retention_in_days == 14
     error_message = "Each world's state must be a plain parameter of its own and logs must expire."
   }
-
-  assert {
-    condition     = aws_ssm_parameter.idle_stop_state[0].name == "/minecraft-test/idle-stop/state"
-    error_message = "The family host's idle-stop record must stay declared until that host is retired."
-  }
 }
 
 run "reject_idle_stop_threshold_out_of_range" {
@@ -503,30 +422,6 @@ run "reject_idle_stop_boundary_in_another_account" {
     idle_stop = { package_path = "tests/fixtures/idle-stop.placeholder", permissions_boundary_arn = "arn:aws:iam::444455556666:policy/idle-stop-boundary" }
   }
   expect_failures = [var.idle_stop]
-}
-
-run "reject_a_data_disk_too_small_to_restore_onto" {
-  command = plan
-  variables {
-    data_volume_size_gib = 1
-  }
-  expect_failures = [var.data_volume_size_gib]
-}
-
-run "reject_a_fractional_data_disk_size" {
-  command = plan
-  variables {
-    data_volume_size_gib = 2.5
-  }
-  expect_failures = [var.data_volume_size_gib]
-}
-
-run "reject_a_data_disk_larger_than_backups_can_protect" {
-  command = plan
-  variables {
-    data_volume_size_gib = 129
-  }
-  expect_failures = [var.data_volume_size_gib]
 }
 
 run "reject_a_public_hostname_given_as_a_url" {
@@ -577,19 +472,6 @@ run "reject_a_malformed_cloudflare_zone_id" {
   expect_failures = [var.cloudflare_zone_id]
 }
 
-run "functions_accept_any_number_of_family_instance_ids" {
-  command = plan
-  variables {
-    instance_ids = ["survival", "creative"]
-    idle_stop    = { package_path = "tests/fixtures/idle-stop.placeholder" }
-    launcher     = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
-  }
-  assert {
-    condition     = length(aws_lambda_function.idle_stop) == 1 && length(aws_lambda_function.launcher) == 1
-    error_message = "The functions drive the world hosts, so the family host's instance IDs no longer limit them."
-  }
-}
-
 run "each_manifest_world_gets_its_own_host_without_a_data_disk" {
   command = plan
 
@@ -610,7 +492,7 @@ run "each_manifest_world_gets_its_own_host_without_a_data_disk" {
 
   assert {
     condition     = alltrue([for host in aws_instance.world : host.metadata_options[0].http_tokens == "required" && host.metadata_options[0].http_put_response_hop_limit == 1 && host.metadata_options[0].instance_metadata_tags == "disabled" && host.iam_instance_profile == "minecraft-test-host"])
-    error_message = "A world host must take the family host's instance profile and require IMDSv2 without an extra hop."
+    error_message = "A world host must take the shared host instance profile and require IMDSv2 without an extra hop."
   }
 
   assert {
@@ -624,8 +506,8 @@ run "each_manifest_world_gets_its_own_host_without_a_data_disk" {
   }
 
   assert {
-    condition     = aws_instance.host.tags == tomap({ Name = "minecraft-test-host", Purpose = "replaceable-host" }) && aws_ebs_volume.data.tags == tomap({ Name = "minecraft-test-data", Purpose = "retained-instance-data" }) && aws_volume_attachment.data.device_name == "/dev/sdf"
-    error_message = "The family host and its retained data disk must stay declared as they are."
+    condition     = aws_iam_instance_profile.host.name == "minecraft-test-host" && aws_iam_role.host.name == "minecraft-test-host" && aws_security_group.host.name == "minecraft-test-host"
+    error_message = "The world hosts keep the shared host role, instance profile and security group under their existing names."
   }
 
   assert {
@@ -634,23 +516,11 @@ run "each_manifest_world_gets_its_own_host_without_a_data_disk" {
   }
 }
 
-run "default_bootstrap_bytes_remain_identical" {
-  command = plan
-  assert {
-    condition = aws_instance.host.user_data_base64 == base64gzip(templatefile("${path.module}/../scripts/host-bootstrap.sh.tftpl", {
-      storage_script_base64 = filebase64("${path.module}/../scripts/minecraft_storage.py")
-      data_volume_id        = aws_ebs_volume.data.id
-      data_filesystem_uuid  = var.data_filesystem_uuid
-    }))
-    error_message = "Retained-host defaults must preserve exact existing bootstrap bytes and avoid an unintended host replacement."
-  }
-}
-
 run "launcher_is_absent_unless_configured" {
   command = plan
 
   assert {
-    condition     = length(aws_lambda_function.launcher) == 0 && length(aws_iam_role.launcher) == 0 && length(aws_lambda_function_url.launcher) == 0 && length(aws_lambda_permission.launcher_url) == 0 && length(aws_ssm_parameter.launcher_state) == 0 && length(aws_ssm_parameter.world_launcher_state) == 0 && length(aws_ssm_parameter.launcher_mods) == 0 && length(aws_ssm_parameter.launcher_allowlist) == 0 && length(output.launchers) == 0
+    condition     = length(aws_lambda_function.launcher) == 0 && length(aws_iam_role.launcher) == 0 && length(aws_lambda_function_url.launcher) == 0 && length(aws_lambda_permission.launcher_url) == 0 && length(aws_ssm_parameter.world_launcher_state) == 0 && length(aws_ssm_parameter.launcher_mods) == 0 && length(aws_ssm_parameter.launcher_allowlist) == 0 && length(output.launchers) == 0
     error_message = "The launcher must deploy nothing until its package is configured."
   }
 }
@@ -660,11 +530,6 @@ run "launcher_starts_only_the_world_hosts_for_only_the_site" {
 
   variables {
     launcher = { package_path = "tests/fixtures/idle-stop.placeholder", sites = { dev = "arn:aws:iam::111122223333:role/site-dev-server" }, permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary" }
-  }
-
-  override_resource {
-    target = aws_instance.host
-    values = { id = "i-0123456789abcdef0" }
   }
 
   override_resource {
@@ -694,13 +559,8 @@ run "launcher_starts_only_the_world_hosts_for_only_the_site" {
   }
 
   assert {
-    condition     = !strcontains(aws_iam_role_policy.launcher["dev"].policy, "i-0123456789abcdef0") && !strcontains(aws_iam_role_policy.launcher["dev"].policy, "/minecraft-test/launcher/state")
-    error_message = "The launcher must not reach the family host or its start record."
-  }
-
-  assert {
     condition     = { for name, value in aws_lambda_function.launcher["dev"].environment[0].variables : name => value if name != "WORLDS" } == { MODS_PARAMETER = "/minecraft-test/launcher/mods", ALLOWLIST_PARAMETER = "/minecraft-test/launcher/allowlist", BEDROCK_PORT = "19132", CLOUDFLARE_ZONE_ID = "0123456789abcdef0123456789abcdef", CLOUDFLARE_TOKEN_PARAMETER = "/minecraft-test/launcher/cloudflare-token", SITE_ROLE_ARNS = "arn:aws:iam::111122223333:role/site-dev-server" }
-    error_message = "The function must name the mods and allowlist records and the token only by parameter, and nothing of the family host."
+    error_message = "The function must name the mods and allowlist records and the token only by parameter."
   }
 
   assert {
@@ -728,8 +588,8 @@ run "launcher_starts_only_the_world_hosts_for_only_the_site" {
   }
 
   assert {
-    condition     = aws_ssm_parameter.launcher_state[0].name == "/minecraft-test/launcher/state" && aws_ssm_parameter.launcher_state[0].type == "String" && aws_cloudwatch_log_group.launcher["dev"].retention_in_days == 30 && toset([for query in aws_cloudwatch_metric_alarm.launcher_failing["dev"].metric_query : "${query.metric[0].namespace}/${query.metric[0].metric_name}/${query.metric[0].dimensions["FunctionName"]}" if length(query.metric) > 0]) == toset(["AWS/Lambda/Errors/minecraft-test-dev-launcher", "AWS/Lambda/AsyncEventsDropped/minecraft-test-dev-launcher", "Minecraft/Launcher/StartFailures/minecraft-test-dev-launcher", "Minecraft/Launcher/StopFailures/minecraft-test-dev-launcher"]) && aws_sns_topic_subscription.launcher_alerts["dev"].endpoint == "operator@example.invalid"
-    error_message = "The family host's start record must stay declared, logs must expire after 30 days, and a failed start or stop must email the private budget recipient."
+    condition     = aws_cloudwatch_log_group.launcher["dev"].retention_in_days == 30 && toset([for query in aws_cloudwatch_metric_alarm.launcher_failing["dev"].metric_query : "${query.metric[0].namespace}/${query.metric[0].metric_name}/${query.metric[0].dimensions["FunctionName"]}" if length(query.metric) > 0]) == toset(["AWS/Lambda/Errors/minecraft-test-dev-launcher", "AWS/Lambda/AsyncEventsDropped/minecraft-test-dev-launcher", "Minecraft/Launcher/StartFailures/minecraft-test-dev-launcher", "Minecraft/Launcher/StopFailures/minecraft-test-dev-launcher"]) && aws_sns_topic_subscription.launcher_alerts["dev"].endpoint == "operator@example.invalid"
+    error_message = "Logs must expire after 30 days, and a failed start or stop must email the private budget recipient."
   }
 }
 
@@ -762,7 +622,7 @@ run "launcher_sees_the_idle_stop_drain" {
 
   assert {
     condition     = aws_lambda_function.launcher["dev"].environment[0].variables["CLOUDFLARE_TOKEN_PARAMETER"] == "/minecraft-test/cloudflare/token" && !contains(keys(aws_lambda_function.launcher["dev"].environment[0].variables), "SERVER_NAME")
-    error_message = "The launcher must read the configured token parameter; server_name is accepted and no longer used."
+    error_message = "The launcher must read the configured token parameter; a server_name left in older private inputs is ignored."
   }
 
   assert {

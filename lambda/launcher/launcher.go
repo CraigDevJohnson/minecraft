@@ -33,7 +33,7 @@ const (
 
 const (
 	javaPort = 25565
-	// remoteCommand is the same host interface minecraft_host.py and the idle stop use.
+	// remoteCommand is the same host interface the idle stop uses.
 	remoteCommand = "/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json"
 	// startDeadline bounds a start this function began. A start still unfinished after it is reported failed,
 	// so a Member can try again even if the follow-up run was lost.
@@ -436,7 +436,7 @@ func (l *Launcher) idleStopDraining(ctx context.Context, h host) (bool, error) {
 	return state.LaunchTime.Equal(h.launchTime) && (state.DrainCommandID != "" || state.StopRequested), nil
 }
 
-// FinishStart does the rest of a start once EC2 has accepted it: the same steps as `minecraft_host.py start`.
+// FinishStart does the rest of a start once EC2 has accepted it.
 // It waits for the host, points DNS at it, waits for SSM, and asks the host's adapter to start the game. A
 // restore's record is finished by finishRestore instead.
 func (l *Launcher) FinishStart(ctx context.Context) error {

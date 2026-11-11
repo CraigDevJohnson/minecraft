@@ -18,7 +18,7 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 )
 
-// DrainCommand is the same fixed host-side interface scripts/minecraft_host.py uses for host stop.
+// DrainCommand is the same fixed host-side interface the launcher uses for a world's stop.
 const DrainCommand = "/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json host-drain"
 const HostStatusCommand = "/usr/local/sbin/minecraft-instance --config /etc/minecraft/operator.json host-status"
 
@@ -454,7 +454,7 @@ func statesEqual(a, b State) bool {
 	return string(left) == string(right)
 }
 
-// ValidateDrain applies the evidence rules of minecraft_host.py's stop: the response covers exactly the
+// ValidateDrain applies the evidence rules of the launcher's stop: the response covers exactly the
 // configured instances, confirms the drain barrier, and reports every application stopped with its backup
 // complete (or not required for a never-started instance). Anything else forbids the EC2 stop.
 func ValidateDrain(output string, configured []string) error {

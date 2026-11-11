@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Host adapter between the operator lifecycle commands and Crafty Controller.
 
-Installed as /usr/local/sbin/minecraft-instance, so the launcher, the idle-stop Lambda and the
-workstation's minecraft_host.py keep sending the same `start`, `host-drain`, `host-status` and
-`allowlist` requests. Crafty remains the only process manager: this adapter only asks Crafty's local
-API to start or stop the server or to run one console command, then makes a cold archive of the
-stopped server directory and stores it in S3. Before each start it brings the stopped server to the
-pinned content in server.json beside it (docs/adr/0008-the-adapter-applies-the-pinned-server-content.md):
-the base every world shares, then the host's own world and the mods that are on for it. The first start on
-a new or replaced host sets Crafty and the server up first and brings back the world's newest archive.
+Installed as /usr/local/sbin/minecraft-instance, so the launcher and the idle-stop Lambda keep sending the
+same `start`, `host-drain`, `host-status` and `allowlist` requests. Crafty remains the only process manager:
+this adapter only asks Crafty's local API to start or stop the server or to run one console command, then
+makes a cold archive of the stopped server directory and stores it in S3. Before each start it brings the
+stopped server to the pinned content in server.json beside it
+(docs/adr/0008-the-adapter-applies-the-pinned-server-content.md): the base every world shares, then the host's
+own world and the mods that are on for it. The first start on a new or replaced host sets Crafty and the
+server up first and brings back the world's newest archive.
 In a Session Manager shell on the host, the operator also sends console lines with `console` and, on a
 freshly installed Crafty, creates the adapter's API key with `setup-api-key`.
 """

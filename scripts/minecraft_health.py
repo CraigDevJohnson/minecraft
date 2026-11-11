@@ -32,7 +32,7 @@ WORLD_ID = r"[a-z][a-z0-9-]{0,31}"
 HOST_STATES = {"pending", "running", "stopping", "stopped", "shutting-down"}
 AWS_READS = {
     "identity": ["sts", "get-caller-identity", "--query", "Account"],
-    # A world's host carries its world's id; the old family host carries none, so it is never read as one.
+    # A world's host carries its world's id in its World tag, and every read names one world.
     "hosts": ["ec2", "describe-instances", "--filters",
               "Name=tag:Project,Values=minecraft", "Name=tag:Environment,Values=family",
               "Name=tag:Purpose,Values=replaceable-host",

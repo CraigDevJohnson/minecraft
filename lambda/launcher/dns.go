@@ -31,7 +31,7 @@ type ParameterAPI interface {
 	GetParameter(context.Context, *ssm.GetParameterInput, ...func(*ssm.Options)) (*ssm.GetParameterOutput, error)
 }
 
-// DNSPointer points the players' hostname at the running host, as `minecraft_host.py start` does.
+// DNSPointer points the players' hostname at the running host.
 // The token is read at the moment it is needed, sent only to the fixed Cloudflare API, and never logged.
 type DNSPointer struct {
 	Hostname       string

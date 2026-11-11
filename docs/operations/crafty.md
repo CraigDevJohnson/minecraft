@@ -1,6 +1,6 @@
 # Crafty Controller host
 
-Each world runs on a host of its own ([ADR 0009](../adr/0009-one-host-per-world.md)): one Paper server run by Crafty Controller 4.11.0, with Geyser and Floodgate for Bedrock players and the mods that world has on. Each world has its own address, `<world>.<the public hostname>`: Java on TCP 25565, and Bedrock on port 19132, over RakNet (UDP 19132) or NetherNet (signaling on TCP 19132, WebRTC on UDP 19133). A world host sets Crafty up itself at its world's first start; nothing is installed by hand. The by-hand build this runbook once described is the old family host's, and is kept short [at the end](#the-old-family-hosts-build-by-hand). Every AWS change below needs Craig's approval of the reviewed plan first.
+Each world runs on a host of its own ([ADR 0009](../adr/0009-one-host-per-world.md)): one Paper server run by Crafty Controller 4.11.0, with Geyser and Floodgate for Bedrock players and the mods that world has on. Each world has its own address, `<world>.<the public hostname>`: Java on TCP 25565, and Bedrock on port 19132, over RakNet (UDP 19132) or NetherNet (signaling on TCP 19132, WebRTC on UDP 19133). A world host sets Crafty up itself at its world's first start; nothing is installed by hand. The by-hand build this runbook once described was the retired family host's, and is kept short [at the end](#the-retired-family-hosts-build-by-hand). Every AWS change below needs Craig's approval of the reviewed plan first.
 
 ## What is pinned
 
@@ -14,10 +14,10 @@ It also pins Geyser's configuration, which selects the Bedrock transports. Since
 
 Use the existing OpenTofu root. The worlds need nothing new in the private `deployment.tfvars`: OpenTofu reads the world ids from `server.json` and makes each world's host, parameters and hostname (`<world>.<public_hostname>`) from the inputs already there.
 
-- `instance_ids = ["family"]` stays as it is. It names the family host's instance; the host role may store archives under `instances/family/` and under each world's `instances/<world>/` without the worlds being named.
+- No input names a world: the host role may store archives under each world's `instances/<world>/` without the worlds being named.
 - `bedrock_transport = "both"`, the default, so the security group the hosts share admits signaling TCP 19132 and WebRTC UDP 19133 and lets ICE checks out. Set `"raknet"` only with a manifest whose Geyser configuration selects RakNet alone.
 - No `additional_game_ingress`: every world uses the same ports on its own host.
-- `data_filesystem_uuid` and `data_volume_size_gib` are the family host's data disk's. A world host has no data disk.
+- A world host has no data disk, and no input sizes its root disk. The retired family host's `data_filesystem_uuid`, `data_volume_size_gib`, `instance_ids` and `launcher.server_name` are no longer read ([worlds](worlds.md#the-family-hosts-retirement)).
 
 ## How a world host sets itself up
 
@@ -47,7 +47,7 @@ Each step checks whether an earlier start did it, so a start cut off by the laun
 Every hands-on step on a world's host runs in a Session Manager shell opened in the browser, so nothing is installed or forwarded on a workstation ([ADR 0006](../adr/0006-cloud-controls.md)). The host must be running.
 
 1. Sign in to the AWS console with the `WorkloadsAdmin` role and switch to US West (Oregon).
-2. Open EC2, Instances, and select the world's host, named `<resource_prefix>-<world>`, such as `minecraft-family-survival`. (`minecraft-family-host` is the old family host.)
+2. Open EC2, Instances, and select the world's host, named `<resource_prefix>-<world>`, such as `minecraft-family-survival`.
 3. Choose **Connect**, the **Session Manager** tab, then **Connect**.
 
 The shell opens as `ssm-user` in `sh`; the commands below start with `sudo`, which that user may use. Session Manager closes a shell left idle for 20 minutes.
@@ -70,7 +70,7 @@ A start of a world starts its host, installs the adapter and `server.json` the l
 
 A stop runs `minecraft-instance host-drain`, which asks Crafty to stop the server and streams an archive of the stopped server folder to `s3://<bucket>/instances/<world>/crafty/<UTC time>.tar.gz` (no second copy on the host and no 5 GB limit). It verifies the stored size and writes the SHA-256 beside it as `<UTC time>.tar.gz.sha256`. It keeps the newest 14 archives that have their `.sha256` and removes any archive older than those. Then the launcher stops EC2 and parks DNS. If the archive fails, EC2 is not stopped. Once a stop has begun, `start` is refused until the host has been stopped and started again, so a stop can never race a new session. Stopping the host any other way still runs the same drain from `minecraft-crafty.service`; if that drain fails, the unit is marked failed in the journal.
 
-The archive matters more than it did on the family host. The world lives on its host's root disk, which goes when the host is replaced, so the newest archive is the only copy that outlives the host.
+The archive matters: the world lives on its host's root disk, which goes when the host is replaced, so the newest archive is the only copy that outlives the host.
 
 ## How players join
 
@@ -106,9 +106,9 @@ Each world is accepted by its own [proof run](worlds.md#the-proof-run-for-a-worl
 
 The family server passed its own acceptance in October 2026 (#53, #26, #27): joins by both editions, the portal to `creative` with separate inventories, a stop and a start with the same worlds, and a NetherNet join.
 
-## The old family host's build by hand
+## The retired family host's build by hand
 
-The family host of [ADR 0004](../adr/0004-crafty-multiverse-rebuild.md) was built by hand in October 2026, and these were its steps. They are kept as a record until that host is retired ([worlds](worlds.md#retire-the-family-host)). They cannot be repeated with the current adapter and pinned content: the manifest has no `family` world, `stage-import` now needs `--world`, and a `start family` would fail with "the pinned server content has no such world". The family host itself keeps the adapter and content its last start installed. A world host needs none of this; its first start does the same work itself ([above](#how-a-world-host-sets-itself-up)).
+The family host of [ADR 0004](../adr/0004-crafty-multiverse-rebuild.md) was built by hand in October 2026, and these were its steps. That host is removed from the configuration and retired by the Deploy in [worlds](worlds.md#the-family-hosts-retirement), and `scripts/install_crafty.sh` was removed with it; the steps are kept as a record of what a world's first start now does itself. A world host needs none of this; its first start does the same work itself ([above](#how-a-world-host-sets-itself-up)).
 
 ### Install Crafty on the host
 

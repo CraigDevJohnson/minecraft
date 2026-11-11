@@ -11,12 +11,10 @@ availability_zone         = "us-west-2a"
 ami_id                    = "ami-0123456789abcdef0"
 ami_owner_account_id      = "111122223333"
 backup_bucket_name        = "replace-with-reviewed-unique-private-backup-name"
-data_filesystem_uuid      = "12345678-1234-4234-8234-123456789abc"
-instance_ids              = ["survival"]
 monthly_budget_usd        = 25
 budget_notification_email = "operator@example.invalid"
 
-# Optional: drain and stop an idle host. See docs/operations/idle-stop.md before
+# Optional: drain and stop an idle world host. See docs/operations/idle-stop.md before
 # enabling it. It parks DNS with the launcher's Cloudflare token SecureString. The
 # Deploy workflow builds the package and names it through package_dir, so its copy
 # of this file needs only `idle_stop = {}`; a workstation plan builds it with
@@ -40,11 +38,6 @@ budget_notification_email = "operator@example.invalid"
 #   permissions_boundary_arn = "arn:aws:iam::111122223333:policy/minecraft-launcher-boundary"
 #   control_role_arn         = "arn:aws:iam::111122223333:role/minecraft-server-control"
 # }
-
-# Retained data disk size in GiB. Grow only: never decrease it for an existing disk
-# (docs/operations/data-disk-capacity.md). An existing deployment sets its current
-# size before planning.
-data_volume_size_gib = 5
 
 # Administrator-created boundary policy, named outside the resource prefix and
 # created before the operator role is used.

@@ -21,8 +21,8 @@ FUNCTIONS = {
     "idle-stop": ROOT / "lambda" / "idlestop",
     "launcher": ROOT / "lambda" / "launcher",
 }
-# The files scripts/install_crafty.sh installs as the host adapter, the same list as adapterFiles in
-# lambda/launcher/hostadapter.go; tests/test_launcher_package.py keeps the three in step. server.json is the pinned
+# The files the launcher installs as the host adapter, the same list as adapterFiles in
+# lambda/launcher/hostadapter.go; tests/test_launcher_package.py keeps the two in step. server.json is the pinned
 # server content each start applies (docs/adr/0008-the-adapter-applies-the-pinned-server-content.md).
 ADAPTER_FILES = ("minecraft_access.py", "minecraft_content.py", "server.json", "minecraft_crafty.py")
 # Where the checkout keeps the adapter files that are not in its scripts folder.

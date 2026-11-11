@@ -1,7 +1,7 @@
 // Command idlestop is a scheduled Lambda that drains and stops a world's Minecraft host after it has been idle.
 // Each invocation checks the one world its event names.
 //
-// It never stops EC2 directly: it sends the same host drain that `minecraft_host.py stop` uses and calls
+// It never stops EC2 directly: it sends the same host drain that the launcher's stop uses and calls
 // StopInstances only after the drain proves every instance stopped with a completed backup.
 package main
 
