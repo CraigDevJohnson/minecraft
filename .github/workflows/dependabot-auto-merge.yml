@@ -49,6 +49,14 @@ jobs:
           esac
 
           if [[ -z "$hold_reason" ]]; then
+            # The aggregate type above skips entries with no type, so check every one.
+            unclassified="$(jq -r 'if length == 0 then "none listed" else [.[] | select(.updateType != "version-update:semver-minor" and .updateType != "version-update:semver-patch") | .dependencyName] | join(", ") end' <<<"${UPDATES_JSON:-[]}")"
+            if [[ -n "$unclassified" ]]; then
+              hold_reason="not every update is a minor or patch update (${unclassified})"
+            fi
+          fi
+
+          if [[ -z "$hold_reason" ]]; then
             zero_minor="$(jq -r '[.[] | select(.updateType == "version-update:semver-minor" and ((.prevVersion // "") | test("^v?0\\."))) | .dependencyName] | join(", ")' <<<"${UPDATES_JSON:-[]}")"
             if [[ -n "$zero_minor" ]]; then
               hold_reason="it moves a 0.x dependency to a new minor version, which can break (${zero_minor})"
