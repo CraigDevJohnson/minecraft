@@ -1,0 +1,74 @@
+# Dependabot auto-merge. Minor and patch updates merge on their own once every
+# required check on main passes. Craig reviews the rest by hand: major
+# updates, minor updates of a 0.x dependency (which can break), updates whose
+# type Dependabot does not report, and any update while main has no
+# required status checks (auto-merge would then not wait for CI).
+name: Dependabot auto-merge
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  auto-merge:
+    name: Dependabot auto-merge
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'CraigDevJohnson/minecraft'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write # enable auto-merge
+      pull-requests: write # enable auto-merge and comment when holding
+    steps:
+      - name: Read Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      - name: Enable auto-merge, or hold for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_ACTION: ${{ github.event.action }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          UPDATES_JSON: ${{ steps.metadata.outputs.updated-dependencies-json }}
+          MERGE_METHOD: squash
+        run: |
+          set -euo pipefail
+
+          hold_reason=""
+          case "$UPDATE_TYPE" in
+            version-update:semver-minor | version-update:semver-patch) ;;
+            version-update:semver-major) hold_reason="it is a major version update" ;;
+            *) hold_reason="Dependabot did not report the update type" ;;
+          esac
+
+          if [[ -z "$hold_reason" ]]; then
+            zero_minor="$(jq -r '[.[] | select(.updateType == "version-update:semver-minor" and ((.prevVersion // "") | test("^v?0\\."))) | .dependencyName] | join(", ")' <<<"${UPDATES_JSON:-[]}")"
+            if [[ -n "$zero_minor" ]]; then
+              hold_reason="it moves a 0.x dependency to a new minor version, which can break (${zero_minor})"
+            fi
+          fi
+
+          if [[ -z "$hold_reason" ]]; then
+            required="$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${BASE_REF}" --jq '[.[] | select(.type == "required_status_checks")] | length')"
+            if [[ "$required" == "0" ]]; then
+              hold_reason="${BASE_REF} has no required status checks, so auto-merge would not wait for CI"
+            fi
+          fi
+
+          if [[ -n "$hold_reason" ]]; then
+            echo "Held for review: ${hold_reason}."
+            if [[ "$PR_ACTION" == "opened" ]]; then
+              gh pr comment "$PR_URL" --body "Held for review: ${hold_reason}. Auto-merge is not turned on for this pull request."
+            fi
+            exit 0
+          fi
+
+          echo "Turning on auto-merge (${MERGE_METHOD}) for a ${UPDATE_TYPE#version-update:} update."
+          gh pr merge "$PR_URL" --auto "--${MERGE_METHOD}"
