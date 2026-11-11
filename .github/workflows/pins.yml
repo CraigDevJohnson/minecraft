@@ -1,0 +1,48 @@
+name: Pins
+
+# The validation gate runs offline, so it can only tell that a pin is well formed. This downloads every file the
+# pinned server content names and checks its SHA-256, whenever that content changes.
+on:
+  pull_request:
+    paths:
+      - runtime/crafty/server.json
+      - scripts/check_pins.py
+      - .github/workflows/pins.yml
+  push:
+    branches: [main]
+    paths:
+      - runtime/crafty/server.json
+      - scripts/check_pins.py
+      - .github/workflows/pins.yml
+  workflow_dispatch:
+    inputs:
+      modrinth_version:
+        description: Print the pin for this Modrinth version id, instead of checking the pinned content
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pins-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pins:
+    name: Pinned downloads
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download every pinned file and check its SHA-256
+        if: ${{ inputs.modrinth_version == '' }}
+        run: python3 scripts/check_pins.py
+      - name: Print the pin for a Modrinth version
+        if: ${{ inputs.modrinth_version != '' }}
+        env:
+          MODRINTH_VERSION: ${{ inputs.modrinth_version }}
+        run: python3 scripts/check_pins.py --modrinth-version "$MODRINTH_VERSION"
