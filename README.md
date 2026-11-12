@@ -23,6 +23,7 @@ Report suspected vulnerabilities using the [security policy](SECURITY.md).
 - [Cloud controls: stop, start, restore, allowlist and deploy from anywhere](docs/operations/cloud-controls.md)
 - [Family device joins, console rollback, and play acceptance](docs/operations/family-device-validation.md)
 - [Client compatibility and upstream release gates](docs/operations/client-compatibility-readiness.md)
+- [Changelog](CHANGELOG.md)
 - [Foundation issue #3](https://github.com/CraigDevJohnson/minecraft/issues/3) and [current issues](https://github.com/CraigDevJohnson/minecraft/issues)
 
 Python 3.11 or newer and Go (the version in `lambda/idlestop/go.mod`, shared by `lambda/launcher`) are the host-language prerequisites. Install the pinned tools and run the shared gate from the repository root:
