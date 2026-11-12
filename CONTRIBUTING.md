@@ -13,8 +13,9 @@ This repository runs one family Minecraft server and is not taking outside contr
    .tools/bin/task check
    ```
 
-4. Merge with a squash once the Validate and Security checks pass and review threads are resolved.
-5. Changes to the host, the Launcher or the pinned server content reach AWS only through the Deploy workflow: a plan, then an apply with the plan's digest ([cloud controls](docs/operations/cloud-controls.md)).
+4. Add a line to the [changelog](CHANGELOG.md) when the change is one a player or the operator would notice.
+5. Merge with a squash once the Validate and Security checks pass and review threads are resolved.
+6. Changes to the host, the Launcher or the pinned server content reach AWS only through the Deploy workflow: a plan, then an apply with the plan's digest ([cloud controls](docs/operations/cloud-controls.md)).
 
 ## Keep out of Git
 
