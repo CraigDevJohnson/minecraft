@@ -25,8 +25,8 @@ const (
 	testContent = `{
 		"schema_version": 2,
 		"mods": {
-			"fawe": {"name": "FastAsyncWorldEdit", "version": "2.16.2", "summary": "Bulk building tools.", "bedrock": "Commands and the wand work."},
-			"gsit": {"name": "GSit", "version": "3.8.0", "summary": "Sit on stairs and slabs.", "bedrock": "Sitting works with a click."}
+			"fawe": {"name": "FastAsyncWorldEdit", "version": "2.16.2", "summary": "Bulk building tools."},
+			"gsit": {"name": "GSit", "version": "3.8.0", "summary": "Sit on stairs and slabs."}
 		},
 		"worlds": [
 			{"id": "survival", "name": "Survival", "mods": {"gsit": true}},
@@ -107,7 +107,7 @@ func TestTheRepositoryManifestLoads(t *testing.T) {
 }
 
 func TestLoadManifestRefusesContentItCouldNotShowOrSend(t *testing.T) {
-	mods := `"mods": {"gsit": {"name": "GSit", "version": "3.8.0", "summary": "Sit.", "bedrock": "Works."}}`
+	mods := `"mods": {"gsit": {"name": "GSit", "version": "3.8.0", "summary": "Sit."}}`
 	for name, text := range map[string]string{
 		"not JSON":                         "survival",
 		"no worlds":                        `{` + mods + `, "worlds": []}`,
@@ -115,10 +115,10 @@ func TestLoadManifestRefusesContentItCouldNotShowOrSend(t *testing.T) {
 		"a world without an id":            `{` + mods + `, "worlds": [{"name": "Survival"}]}`,
 		"two worlds with one id":           `{` + mods + `, "worlds": [{"id": "survival", "name": "Survival"}, {"id": "survival", "name": "Again"}]}`,
 		"a world that lists an unpinned":   `{` + mods + `, "worlds": [{"id": "survival", "name": "Survival", "mods": {"fawe": true}}]}`,
-		"a mod without its Bedrock note":   `{"mods": {"gsit": {"name": "GSit", "version": "3.8.0", "summary": "Sit."}}, "worlds": [{"id": "survival", "name": "Survival"}]}`,
-		"a mod without a version":          `{"mods": {"gsit": {"name": "GSit", "summary": "Sit.", "bedrock": "Works."}}, "worlds": [{"id": "survival", "name": "Survival"}]}`,
-		"a mod id that is not an id":       `{"mods": {"GSit": {"name": "GSit", "version": "3.8.0", "summary": "Sit.", "bedrock": "Works."}}, "worlds": [{"id": "survival", "name": "Survival"}]}`,
-		"a mod id that would end the flag": `{"mods": {"gsit --force": {"name": "GSit", "version": "3.8.0", "summary": "Sit.", "bedrock": "Works."}}, "worlds": [{"id": "survival", "name": "Survival"}]}`,
+		"a mod without its summary":        `{"mods": {"gsit": {"name": "GSit", "version": "3.8.0"}}, "worlds": [{"id": "survival", "name": "Survival"}]}`,
+		"a mod without a version":          `{"mods": {"gsit": {"name": "GSit", "summary": "Sit."}}, "worlds": [{"id": "survival", "name": "Survival"}]}`,
+		"a mod id that is not an id":       `{"mods": {"GSit": {"name": "GSit", "version": "3.8.0", "summary": "Sit."}}, "worlds": [{"id": "survival", "name": "Survival"}]}`,
+		"a mod id that would end the flag": `{"mods": {"gsit --force": {"name": "GSit", "version": "3.8.0", "summary": "Sit."}}, "worlds": [{"id": "survival", "name": "Survival"}]}`,
 	} {
 		if _, err := LoadManifest(content(text)); err == nil {
 			t.Fatalf("%s must be refused", name)

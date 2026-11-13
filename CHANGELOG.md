@@ -6,6 +6,7 @@ Notable changes to the family's Minecraft worlds and the tooling around them, ne
 
 ### Added
 
+- Lithium, FallingTree and Essential Commands join the mod catalog, off on every world until switched on, and the mods page shows only what each mod does (#97).
 - Each world (survival, creative, adventure) runs on its own host with its own mods and its own address (#91).
 - The Pins workflow downloads every pinned file and verifies its SHA-256 (#89).
 - Idle stop: a world with nobody playing stops on its own, using the Launcher's Cloudflare token (#86).
