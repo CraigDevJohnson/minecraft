@@ -25,11 +25,15 @@ The worlds also list these, off by default, for a `minecraft-admin` Member to sw
 
 | Mod | What it does | Worlds |
 | --- | --- | --- |
-| Lithium | Speeds up the server without changing how the game plays | `survival`, `creative` |
+| Lithium | Speeds up the server without changing how the game plays | all three |
+| spark | Shows what is slowing the server down (`/spark`) | all three |
+| Chunky | Builds the map ahead of time (`/chunky`) | all three |
 | FallingTree | Chop one log and the whole tree comes down | `survival`, `adventure` |
 | Essential Commands | `/home`, `/tpa` and `/spawn` | `survival`, `creative` (it has no NeoForge build) |
 
-The catalog is near its size limit: `server.json` travels inside every command the Launcher sends a host, and a Go test keeps that under 48 KiB ([launcher](launcher.md)). Another mod needs room made first ([#98](https://github.com/CraigDevJohnson/minecraft/issues/98)).
+Lithium, spark and Chunky have a jar for each loader, so each is in the catalog twice, like Flan.
+
+`server.json` travels inside every command the Launcher sends a host, and a Go test keeps that under 64 KiB ([launcher](launcher.md)). A mod adds about 200 bytes.
 
 World and mod ids match `^[a-z][a-z0-9-]{0,31}$`, because they travel unquoted in the commands the Launcher sends. A world may not set `server-port`, `online-mode`, `white-list`, `enforce-whitelist`, `enable-rcon` or `enable-query`. The adapter refuses a manifest that breaks these rules, and the Launcher refuses to start up unless the manifest's world ids are exactly the worlds OpenTofu gave it.
 

@@ -90,9 +90,10 @@ func TestTheRepositoryAdapterLoadsAndFitsOneCommand(t *testing.T) {
 			t.Fatalf("the script does not pin %s", name)
 		}
 	}
-	// SSM carries the whole script in one Run Command parameter; issue #55's adapter bundle of about this
-	// size went through it. Keep well clear of any limit as the adapter grows.
-	if len(script) > 48<<10 {
+	// SSM carries the whole script in one Run Command parameter. AWS documents no limit for it; a script of
+	// 48 KiB is known to go through (issue #55), and the first start after this bound was raised proves the size
+	// it had then (issue #98). A start that Run Command refuses for its size means the bound is too high.
+	if len(script) > 64<<10 {
 		t.Fatalf("the adapter script is %d bytes", len(script))
 	}
 }

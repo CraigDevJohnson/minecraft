@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "revision": "mods-2026-11-13",
+  "revision": "mods-2026-11-13b",
   "crafty": {
     "image": "registry.gitlab.com/crafty-controller/crafty-4@sha256:7b6e87514259549647e15ceeaf73d238792e6d77e2c79fc744d5badc8d6e997c",
     "version": "4.11.0"
@@ -270,6 +270,61 @@
       "url": "https://cdn.modrinth.com/data/6VdDUivB/versions/KANmt7ie/essential_commands-0.42.0-mc26.3.jar",
       "sha256": "77828a3e53b48b3ed8a5c18d507369e238373f6533860413e69610b5a24f6821",
       "summary": "Set a home, teleport to a friend or return to spawn."
+    },
+    "lithium-neoforge": {
+      "name": "Lithium",
+      "version": "0.26.3",
+      "loaders": [
+        "neoforge"
+      ],
+      "path": "mods/lithium-neoforge.jar",
+      "url": "https://cdn.modrinth.com/data/gvQqBUqZ/versions/2BP6jqRA/lithium-neoforge-0.26.3%2Bmc26.3.jar",
+      "sha256": "03eae4f0908f1ff9705143e54efbe92b4da4634b0a0f601fa86b7f3bd704dda4",
+      "summary": "Speeds up the server without changing the game."
+    },
+    "spark": {
+      "name": "spark",
+      "version": "1.10.187",
+      "loaders": [
+        "fabric"
+      ],
+      "path": "mods/spark.jar",
+      "url": "https://cdn.modrinth.com/data/l6YH9Als/versions/e3hsPc1o/spark-1.10.187-fabric.jar",
+      "sha256": "3fc00663caa542b1e78333730609b4eb2568326628e3666a3938ad58cbc9acc6",
+      "summary": "Shows what is slowing the server down, with /spark."
+    },
+    "spark-neoforge": {
+      "name": "spark",
+      "version": "1.10.187",
+      "loaders": [
+        "neoforge"
+      ],
+      "path": "mods/spark-neoforge.jar",
+      "url": "https://cdn.modrinth.com/data/l6YH9Als/versions/HwHxykP9/spark-1.10.187-neoforge.jar",
+      "sha256": "88e7cc1a9ecd4c9ad22434fe2f168155baeb0ce2afba0a30269e542602e9d442",
+      "summary": "Shows what is slowing the server down, with /spark."
+    },
+    "chunky": {
+      "name": "Chunky",
+      "version": "1.5.66",
+      "loaders": [
+        "fabric"
+      ],
+      "path": "mods/chunky.jar",
+      "url": "https://cdn.modrinth.com/data/fALzjamp/versions/86FKD9qx/Chunky-Fabric-1.5.66.jar",
+      "sha256": "987ade46bebe3ae4191db74dc51bc9af62308c58f6fec06c85a14b23ee551012",
+      "summary": "Builds the map ahead of time with /chunky, so exploring does not lag."
+    },
+    "chunky-neoforge": {
+      "name": "Chunky",
+      "version": "1.5.66",
+      "loaders": [
+        "neoforge"
+      ],
+      "path": "mods/chunky-neoforge.jar",
+      "url": "https://cdn.modrinth.com/data/fALzjamp/versions/sDFaDSkE/Chunky-NeoForge-1.5.66.jar",
+      "sha256": "9f9303da0185fa0ae0e1d3f10a0f07b8d9e5a21e77931d4fc162dcc718a0ab4f",
+      "summary": "Builds the map ahead of time with /chunky, so exploring does not lag."
     }
   },
   "worlds": [
@@ -287,7 +342,9 @@
         "sit": true,
         "lithium": false,
         "fallingtree": false,
-        "essential-commands": false
+        "essential-commands": false,
+        "spark": false,
+        "chunky": false
       }
     },
     {
@@ -304,7 +361,9 @@
         "flan": true,
         "worldedit": true,
         "lithium": false,
-        "essential-commands": false
+        "essential-commands": false,
+        "spark": false,
+        "chunky": false
       }
     },
     {
@@ -320,7 +379,10 @@
         "flan-neoforge": true,
         "sit": false,
         "worldedit": false,
-        "fallingtree": false
+        "fallingtree": false,
+        "lithium-neoforge": false,
+        "spark-neoforge": false,
+        "chunky-neoforge": false
       }
     }
   ]
