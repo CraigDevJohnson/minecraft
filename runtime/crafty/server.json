@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "revision": "loaders-2026-11-11",
+  "revision": "mods-2026-11-13",
   "crafty": {
     "image": "registry.gitlab.com/crafty-controller/crafty-4@sha256:7b6e87514259549647e15ceeaf73d238792e6d77e2c79fc744d5badc8d6e997c",
     "version": "4.11.0"
@@ -167,7 +167,6 @@
       "url": "https://cdn.modrinth.com/data/Si383TIH/versions/dAcEMeRZ/flan-26.3-1.12.8.b-fabric.jar",
       "sha256": "d73838c52457efc5d3d9e87ef8321b8a0e6534f3a0a95c44246e3f179d25c871",
       "summary": "Claim land with a golden hoe so only the people you trust can build or break there.",
-      "bedrock": "Not yet tried on Bedrock.",
       "managed_files": [
         {
           "path": "config/flan/flan_config.json",
@@ -191,7 +190,6 @@
       "url": "https://cdn.modrinth.com/data/Si383TIH/versions/1Bik8U9i/flan-26.3-1.12.8-neoforge.jar",
       "sha256": "5a181b4230579b3dc80902a93a253349978cd9198bab5af32a513e89ad1a2962",
       "summary": "Claim land with a golden hoe so only the people you trust can build or break there.",
-      "bedrock": "Not yet tried on Bedrock.",
       "managed_files": [
         {
           "path": "config/flan/flan_config.json",
@@ -216,7 +214,6 @@
       "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/ByRNkO83/worldedit-mod-7.4.6.jar",
       "sha256": "24f2338ac9d5e7205f15cdb4a118924c5d9cbd48ab0cabf8ba36b07b7d64c22b",
       "summary": "Bulk building tools: copy, paste, fill and brushes, for players in creative mode.",
-      "bedrock": "Not yet tried on Bedrock.",
       "managed_files": [
         {
           "path": "config/worldedit/worldedit.properties",
@@ -238,8 +235,41 @@
       "path": "mods/sit-2.0.0.jar",
       "url": "https://cdn.modrinth.com/data/tFLdoQMh/versions/UlPgR7YT/sit-2.0.0.jar",
       "sha256": "39e0c27e8d40f529057ea28e11705998517acee12af874ce3e824cb2cbc207d2",
-      "summary": "Sit on stairs with a click.",
-      "bedrock": "Not yet tried on Bedrock."
+      "summary": "Sit on stairs with a click."
+    },
+    "lithium": {
+      "name": "Lithium",
+      "version": "0.26.3",
+      "loaders": [
+        "fabric"
+      ],
+      "path": "mods/lithium.jar",
+      "url": "https://cdn.modrinth.com/data/gvQqBUqZ/versions/fWv5bnZk/lithium-fabric-0.26.3%2Bmc26.3.jar",
+      "sha256": "103b6aab3932f119155565254a3f33b1be0da26b9bf7a5eec24851542144fc78",
+      "summary": "Speeds up the server without changing the game."
+    },
+    "fallingtree": {
+      "name": "FallingTree",
+      "version": "26.3.0.4",
+      "loaders": [
+        "fabric",
+        "neoforge"
+      ],
+      "path": "mods/fallingtree.jar",
+      "url": "https://cdn.modrinth.com/data/Fb4jn8m6/versions/D0B62UJ5/FallingTree-26.3-25.jar",
+      "sha256": "1ad561a6e8b314f8db113f6c15064d822dd13291b72c7e9363bbafe8e5d6a0d1",
+      "summary": "Chop one log and the whole tree falls."
+    },
+    "essential-commands": {
+      "name": "Essential Commands",
+      "version": "0.42.0",
+      "loaders": [
+        "fabric"
+      ],
+      "path": "mods/essential-commands.jar",
+      "url": "https://cdn.modrinth.com/data/6VdDUivB/versions/KANmt7ie/essential_commands-0.42.0-mc26.3.jar",
+      "sha256": "77828a3e53b48b3ed8a5c18d507369e238373f6533860413e69610b5a24f6821",
+      "summary": "Set a home, teleport to a friend or return to spawn."
     }
   },
   "worlds": [
@@ -254,7 +284,10 @@
       },
       "mods": {
         "flan": true,
-        "sit": true
+        "sit": true,
+        "lithium": false,
+        "fallingtree": false,
+        "essential-commands": false
       }
     },
     {
@@ -269,7 +302,9 @@
       },
       "mods": {
         "flan": true,
-        "worldedit": true
+        "worldedit": true,
+        "lithium": false,
+        "essential-commands": false
       }
     },
     {
@@ -284,7 +319,8 @@
       "mods": {
         "flan-neoforge": true,
         "sit": false,
-        "worldedit": false
+        "worldedit": false,
+        "fallingtree": false
       }
     }
   ]

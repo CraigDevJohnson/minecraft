@@ -493,10 +493,10 @@ func TestOnlyAnOperatorMayRestore(t *testing.T) {
 func TestModsAnswers(t *testing.T) {
 	list := ModsList{Worlds: []WorldMods{{ID: "creative", Name: "Creative", Mods: []ModSwitch{{
 		ID:      "fawe",
-		Mod:     Mod{Name: "FastAsyncWorldEdit", Version: "2.16.2", Summary: "Bulk building tools.", Bedrock: "Commands and the wand work."},
+		Mod:     Mod{Name: "FastAsyncWorldEdit", Version: "2.16.2", Summary: "Bulk building tools."},
 		Default: true,
 	}}}}}
-	shape := `{"worlds":[{"id":"creative","name":"Creative","mods":[{"id":"fawe","name":"FastAsyncWorldEdit","version":"2.16.2","summary":"Bulk building tools.","bedrock":"Commands and the wand work.","default":true,"enabled":false}]}]}`
+	shape := `{"worlds":[{"id":"creative","name":"Creative","mods":[{"id":"fawe","name":"FastAsyncWorldEdit","version":"2.16.2","summary":"Bulk building tools.","default":true,"enabled":false}]}]}`
 	// A site may use both routes: it shows the page only to a Member with its minecraft-admin grant.
 	for name, operator := range map[string]func(*http.Request) bool{
 		"a site's role":   func(*http.Request) bool { return false },

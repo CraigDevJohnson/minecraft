@@ -17,8 +17,8 @@ func TestModsListsEveryWorldAndItsModsInOrder(t *testing.T) {
 	}
 	// Worlds in the order the page shows them, each world's mods in order of their ids, and with no switch made
 	// every mod at the manifest's default.
-	fawe := `{"id":"fawe","name":"FastAsyncWorldEdit","version":"2.16.2","summary":"Bulk building tools.","bedrock":"Commands and the wand work.",`
-	gsit := `{"id":"gsit","name":"GSit","version":"3.8.0","summary":"Sit on stairs and slabs.","bedrock":"Sitting works with a click.",`
+	fawe := `{"id":"fawe","name":"FastAsyncWorldEdit","version":"2.16.2","summary":"Bulk building tools.",`
+	gsit := `{"id":"gsit","name":"GSit","version":"3.8.0","summary":"Sit on stairs and slabs.",`
 	want := `{"worlds":[` +
 		`{"id":"survival","name":"Survival","mods":[` + gsit + `"default":true,"enabled":true}]},` +
 		`{"id":"creative","name":"Creative","mods":[` + fawe + `"default":true,"enabled":true},` + gsit + `"default":false,"enabled":false}]}]}`

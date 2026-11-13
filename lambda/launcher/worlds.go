@@ -29,7 +29,6 @@ type Mod struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 	Summary string `json:"summary"`
-	Bedrock string `json:"bedrock"`
 }
 
 // World is one world of the manifest: its id, which also names the one instance its host runs, its display
@@ -55,8 +54,8 @@ func LoadManifest(fsys fs.FS) (*Manifest, error) {
 		return nil, errors.New("the pinned server content lists no world")
 	}
 	for id, mod := range manifest.Mods {
-		if !identifier.MatchString(id) || mod.Name == "" || mod.Version == "" || mod.Summary == "" || mod.Bedrock == "" {
-			return nil, fmt.Errorf("the mod %q needs a valid id, a name, a version, a summary and a Bedrock note", id)
+		if !identifier.MatchString(id) || mod.Name == "" || mod.Version == "" || mod.Summary == "" {
+			return nil, fmt.Errorf("the mod %q needs a valid id, a name, a version and a summary", id)
 		}
 	}
 	seen := map[string]bool{}
