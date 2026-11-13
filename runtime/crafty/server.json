@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "revision": "mods-2026-11-13b",
+  "revision": "mods-2026-11-13c",
   "crafty": {
     "image": "registry.gitlab.com/crafty-controller/crafty-4@sha256:7b6e87514259549647e15ceeaf73d238792e6d77e2c79fc744d5badc8d6e997c",
     "version": "4.11.0"
@@ -325,6 +325,130 @@
       "url": "https://cdn.modrinth.com/data/fALzjamp/versions/sDFaDSkE/Chunky-NeoForge-1.5.66.jar",
       "sha256": "9f9303da0185fa0ae0e1d3f10a0f07b8d9e5a21e77931d4fc162dcc718a0ab4f",
       "summary": "Builds the map ahead of time with /chunky, so exploring does not lag."
+    },
+    "collective": {
+      "name": "Collective",
+      "version": "8.86",
+      "loaders": [
+        "fabric",
+        "neoforge"
+      ],
+      "path": "mods/collective.jar",
+      "url": "https://cdn.modrinth.com/data/e0M1UDsY/versions/jfxbozAD/collective-26.3.0-8.86.jar",
+      "sha256": "6f8ea5dae041f623c905fe3bc9b3008b3d7ec67cafb54e4fff87f4ddb5071a24",
+      "summary": "Shared code for other mods; on whenever one needs it."
+    },
+    "polymer": {
+      "name": "Polymer",
+      "version": "0.18.7",
+      "loaders": [
+        "fabric"
+      ],
+      "path": "mods/polymer.jar",
+      "url": "https://cdn.modrinth.com/data/xGdtZczs/versions/pA7tHJZE/polymer-bundled-0.18.7%2B26.3.jar",
+      "sha256": "b18b0bb66fc8455fbf43f8a54e226952c630ab0cfee433e6585520c0e591538b",
+      "summary": "Shared code for other mods; on whenever one needs it."
+    },
+    "graves": {
+      "name": "Universal Graves",
+      "version": "3.13.0",
+      "loaders": [
+        "fabric"
+      ],
+      "path": "mods/graves.jar",
+      "url": "https://cdn.modrinth.com/data/yn9u3ypm/versions/r9hY06vQ/graves-3.13.0%2B26.3.jar",
+      "sha256": "8df3f188e1511ebf69ffc720059b3508bedff1bd2e87f13057989c096b3ed33b",
+      "summary": "When you die, your items wait in a grave where you fell.",
+      "needs": [
+        "polymer"
+      ]
+    },
+    "sleep": {
+      "name": "Sleep",
+      "version": "4.4.0.0",
+      "loaders": [
+        "fabric",
+        "neoforge"
+      ],
+      "path": "mods/sleep.jar",
+      "url": "https://cdn.modrinth.com/data/WTzuSu8P/versions/qWXoHji5/sleep-v4.4.0.0.jar",
+      "sha256": "dda9e88924ae54f4cb06c36015c15681e40a90153b018d59f0aa292808609182",
+      "summary": "One player in bed skips the night for everyone."
+    },
+    "healing-campfire": {
+      "name": "Healing Campfire",
+      "version": "7.1",
+      "loaders": [
+        "fabric",
+        "neoforge"
+      ],
+      "path": "mods/healing-campfire.jar",
+      "url": "https://cdn.modrinth.com/data/kOuPUitF/versions/cSdyeAve/healingcampfire-26.3.0-7.1.jar",
+      "sha256": "e132b444dfbf172670ea3833b90c6e67fe85d9c18d389dc07a6f21d03c1e1fb4",
+      "summary": "Standing near a campfire heals you.",
+      "needs": [
+        "collective"
+      ]
+    },
+    "safe-campfire": {
+      "name": "No Hostiles Around Campfire",
+      "version": "8.1",
+      "loaders": [
+        "fabric",
+        "neoforge"
+      ],
+      "path": "mods/safe-campfire.jar",
+      "url": "https://cdn.modrinth.com/data/EJqeyaVz/versions/LcElC5he/nohostilesaroundcampfire-26.3.0-8.1.jar",
+      "sha256": "a06ed789aaaa90298339cd6662d5c240c0148b0f896f603bf56cb1a184623263",
+      "summary": "Monsters do not spawn near a lit campfire.",
+      "needs": [
+        "collective"
+      ]
+    },
+    "replanting-crops": {
+      "name": "Replanting Crops",
+      "version": "5.7",
+      "loaders": [
+        "fabric",
+        "neoforge"
+      ],
+      "path": "mods/replanting-crops.jar",
+      "url": "https://cdn.modrinth.com/data/EXzIPtJo/versions/rTb70pLv/replantingcrops-26.3.0-5.7.jar",
+      "sha256": "ebec91df3b5ca2ae533a297501462af9336f63d810c473a71f5b7dd0298dd560",
+      "summary": "Harvest a crop with a hoe and it replants itself.",
+      "needs": [
+        "collective"
+      ]
+    },
+    "starter-kit": {
+      "name": "Starter Kit",
+      "version": "9.0",
+      "loaders": [
+        "fabric",
+        "neoforge"
+      ],
+      "path": "mods/starter-kit.jar",
+      "url": "https://cdn.modrinth.com/data/6L3ydNi8/versions/MAMRzlEH/starterkit-26.3.0-9.0.jar",
+      "sha256": "5339ade5884255059a681823b4acc2878be18b8f1ceffd686164510bcfceb228",
+      "summary": "New players get a kit of starting gear when they first join.",
+      "needs": [
+        "collective"
+      ]
+    },
+    "zombie-proof-doors": {
+      "name": "Zombie Proof Doors",
+      "version": "3.6",
+      "loaders": [
+        "fabric",
+        "neoforge"
+      ],
+      "path": "mods/zombie-proof-doors.jar",
+      "url": "https://cdn.modrinth.com/data/hDKfXb0T/versions/ONtNsJ7x/zombieproofdoors-26.3.0-3.6.jar",
+      "sha256": "ace463483aec24289b5b839ec6d8f17eccf98de4ee1a0d26cd8ce59978f75324",
+      "summary": "Zombies cannot break down doors.",
+      "needs": [
+        "collective"
+      ]
     }
   },
   "worlds": [
@@ -344,7 +468,14 @@
         "fallingtree": false,
         "essential-commands": false,
         "spark": false,
-        "chunky": false
+        "chunky": false,
+        "graves": false,
+        "sleep": false,
+        "healing-campfire": false,
+        "safe-campfire": false,
+        "replanting-crops": false,
+        "starter-kit": false,
+        "zombie-proof-doors": false
       }
     },
     {
@@ -382,7 +513,13 @@
         "fallingtree": false,
         "lithium-neoforge": false,
         "spark-neoforge": false,
-        "chunky-neoforge": false
+        "chunky-neoforge": false,
+        "sleep": false,
+        "healing-campfire": false,
+        "safe-campfire": false,
+        "replanting-crops": false,
+        "starter-kit": false,
+        "zombie-proof-doors": false
       }
     }
   ]

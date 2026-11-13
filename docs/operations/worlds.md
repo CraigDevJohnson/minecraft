@@ -10,7 +10,7 @@ Status: the first Deploy ran on 2026-11-11 (Deploy runs 42983546750 and 42985094
 
 - **`base`** is the server properties the worlds share (the port, the allowlist switches, `max-players`, and so on).
 - **`loaders`** is what each loader's server holds. `fabric` has Fabric's server launcher (the `jar` Crafty launches), Fabric API, and Geyser and Floodgate for Fabric. `neoforge` has NeoForge's starter jar (the `jar` Crafty launches), NeoForge's installer, and Geyser and Floodgate for NeoForge. Each also has Geyser's approved configuration, under that loader's own folder in `config/`.
-- **`mods`** is the catalog. A mod is a Fabric or NeoForge mod with an id, a `name`, a `version`, the `loaders` it runs on, a jar `path` under `mods/`, a `url`, a `sha256`, a `summary` for the mods page, and optionally `managed_files`: configuration the adapter writes at each start while the mod is on. A managed file a mod wrote stays in place when the mod is off.
+- **`mods`** is the catalog. A mod is a Fabric or NeoForge mod with an id, a `name`, a `version`, the `loaders` it runs on, a jar `path` under `mods/`, a `url`, a `sha256`, a `summary` for the mods page, and optionally `managed_files`: configuration the adapter writes at each start while the mod is on, and `needs`: the ids of library mods in the catalog that must load with it. A start puts a needed library on with the mod and takes it off with the last mod that needs it. A library is listed by no world, so the mods page does not show it. A managed file a mod wrote stays in place when the mod is off.
 - **`worlds`** is an ordered list. Its order is the display order, and the first world is the one a request that names no world means. Each world has an `id`, a `name`, its `loader`, `server_properties` of its own (`level-name`, `gamemode`, `motd`), and `mods`: each catalog id the world may run, with `true` or `false` for its default. A world may list only mods that run on its loader.
 
 | World | Loader | Game mode | Mods on by default |
@@ -30,6 +30,15 @@ The worlds also list these, off by default, for a `minecraft-admin` Member to sw
 | Chunky | Builds the map ahead of time (`/chunky`) | all three |
 | FallingTree | Chop one log and the whole tree comes down | `survival`, `adventure` |
 | Essential Commands | `/home`, `/tpa` and `/spawn` | `survival`, `creative` (it has no NeoForge build) |
+| Universal Graves | When you die, your items wait in a grave where you fell | `survival` (Fabric only; needs Polymer) |
+| Sleep | One player in bed skips the night for everyone | `survival`, `adventure` |
+| Healing Campfire | Standing near a campfire heals you | `survival`, `adventure` |
+| No Hostiles Around Campfire | Monsters do not spawn near a lit campfire | `survival`, `adventure` |
+| Replanting Crops | Harvest a crop with a hoe and it replants itself | `survival`, `adventure` |
+| Starter Kit | New players get a kit of starting gear when they first join | `survival`, `adventure` |
+| Zombie Proof Doors | Zombies cannot break down doors | `survival`, `adventure` |
+
+The last five need the Collective library, which the catalog holds with Polymer as `collective` and `polymer`.
 
 Lithium, spark and Chunky have a jar for each loader, so each is in the catalog twice, like Flan.
 
@@ -45,7 +54,7 @@ A mod is added by pull request. Nothing reaches a world that is not pinned here.
 
 1. **Check that it fits.** It must be a Fabric mod (for `survival` and `creative`) or a NeoForge mod (for `adventure`) for the pinned Minecraft version, and it must run on the server alone. A mod that adds blocks, items or creatures needs the same mod in each player's Minecraft, which a Bedrock player cannot install: pin one only for a world meant for Java players who have it. Read what its project says about Geyser and Floodgate, and which other mods it requires: each of those is pinned too.
 2. **Find the pin.** Use the exact release file's HTTPS URL, with no query string and no `latest` in the path, on one of the download hosts the adapter allows: `github.com`, `cdn.modrinth.com`, `download.geysermc.org`, `meta.fabricmc.net` or `maven.neoforged.net`. For a mod Modrinth hosts, run the **Pins** workflow by hand with `modrinth_version` set to the version's eight-character id. It prints the file's URL, its name and the SHA-256 of the file as downloaded, after checking the download against the SHA-512 Modrinth publishes. For a GitHub release, download the jar once and take its SHA-256 (`sha256sum <file>`).
-3. **Add it to `mods`** in `server.json` under a new id, with its `name`, `version`, `loaders` (`fabric`, `neoforge` or both), `path` (`mods/<file>.jar`), `url`, `sha256`, and a one-sentence `summary` of what the mod does, which the mods page shows.
+3. **Add it to `mods`** in `server.json` under a new id, with its `name`, `version`, `loaders` (`fabric`, `neoforge` or both), `path` (`mods/<file>.jar`), `url`, `sha256`, and a one-sentence `summary` of what the mod does, which the mods page shows. If Modrinth lists a required dependency other than Fabric API, add that library to the catalog too and name it in the mod's `needs`.
 4. **List it under the worlds that may run it**, in each world's `mods`, with `true` to have it on by default or `false` to leave it for a Member to switch on.
 5. **Give it managed files only if it needs them.** A managed file is canonical JSON (`"format": "canonical-json-v1"`), which is also valid YAML, or Java properties (`"format": "properties-v1"`: one `key=value` line per key), with the SHA-256 of its rendered bytes. The adapter refuses a manifest whose checksum does not match.
 6. **Change the `revision`** string, run `.tools/bin/task check`, and open the pull request. `task check` is offline and can only tell that a pin is well formed. The Pins workflow runs on the pull request, downloads every pinned file and fails on a SHA-256 that does not match. Do not merge with it red.
