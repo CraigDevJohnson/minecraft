@@ -1622,6 +1622,12 @@ def load_manifest(path: Path) -> dict:
         if (not INSTANCE_ID.fullmatch(name) or not mod["path"].startswith("mods/")
                 or not isinstance(mod.get("loaders"), list) or not mod["loaders"] or not set(mod["loaders"]) <= set(loaders)):
             raise CraftyError("every mod needs an id of the kind a world has, a jar in mods/ and the loaders it runs on")
+    for mod in mods.values():
+        # A library a mod needs goes on with it (world_content), so it must run wherever the mod does.
+        needs = mod.get("needs", [])
+        if (not isinstance(needs, list) or not set(needs) <= set(mods)
+                or any(mods[need].get("needs") or not set(mod["loaders"]) <= set(mods[need]["loaders"]) for need in needs)):
+            raise CraftyError("a mod may need only catalog mods that run on its loaders and need nothing themselves")
     for managed in [*(item for loader in loaders.values() for item in loader.get("managed_files", [])),
                     *(item for mod in mods.values() for item in mod.get("managed_files", []))]:
         # Written under sudo, so only plain relative paths inside the server folder are accepted.
@@ -1657,7 +1663,7 @@ def world_content(manifest: dict, world: str, mods: list | None = None) -> dict:
     """What one world's server holds with mods switched on, as one server's content: its loader's artifacts and
     managed files with each mod's jar and files, the jar Crafty launches, and the base's server properties under
     the world's own. Without mods, the world's defaults are on. A mod the manifest does not list for the world is
-    refused."""
+    refused. A library a mod that is on needs is on with it."""
     entry = next((item for item in manifest["worlds"] if item["id"] == world), None)
     if entry is None:
         raise CraftyError("the pinned server content has no such world")
@@ -1665,7 +1671,8 @@ def world_content(manifest: dict, world: str, mods: list | None = None) -> dict:
         mods = [name for name, default in entry["mods"].items() if default]
     if not set(mods) <= set(entry["mods"]):
         raise CraftyError("the pinned server content lists no such mod for this world")
-    loader, on = manifest["loaders"][entry["loader"]], [manifest["mods"][name] | {"name": name} for name in sorted(set(mods))]
+    wanted = set(mods) | {need for name in mods for need in manifest["mods"][name].get("needs", [])}
+    loader, on = manifest["loaders"][entry["loader"]], [manifest["mods"][name] | {"name": name} for name in sorted(wanted)]
     return {"crafty": manifest["crafty"], "jar": loader["jar"], "artifacts": loader["artifacts"] + on,
             "managed_files": loader.get("managed_files", []) + [item for mod in on for item in mod.get("managed_files", [])],
             "server_properties": manifest["base"]["server_properties"] | entry["server_properties"]}

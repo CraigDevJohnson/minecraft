@@ -2738,6 +2738,11 @@ class ManifestTests(unittest.TestCase):
         # The mods named replace the defaults, and none leaves the base alone.
         self.assertEqual([artifact["name"] for artifact in crafty.world_content(manifest, "creative", ["flan"])["artifacts"]],
                          [*loader, "flan"])
+        # A library a mod needs goes on with it, once, and leaves with the last mod that needs it.
+        self.assertEqual([artifact["name"] for artifact in crafty.world_content(manifest, "survival", ["healing-campfire", "starter-kit"])["artifacts"]],
+                         [*loader, "collective", "healing-campfire", "starter-kit"])
+        self.assertEqual([artifact["name"] for artifact in crafty.world_content(manifest, "survival", ["graves"])["artifacts"]],
+                         [*loader, "graves", "polymer"])
         # The adventure world runs NeoForge: its own loader's jars and Geyser configuration.
         bare = crafty.world_content(manifest, "adventure", [])
         self.assertEqual((bare["jar"], bare["artifacts"], bare["managed_files"]), ("server.jar", neoforge["artifacts"], neoforge["managed_files"]))
@@ -2761,6 +2766,14 @@ class ManifestTests(unittest.TestCase):
     def test_managed_file_outside_the_server_folder_is_refused(self):
         self.refused(lambda manifest: manifest["loaders"]["fabric"]["managed_files"][0].update(path="../../etc/cron.d/x"), "plain relative paths")
         self.refused(lambda manifest: manifest["mods"]["worldedit"]["managed_files"][0].update(path="/etc/cron.d/x"), "plain relative paths")
+
+    def test_a_mod_needs_only_plain_libraries_that_run_on_its_loaders(self):
+        message = "need only catalog mods"
+        self.refused(lambda manifest: manifest["mods"]["sit"].update(needs=["missing"]), message)
+        self.refused(lambda manifest: manifest["mods"]["sit"].update(needs="collective"), message)
+        # Polymer is Fabric's alone, and Sit runs on NeoForge too.
+        self.refused(lambda manifest: manifest["mods"]["sit"].update(needs=["polymer"]), message)
+        self.refused(lambda manifest: manifest["mods"]["collective"].update(needs=["sit"]), message)
 
     def test_a_mod_s_managed_file_must_match_its_checksum(self):
         self.refused(lambda manifest: manifest["mods"]["flan"]["managed_files"][0]["content"].update(extra={"default": True}),
