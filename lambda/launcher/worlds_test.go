@@ -243,3 +243,22 @@ func TestTwoWorldsStartingAtOnceShareNothing(t *testing.T) {
 		t.Fatalf("creative: status=%+v err=%v", status, err)
 	}
 }
+
+func TestAModLinksToItsModrinthPage(t *testing.T) {
+	manifest, err := LoadManifest(fstest.MapFS{"server.json": {Data: []byte(`{
+		"mods": {
+			"sit": {"name": "Sit", "version": "2.0.0", "summary": "Sit.", "url": "https://cdn.modrinth.com/data/tFLdoQMh/versions/UlPgR7YT/sit-2.0.0.jar"},
+			"other": {"name": "Other", "version": "1", "summary": "Other.", "url": "https://github.com/example/other/releases/download/1/other.jar"}
+		},
+		"worlds": [{"id": "survival", "name": "Survival", "mods": {"sit": true, "other": false}}]
+	}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := manifest.Mods["sit"].Source; got != "https://modrinth.com/mod/tFLdoQMh" {
+		t.Fatalf("source = %q", got)
+	}
+	if got := manifest.Mods["other"].Source; got != "" {
+		t.Fatalf("a pin outside Modrinth has no page to link, got %q", got)
+	}
+}

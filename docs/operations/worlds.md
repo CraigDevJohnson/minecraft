@@ -19,26 +19,29 @@ Status: the first Deploy ran on 2026-11-11 (Deploy runs 42983546750 and 42985094
 | `creative` | Fabric | creative, forced | Flan, WorldEdit |
 | `adventure` | NeoForge | survival | Flan |
 
-Sit and WorldEdit are also listed for `adventure`, off by default. Flan has a build for each loader, so the catalog holds it twice: `flan` for the Fabric worlds and `flan-neoforge` for `adventure`.
-
-The worlds also list these, off by default, for a `minecraft-admin` Member to switch on:
+Every world lists every mod that has a build for its loader, so a `minecraft-admin` Member can switch any of them on. Apart from the defaults above, each is off until switched on. Flan has a build for each loader, so the catalog holds it twice: `flan` for the Fabric worlds and `flan-neoforge` for `adventure`.
 
 | Mod | What it does | Worlds |
 | --- | --- | --- |
+| Flan | Claim land with a golden hoe | all three |
+| WorldEdit | Bulk building tools for players in creative mode | all three |
+| Sit | Sit on stairs with a click | all three |
 | Lithium | Speeds up the server without changing how the game plays | all three |
 | spark | Shows what is slowing the server down (`/spark`) | all three |
 | Chunky | Builds the map ahead of time (`/chunky`) | all three |
-| FallingTree | Chop one log and the whole tree comes down | `survival`, `adventure` |
+| FallingTree | Chop one log and the whole tree comes down | all three |
+| Sleep | One player in bed skips the night for everyone | all three |
+| Healing Campfire | Standing near a campfire heals you | all three |
+| No Hostiles Around Campfire | Monsters do not spawn near a lit campfire | all three |
+| Replanting Crops | Harvest a crop with a hoe and it replants itself | all three |
+| Starter Kit | New players get a kit of starting gear when they first join | all three |
+| Zombie Proof Doors | Zombies cannot break down doors | all three |
 | Essential Commands | `/home`, `/tpa` and `/spawn` | `survival`, `creative` (it has no NeoForge build) |
-| Universal Graves | When you die, your items wait in a grave where you fell | `survival` (Fabric only; needs Polymer) |
-| Sleep | One player in bed skips the night for everyone | `survival`, `adventure` |
-| Healing Campfire | Standing near a campfire heals you | `survival`, `adventure` |
-| No Hostiles Around Campfire | Monsters do not spawn near a lit campfire | `survival`, `adventure` |
-| Replanting Crops | Harvest a crop with a hoe and it replants itself | `survival`, `adventure` |
-| Starter Kit | New players get a kit of starting gear when they first join | `survival`, `adventure` |
-| Zombie Proof Doors | Zombies cannot break down doors | `survival`, `adventure` |
+| Universal Graves | When you die, your items wait in a grave where you fell | `survival`, `creative` (it has no NeoForge build; needs Polymer) |
 
-The last five need the Collective library, which the catalog holds with Polymer as `collective` and `polymer`.
+When a mod joins the catalog, list it for every world whose loader it runs on.
+
+Healing Campfire, No Hostiles Around Campfire, Replanting Crops, Starter Kit and Zombie Proof Doors need the Collective library, which the catalog holds with Polymer as `collective` and `polymer`.
 
 Lithium, spark and Chunky have a jar for each loader, so each is in the catalog twice, like Flan.
 
@@ -46,7 +49,7 @@ Lithium, spark and Chunky have a jar for each loader, so each is in the catalog 
 
 World and mod ids match `^[a-z][a-z0-9-]{0,31}$`, because they travel unquoted in the commands the Launcher sends. A world may not set `server-port`, `online-mode`, `white-list`, `enforce-whitelist`, `enable-rcon` or `enable-query`. The adapter refuses a manifest that breaks these rules, and the Launcher refuses to start up unless the manifest's world ids are exactly the worlds OpenTofu gave it.
 
-Only a mod a world lists can be switched on for it. A Member with the site's `minecraft-admin` grant switches mods on the site; an operator can use the [Server control workflow](cloud-controls.md#the-server-control-workflow) or `task server:mod-on` and `task server:mod-off`. The Launcher keeps only the switches that differ from the defaults, in `/<resource_prefix>/launcher/mods`, and a switch applies at that world's next start. At that start the adapter downloads and checks any jar it lacks, writes the managed files of the mods that are on, and removes every other jar directly in `mods/`. A mod's own configuration under `config/` and its data in the world folder stay, so switching a mod back on brings its data back.
+Only a mod a world lists can be switched on for it. The mods list the Launcher answers carries each mod's `source`, its page on Modrinth, which the Launcher works out from the pinned `url`; the site links the mod's name to it. A Member with the site's `minecraft-admin` grant switches mods on the site; an operator can use the [Server control workflow](cloud-controls.md#the-server-control-workflow) or `task server:mod-on` and `task server:mod-off`. The Launcher keeps only the switches that differ from the defaults, in `/<resource_prefix>/launcher/mods`, and a switch applies at that world's next start. At that start the adapter downloads and checks any jar it lacks, writes the managed files of the mods that are on, and removes every other jar directly in `mods/`. A mod's own configuration under `config/` and its data in the world folder stay, so switching a mod back on brings its data back.
 
 ## Add a mod
 

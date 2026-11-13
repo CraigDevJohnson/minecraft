@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "revision": "mods-2026-11-13c",
+  "revision": "mods-2026-11-13d",
   "crafty": {
     "image": "registry.gitlab.com/crafty-controller/crafty-4@sha256:7b6e87514259549647e15ceeaf73d238792e6d77e2c79fc744d5badc8d6e997c",
     "version": "4.11.0"
@@ -475,7 +475,8 @@
         "safe-campfire": false,
         "replanting-crops": false,
         "starter-kit": false,
-        "zombie-proof-doors": false
+        "zombie-proof-doors": false,
+        "worldedit": false
       }
     },
     {
@@ -494,7 +495,16 @@
         "lithium": false,
         "essential-commands": false,
         "spark": false,
-        "chunky": false
+        "chunky": false,
+        "sit": false,
+        "fallingtree": false,
+        "graves": false,
+        "sleep": false,
+        "healing-campfire": false,
+        "safe-campfire": false,
+        "replanting-crops": false,
+        "starter-kit": false,
+        "zombie-proof-doors": false
       }
     },
     {

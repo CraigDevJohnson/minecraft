@@ -29,6 +29,8 @@ type Mod struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 	Summary string `json:"summary"`
+	// Source is the mod's page, worked out from where its jar is pinned; empty when the pin is not Modrinth's.
+	Source string `json:"source,omitempty"`
 }
 
 // World is one world of the manifest: its id, which also names the one instance its host runs, its display
@@ -37,6 +39,17 @@ type World struct {
 	ID   string          `json:"id"`
 	Name string          `json:"name"`
 	Mods map[string]bool `json:"mods"`
+}
+
+// modrinthFile matches a file on Modrinth's CDN, whose path starts with the project's id.
+var modrinthFile = regexp.MustCompile(`^https://cdn\.modrinth\.com/data/([A-Za-z0-9]{8})/`)
+
+// modPage answers the page of the mod a pinned jar comes from, or nothing when the pin does not say.
+func modPage(url string) string {
+	if match := modrinthFile.FindStringSubmatch(url); match != nil {
+		return "https://modrinth.com/mod/" + match[1]
+	}
+	return ""
 }
 
 // LoadManifest reads the worlds and the mods from the pinned server content among the adapter files in fsys,
@@ -49,6 +62,18 @@ func LoadManifest(fsys fs.FS) (*Manifest, error) {
 	var manifest Manifest
 	if err := json.Unmarshal(content, &manifest); err != nil {
 		return nil, fmt.Errorf("read the pinned server content: %w", err)
+	}
+	var pins struct {
+		Mods map[string]struct {
+			URL string `json:"url"`
+		} `json:"mods"`
+	}
+	if err := json.Unmarshal(content, &pins); err != nil {
+		return nil, fmt.Errorf("read the pinned server content: %w", err)
+	}
+	for id, mod := range manifest.Mods {
+		mod.Source = modPage(pins.Mods[id].URL)
+		manifest.Mods[id] = mod
 	}
 	if len(manifest.Worlds) == 0 {
 		return nil, errors.New("the pinned server content lists no world")
