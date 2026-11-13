@@ -2749,7 +2749,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(bare["managed_files"][0]["path"], "config/Geyser-NeoForge/config.yml")
         self.assertEqual(bare["server_properties"]["gamemode"], "survival")
         # Only a mod the manifest lists for the world can be on there, and only a world it holds.
-        for world, mods in (("survival", ["worldedit"]), ("survival", ["sit", "worldedit"]), ("family", None)):
+        for world, mods in (("adventure", ["graves"]), ("adventure", ["sit", "essential-commands"]), ("family", None)):
             with self.subTest(world=world, mods=mods), self.assertRaises(crafty.CraftyError):
                 crafty.world_content(manifest, world, mods)
         self.assertEqual(manifest, json.loads(MANIFEST.read_text()))  # the manifest itself is left as loaded
