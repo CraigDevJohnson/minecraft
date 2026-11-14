@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from minecraft_access import AccessError, change_allowlist  # noqa: E402
+from minecraft_access import AccessError, change_allowlist, change_operators  # noqa: E402
 
 JAVA_PLAYER = {"uuid": "12345678-1234-4234-8234-123456789abc", "name": "TestPlayer"}
 BEDROCK_PLAYER = {"uuid": "00000000-0000-0000-0009-01eed05d1005", "name": "SampleTablet"}
@@ -152,6 +152,78 @@ class AllowlistTests(unittest.TestCase):
         result = change_allowlist(machine, "survival", "remove", "java", JAVA_PLAYER)
         self.assertEqual(result["allowlist"], "unchanged")
         self.assertEqual(len(machine.commands), 1)
+
+
+class FakeOperators(FakeMachine):
+    """The same boundary, where op and deop change ops.json as the game does."""
+
+    def read_operators(self, instance):
+        return self.read_allowlist(instance)
+
+    def rcon(self, instance, command):
+        self.commands.append((instance, command))
+        self.requested = [] if command.startswith("deop ") else [{**self.player, "level": 4, "bypassesPlayerLimit": False}]
+
+
+class OperatorTests(unittest.TestCase):
+    def test_java_op_names_the_account_and_confirms_the_uuid_in_ops_json(self):
+        machine = FakeOperators()
+        result = change_operators(machine, "survival", "add", "java", JAVA_PLAYER)
+        self.assertEqual(machine.commands, [("survival", "op TestPlayer")])
+        self.assertEqual(result, {"instance": "survival", "edition": "java", "operation": "add", "operators": "updated"})
+        result = change_operators(machine, "survival", "add", "java", JAVA_PLAYER)
+        self.assertEqual((result["operators"], len(machine.commands)), ("unchanged", 1))
+        result = change_operators(machine, "survival", "remove", "java", JAVA_PLAYER)
+        self.assertEqual((result["operators"], machine.commands[-1]), ("updated", ("survival", "deop TestPlayer")))
+
+    def test_bedrock_goes_by_floodgates_name(self):
+        player = {**BEDROCK_PLAYER, "name": "Sample Tablet"}
+        machine = FakeOperators(player)
+        machine.delay = 2
+        result = change_operators(machine, "survival", "add", "bedrock", player)
+        self.assertEqual(machine.commands, [("survival", "op .Sample_Tablet")])
+        self.assertEqual((result["operators"], machine.now), ("updated", 2))
+
+    def test_a_change_the_server_never_confirms_times_out_without_naming_the_player(self):
+        machine = FakeOperators(BEDROCK_PLAYER)
+        machine.delay = 1000
+        with self.assertRaisesRegex(AccessError, "timed out; a player this world has not seen becomes an operator at its next start") as failure:
+            change_operators(machine, "survival", "add", "bedrock", BEDROCK_PLAYER)
+        self.assertNotIn("SampleTablet", str(failure.exception))
+        self.assertLessEqual(len(str(failure.exception)), 200)  # the launcher passes on at most 200 bytes
+
+    def test_corrupt_ops_or_invalid_input_fail_before_rcon(self):
+        for entries in (None, {}, [None], [{"uuid": "invalid"}], [JAVA_PLAYER, JAVA_PLAYER]):
+            with self.subTest(entries=entries):
+                machine = FakeOperators()
+                machine.read_operators = lambda instance: entries
+                with self.assertRaises(AccessError):
+                    change_operators(machine, "survival", "add", "java", JAVA_PLAYER)
+                self.assertEqual(machine.commands, [])
+        for instance, operation, edition, player in (
+            ("survival", "op", "java", JAVA_PLAYER),
+            ("survival", "add", "offline", JAVA_PLAYER),
+            ("../survival", "add", "java", JAVA_PLAYER),
+            ("survival", "add", "java", {**JAVA_PLAYER, "name": "A B"}),
+            ("survival", "add", "bedrock", {**BEDROCK_PLAYER, "name": "Tablet;stop"}),
+            ("survival", "add", "java", {"name": "TestPlayer"}),
+        ):
+            with self.subTest(instance=instance, operation=operation, edition=edition, player=player):
+                machine = FakeOperators()
+                with self.assertRaises(AccessError):
+                    change_operators(machine, instance, operation, edition, player)
+                self.assertEqual(machine.commands, [])
+
+    def test_an_unreadable_ops_json_does_not_expose_its_cause(self):
+        machine = FakeOperators()
+
+        def fail(instance):
+            raise RuntimeError("private identity")
+
+        machine.read_operators = fail
+        with self.assertRaises(AccessError) as failure:
+            change_operators(machine, "survival", "add", "java", JAVA_PLAYER)
+        self.assertEqual(str(failure.exception), "cannot read private server operators")
 
 
 if __name__ == "__main__":

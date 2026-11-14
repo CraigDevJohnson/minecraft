@@ -1559,6 +1559,59 @@ class ContentTests(unittest.TestCase):
                 self.assertEqual((host.calls, api.log), ([], []))
                 self.assertEqual(json.loads(allowlist.read_text()), [RENAMED])
 
+    def test_the_cli_start_writes_the_operators_it_carries_before_the_game_starts(self):
+        ops = self.server / "ops.json"
+        ops.write_text(json.dumps([{**RENAMED, "level": 4, "bypassesPlayerLimit": False}]))
+        ops.chmod(0o660)
+        world = [{**JAVA, "level": 4, "bypassesPlayerLimit": False}, {"uuid": BEDROCK["uuid"], "name": ".Sample_Player", "level": 4, "bypassesPlayerLimit": False}]
+        api, loaded = FakeAPI(name="survival"), []
+        request = api.request
+
+        def seen(method, path, body=None, text=None):
+            if path.endswith("/action/start_server"):
+                loaded.append(json.loads(ops.read_text()))
+            return request(method, path, body, text)
+
+        api.request = seen
+        path = self.root / "ops-file.json"
+        path.write_text(json.dumps(world))
+        path.chmod(0o600)
+        code, answer, api, host = self.cli_start("--allowlist-file", str(self.allowlist_file([])), "--ops-file", str(path), api=api)
+        self.assertEqual((code, answer["ready"]), (0, True))
+        # Whoever was an operator before, the server starts with the world's list alone, as its own file.
+        self.assertEqual(loaded, [world])
+        self.assertEqual(stat.S_IMODE(ops.stat().st_mode), 0o660)
+        self.assertEqual(ops.read_text(), json.dumps(world, indent=2) + "\n")
+        # An empty list leaves the server no operator.
+        path.write_text("[]")
+        api.is_running = False
+        code, _, api, host = self.cli_start("--ops-file", str(path), api=api)
+        self.assertEqual((code, json.loads(ops.read_text())), (0, []))
+
+    def test_the_cli_start_refuses_a_shared_or_malformed_ops_file_without_echoing_it(self):
+        ops = self.server / "ops.json"
+        ops.write_text("[]")
+        entry = {**JAVA, "level": 4, "bypassesPlayerLimit": False}
+        for case, (value, mode) in {
+            "readable by others": ([entry], 0o644),
+            "not JSON": ("Sample_Java", 0o600),
+            "a whitelist entry": ([JAVA], 0o600),
+            "a level of 5": ([{**entry, "level": 5}], 0o600),
+            "a level that is no number": ([{**entry, "level": True}], 0o600),
+            "a limit that is no flag": ([{**entry, "bypassesPlayerLimit": "no"}], 0o600),
+            "a UUID in capitals": ([{**entry, "uuid": JAVA["uuid"].upper()}], 0o600),
+        }.items():
+            with self.subTest(case=case):
+                path = self.root / "ops-file.json"
+                path.unlink(missing_ok=True)
+                path.write_text(value if isinstance(value, str) else json.dumps(value))
+                path.chmod(mode)
+                code, answer, api, host = self.cli_start("--ops-file", str(path))
+                self.assertEqual((code, set(answer)), (1, {"error"}))
+                self.assertNotIn("Sample_Java", answer["error"])
+                self.assertEqual((host.calls, api.log), ([], []))
+                self.assertEqual(ops.read_text(), "[]")
+
     def test_the_cli_renders_the_compose_file_the_installer_writes(self):
         output = io.BytesIO()
         with unittest.mock.patch.object(sys, "stdout", unittest.mock.Mock(buffer=output)):
@@ -1919,6 +1972,77 @@ class AllowlistTests(unittest.TestCase):
             with self.subTest(line=line), self.assertRaises(crafty.CraftyError):
                 self.adapter.console({"server_id": SERVER_ID}, line)
         self.assertEqual(self.api.console, [])
+
+
+class OperatorTests(unittest.TestCase):
+    """The operator action the launcher runs on a world's running server."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.ops = self.root / "crafty" / "servers" / SERVER_ID / "ops.json"
+        self.ops.parent.mkdir(parents=True)
+        self.ops.write_text("[]")
+        self.api = FakeAPI(running=True)
+        self.api.on_console = self.play
+        self.host = FakeHost(self.api)
+        self.adapter = crafty.Adapter(config(self.root), self.api, self.host)
+        self.known = {"Sample_Java": JAVA, ".Sample_Player": BEDROCK}  # the names the server has seen
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def play(self, line):
+        """op and deop change ops.json as the game does, for a name the server has seen."""
+        command, _, name = line.partition(" ")
+        entries = json.loads(self.ops.read_text())
+        player = self.known.get(name)
+        if player is None:
+            return
+        entries = [entry for entry in entries if entry["uuid"] != player["uuid"]]
+        if command == "op":
+            entries.append({**player, "level": 4, "bypassesPlayerLimit": False})
+        self.ops.write_text(json.dumps(entries))
+
+    def test_op_and_deop_go_to_the_console_and_are_confirmed_in_ops_json(self):
+        result = self.adapter.operator("family", "add", "java", dict(JAVA))
+        self.assertEqual(result, {"instance": "family", "edition": "java", "operation": "add", "operators": "updated"})
+        result = self.adapter.operator("family", "add", "bedrock", dict(BEDROCK))
+        self.assertEqual(result["operators"], "updated")
+        self.assertEqual(self.api.console, [(SERVER_ID, "op Sample_Java"), (SERVER_ID, "op .Sample_Player")])
+        self.assertEqual(self.adapter.operator("family", "add", "java", dict(JAVA))["operators"], "unchanged")
+        self.assertEqual(self.adapter.operator("family", "remove", "java", dict(JAVA))["operators"], "updated")
+        self.assertEqual([entry["uuid"] for entry in json.loads(self.ops.read_text())], [BEDROCK["uuid"]])
+
+    def test_a_player_the_server_has_not_seen_times_out_without_naming_them(self):
+        self.known = {}
+        with self.assertRaises(crafty.CraftyError) as caught:
+            self.adapter.operator("family", "add", "bedrock", dict(BEDROCK))
+        self.assertIn("becomes an operator at its next start", str(caught.exception))
+        self.assertNotIn("Sample", str(caught.exception))
+        self.assertEqual(self.host.clock, 60)
+
+    def test_removing_an_operator_the_server_has_not_seen_times_out_and_says_so(self):
+        # The start wrote the player into ops.json, but the server cannot resolve their Floodgate name until they join.
+        self.ops.write_text(json.dumps([{**BEDROCK, "level": 4, "bypassesPlayerLimit": False}]))
+        self.known = {}
+        with self.assertRaises(crafty.CraftyError) as caught:
+            self.adapter.operator("family", "remove", "bedrock", dict(BEDROCK))
+        self.assertIn("stays an operator until its next start", str(caught.exception))
+        self.assertNotIn("Sample", str(caught.exception))
+        self.assertEqual(self.api.console, [(SERVER_ID, "deop .Sample_Player")])
+
+    def test_a_stopped_server_or_a_linked_ops_file_is_refused(self):
+        target = self.root / "elsewhere.json"
+        target.write_text("[]")
+        self.ops.unlink()
+        self.ops.symlink_to(target)
+        with self.assertRaises(crafty.CraftyError):
+            self.adapter.operator("family", "add", "java", dict(JAVA))
+        self.api.is_running = False
+        with self.assertRaisesRegex(crafty.CraftyError, "running, ready server"):
+            self.adapter.operator("family", "add", "java", dict(JAVA))
+        self.assertEqual((self.api.console, target.read_text()), ([], "[]"))
 
 
 class ConsoleTests(unittest.TestCase):
@@ -2662,6 +2786,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(output.getvalue()),
                          {"instance": "family", "edition": "java", "operation": "add", "allowlist": "updated"})
+
+    def test_cli_runs_the_launchers_operator_command(self):
+        # The exact command line lambda/launcher/operators.go sends, answered with the four fields it checks.
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write(config(Path(directory)))
+            server_dir = Path(directory) / "crafty" / "servers" / SERVER_ID
+            server_dir.mkdir(parents=True)
+            (server_dir / "ops.json").write_text("[]")
+            api = FakeAPI(running=True)
+            api.on_console = lambda line: (server_dir / "ops.json").write_text(json.dumps([{**JAVA, "level": 4, "bypassesPlayerLimit": False}]))
+            player = self.player_file(directory, JAVA)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = crafty.main(["--config", str(path), "operator", "family", "add", "--edition", "java",
+                                    "--player-file", str(player)], api=api, host=FakeHost(api))
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue()),
+                         {"instance": "family", "edition": "java", "operation": "add", "operators": "updated"})
+        self.assertEqual(api.console, [(SERVER_ID, "op Sample_Java")])
 
     def test_cli_refuses_a_shared_or_malformed_player_file_without_echoing_it(self):
         with tempfile.TemporaryDirectory() as directory:

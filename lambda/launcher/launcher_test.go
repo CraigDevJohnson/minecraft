@@ -24,10 +24,12 @@ const (
 	idleStateName = "/minecraft-test/idle-stop/worlds/survival/state"
 	address       = "203.0.113.10"
 	commandID     = "11111111-2222-3333-4444-555555555555"
-	// startCommand starts the survival world with no mod on and nobody on the allowlist: W10= is [] in base64.
-	startCommand = `allowlist="$(mktemp)"` + "\n" + `trap 'rm -f "$allowlist"' EXIT` + "\n" +
+	// startCommand starts the survival world with no mod on, nobody on the allowlist and no operator: W10= is []
+	// in base64.
+	startCommand = `allowlist="$(mktemp)"` + "\n" + `ops="$(mktemp)"` + "\n" + `trap 'rm -f "$allowlist" "$ops"' EXIT` + "\n" +
 		`printf '%s' 'W10=' | base64 -d > "$allowlist"` + "\n" +
-		remoteCommand + ` start survival --mods= --allowlist-file "$allowlist"`
+		`printf '%s' 'W10=' | base64 -d > "$ops"` + "\n" +
+		remoteCommand + ` start survival --mods= --allowlist-file "$allowlist" --ops-file "$ops"`
 )
 
 var now = time.Date(2026, 10, 11, 16, 0, 0, 0, time.UTC)
@@ -197,9 +199,11 @@ type rig struct {
 	gameUp   bool
 	players  int
 	pinged   []string
-	// mods are the mods that are on for the world, and whitelist the allowlist its starts carry.
+	// mods are the mods that are on for the world, and whitelist and ops the allowlist and operators its starts
+	// carry.
 	mods          []string
 	whitelist     string
+	ops           string
 	dnsErr        error
 	pointedAt     []string
 	followUps     int
@@ -220,6 +224,7 @@ func newWorldRig(world, name, host string, state ec2types.InstanceStateName, lau
 		ec2:       &fakeEC2{host: host, states: []ec2types.InstanceStateName{state}, launch: now.Add(-launchedAgo), ip: address},
 		ssm:       &fakeSSM{host: host, writable: []string{record}, params: map[string]string{record: "{}"}},
 		whitelist: "[]",
+		ops:       "[]",
 	}
 	r.launcher = &Launcher{
 		Config: Config{HostID: host, Instance: world, ServerName: name, PublicHostname: world + ".mc.example.com", BedrockPort: 19132, StateParameter: record},
@@ -240,6 +245,7 @@ func newWorldRig(world, name, host string, state ec2types.InstanceStateName, lau
 		FollowUpStop: func(context.Context) error { r.followUpStops++; return r.followStopErr },
 		Mods:         func(context.Context) ([]string, error) { return r.mods, nil },
 		Whitelist:    func(context.Context) ([]byte, error) { return []byte(r.whitelist), nil },
+		Ops:          func(context.Context) ([]byte, error) { return []byte(r.ops), nil },
 		Now:          func() time.Time { return now },
 	}
 	return r

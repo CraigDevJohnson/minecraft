@@ -1,6 +1,7 @@
 // Command launcher is the Minecraft Launcher's backend: it answers The Lobby's site with each world's status,
-// starts or stops a world when a Member or the operator's workflow asks, switches a world's mods, and restores
-// an archive or changes the allowlist when the operator's workflow asks.
+// starts or stops a world when a Member or the operator's workflow asks, and switches a world's mods, lists and
+// restores its archives, and keeps the allowlist and each world's operators for Minecraft Admin and the
+// operator's workflow.
 //
 // On Lambda it serves the site through its Function URL, which only the site's role and the operator's
 // control role may call (the-lobby ADR 0006, ADR 0006 here), and finishes each start, stop or restore in a
@@ -19,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -29,6 +31,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/awslabs/aws-lambda-go-api-proxy/core"
 	"github.com/awslabs/aws-lambda-go-api-proxy/httpadapter"
@@ -64,19 +67,27 @@ func (t task) run(ctx context.Context, worlds *Worlds, log *slog.Logger) error {
 const followUpMargin = 20 * time.Second
 
 // Environment is what the function's environment supplies: each world's Config, in the order the pinned server
-// content lists the worlds, the zone and token their DNS records share, and the two parameters the worlds share.
+// content lists the worlds, the zone and token their DNS records share, the three parameters the worlds share and
+// the bucket that holds their archives.
 type Environment struct {
 	Worlds             []Config
 	DNS                DNSPointer
 	ModsParameter      string
 	AllowlistParameter string
+	OperatorsParameter string
+	BackupBucket       string
 }
+
+// bucketName is S3's rule for a general purpose bucket's name, as infra/variables.tf checks backup_bucket_name.
+var bucketName = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
 
 func loadConfig(getenv func(string) string, manifest *Manifest) (Environment, error) {
 	env := Environment{
 		DNS:                DNSPointer{ZoneID: getenv("CLOUDFLARE_ZONE_ID"), TokenParameter: getenv("CLOUDFLARE_TOKEN_PARAMETER")},
 		ModsParameter:      getenv("MODS_PARAMETER"),
 		AllowlistParameter: getenv("ALLOWLIST_PARAMETER"),
+		OperatorsParameter: getenv("OPERATORS_PARAMETER"),
+		BackupBucket:       getenv("BACKUP_BUCKET"),
 	}
 	port, err := strconv.Atoi(getenv("BEDROCK_PORT"))
 	if err != nil || port < 1 || port > 65535 {
@@ -85,8 +96,11 @@ func loadConfig(getenv func(string) string, manifest *Manifest) (Environment, er
 	if !cloudflareID.MatchString(env.DNS.ZoneID) || !parameterName.MatchString(env.DNS.TokenParameter) {
 		return Environment{}, errors.New("valid CLOUDFLARE_ZONE_ID and CLOUDFLARE_TOKEN_PARAMETER are required")
 	}
-	if !parameterName.MatchString(env.ModsParameter) || !parameterName.MatchString(env.AllowlistParameter) {
-		return Environment{}, errors.New("MODS_PARAMETER and ALLOWLIST_PARAMETER must be parameter names")
+	if !parameterName.MatchString(env.ModsParameter) || !parameterName.MatchString(env.AllowlistParameter) || !parameterName.MatchString(env.OperatorsParameter) {
+		return Environment{}, errors.New("MODS_PARAMETER, ALLOWLIST_PARAMETER and OPERATORS_PARAMETER must be parameter names")
+	}
+	if !bucketName.MatchString(env.BackupBucket) {
+		return Environment{}, errors.New("BACKUP_BUCKET must be a bucket name")
 	}
 	// WORLDS is OpenTofu's: each world's host, hostname and state parameters under the world's id. The idle
 	// stop gets the same value.
@@ -184,6 +198,9 @@ func main() {
 		SSM:                ssmClient,
 		ModsParameter:      env.ModsParameter,
 		AllowlistParameter: env.AllowlistParameter,
+		OperatorsParameter: env.OperatorsParameter,
+		S3:                 s3.NewFromConfig(awsConfig),
+		BackupBucket:       env.BackupBucket,
 		LookupPlayer:       (&PlayerLookup{Client: lookupClient()}).Lookup,
 	}
 	for _, cfg := range env.Worlds {

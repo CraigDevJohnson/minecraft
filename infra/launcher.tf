@@ -126,12 +126,22 @@ resource "aws_iam_role_policy" "launcher" {
         Resource = "*"
       },
       {
-        # Each world's start record, and the two records every world shares: the mods Members switched and
-        # the family allowlist.
+        # Each world's start record, and the three records every world shares: the mods Members switched, the
+        # family allowlist and each world's operators.
         Sid      = "OwnStateOnly"
         Effect   = "Allow"
         Action   = ["ssm:GetParameter", "ssm:PutParameter"]
-        Resource = concat([for id in local.world_ids : "${local.parameter_arn_base}${aws_ssm_parameter.world_launcher_state[id].name}"], ["${local.parameter_arn_base}${aws_ssm_parameter.launcher_mods[0].name}", "${local.parameter_arn_base}${aws_ssm_parameter.launcher_allowlist[0].name}"])
+        Resource = concat([for id in local.world_ids : "${local.parameter_arn_base}${aws_ssm_parameter.world_launcher_state[id].name}"], ["${local.parameter_arn_base}${aws_ssm_parameter.launcher_mods[0].name}", "${local.parameter_arn_base}${aws_ssm_parameter.launcher_allowlist[0].name}", "${local.parameter_arn_base}${aws_ssm_parameter.launcher_operators[0].name}"])
+      },
+      {
+        # Minecraft Admin lists each world's archives to offer a restore; the host adapter writes and reads them.
+        Sid      = "ListWorldArchivesOnly"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = [local.backup_bucket_arn]
+        Condition = {
+          StringLike = { "s3:prefix" = [for id in local.world_ids : "instances/${id}/crafty/*"] }
+        }
       },
       {
         Sid      = "ReadOnlyCloudflareToken"
@@ -196,10 +206,12 @@ resource "aws_lambda_function" "launcher" {
       WORLDS                     = local.worlds
       MODS_PARAMETER             = aws_ssm_parameter.launcher_mods[0].name
       ALLOWLIST_PARAMETER        = aws_ssm_parameter.launcher_allowlist[0].name
+      OPERATORS_PARAMETER        = aws_ssm_parameter.launcher_operators[0].name
+      BACKUP_BUCKET              = var.backup_bucket_name
       BEDROCK_PORT               = "19132"
       CLOUDFLARE_ZONE_ID         = var.cloudflare_zone_id
       CLOUDFLARE_TOKEN_PARAMETER = local.launcher_token_name
-      # The sites' roles may start and stop; the launcher refuses them a forced stop and the allowlist.
+      # The sites' roles may do everything but force a stop, which the launcher keeps for the operator.
       SITE_ROLE_ARNS = join(",", sort(values(local.launcher_sites)))
     }
   }

@@ -9,6 +9,7 @@ import (
 	"regexp"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/smithy-go"
 )
@@ -112,15 +113,21 @@ var ErrUnknownWorld = errors.New("unknown world")
 
 // Worlds is every world's Launcher. Each world has its own host, hostname and record, so two worlds starting
 // or stopping at once share nothing. What the worlds do share is kept here: the mods a Member switches for a
-// world's next start, and the family's allowlist, which every start carries to its host.
+// world's next start, the family's allowlist and each world's operators, which every start carries to its host,
+// and the backup bucket that holds every world's archives.
 type Worlds struct {
 	Manifest *Manifest
 	// Launchers holds each world's Launcher under the world's id.
 	Launchers map[string]*Launcher
 	SSM       SSMAPI
-	// ModsParameter holds the Members' switches, and AllowlistParameter the allowlist of record.
+	// ModsParameter holds the Members' switches, AllowlistParameter the allowlist of record and
+	// OperatorsParameter each world's operators.
 	ModsParameter      string
 	AllowlistParameter string
+	OperatorsParameter string
+	// S3 lists each world's archives in BackupBucket.
+	S3           s3.ListObjectsV2APIClient
+	BackupBucket string
 	// LookupPlayer resolves a Java name or Bedrock gamertag to the account the server knows.
 	LookupPlayer func(ctx context.Context, edition, name string) (Player, error)
 }
@@ -130,6 +137,7 @@ func (w *Worlds) Add(launcher *Launcher) {
 	id := launcher.Config.Instance
 	launcher.Mods = func(ctx context.Context) ([]string, error) { return w.modsOn(ctx, id) }
 	launcher.Whitelist = w.whitelist
+	launcher.Ops = func(ctx context.Context) ([]byte, error) { return w.opsFile(ctx, id) }
 	w.Launchers[id] = launcher
 }
 

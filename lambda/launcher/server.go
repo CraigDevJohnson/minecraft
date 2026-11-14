@@ -17,7 +17,8 @@ import (
 const MemberHeader = "X-Lobby-Member"
 
 // Server is the web side the site and the operator's workflow call: GET /server, POST /server/start,
-// POST /server/stop, POST /server/allowlist, POST /server/restore, GET /mods and POST /mods.
+// POST /server/stop, GET and POST /server/allowlist, GET /server/archives, POST /server/restore, GET and
+// POST /server/operators, GET /mods and POST /mods.
 type Server struct {
 	Launcher interface {
 		// Worlds answers the worlds' ids in the order the page shows them. The first is the default.
@@ -25,8 +26,12 @@ type Server struct {
 		Status(ctx context.Context, world string) (Status, error)
 		Start(ctx context.Context, world string) (Status, bool, error)
 		Stop(ctx context.Context, world string, force bool) (Status, bool, error)
+		AllowlistPlayers(context.Context) ([]PlayerName, error)
 		Allowlist(context.Context, AllowlistRequest) (AllowlistResult, error)
+		Archives(ctx context.Context, world string) (ArchiveList, error)
 		Restore(ctx context.Context, world, archive string) (Status, bool, error)
+		Operators(context.Context) (OperatorsList, error)
+		ChangeOperator(context.Context, OperatorRequest) (OperatorResult, error)
 		Mods(context.Context) (ModsList, error)
 		SwitchMod(ctx context.Context, world, mod string, enabled bool) (ModsList, error)
 	}
@@ -37,7 +42,7 @@ type Server struct {
 	StartFailed func()
 	StopFailed  func()
 	// Operator reports whether the request came from an operator rather than a Lobby site: only an operator
-	// may change the allowlist, restore an archive or force a stop. Nil admits nobody.
+	// may force a stop. Nil admits nobody.
 	Operator func(*http.Request) bool
 
 	mu        sync.Mutex
@@ -93,8 +98,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /server", s.status)
 	mux.HandleFunc("POST /server/start", s.start)
 	mux.HandleFunc("POST /server/stop", s.stop)
+	mux.HandleFunc("GET /server/allowlist", s.allowlistPlayers)
 	mux.HandleFunc("POST /server/allowlist", s.allowlist)
+	mux.HandleFunc("GET /server/archives", s.archives)
 	mux.HandleFunc("POST /server/restore", s.restore)
+	mux.HandleFunc("GET /server/operators", s.operators)
+	mux.HandleFunc("POST /server/operators", s.changeOperator)
 	mux.HandleFunc("GET /mods", s.mods)
 	mux.HandleFunc("POST /mods", s.switchMod)
 	return mux
@@ -245,15 +254,22 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// allowlist adds or removes one player on the family's allowlist, and on each running world, for an operator,
-// never a site. It takes no world. The player's name is not logged; the answer carries none either.
-func (s *Server) allowlist(w http.ResponseWriter, r *http.Request) {
-	member := r.Header.Get(MemberHeader)
-	if !s.operator(r) {
-		s.Log.Info("allowlist refused", "member", member, "reason", "not_an_operator")
-		writeJSON(w, http.StatusForbidden, map[string]string{"code": "forbidden"})
+// allowlistPlayers lists the family's allowlist, for a site or an operator. A site shows it only to a Member with
+// its minecraft-admin grant. No name is logged.
+func (s *Server) allowlistPlayers(w http.ResponseWriter, r *http.Request) {
+	players, err := s.Launcher.AllowlistPlayers(r.Context())
+	if err != nil {
+		s.Log.Error("allowlist list", "err", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"code": "allowlist_unconfirmed"})
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string][]PlayerName{"players": players})
+}
+
+// allowlist adds or removes one player on the family's allowlist, and on each running world, for a site or an
+// operator. It takes no world. The player's name is not logged; the answer carries none either.
+func (s *Server) allowlist(w http.ResponseWriter, r *http.Request) {
+	member := r.Header.Get(MemberHeader)
 	var request AllowlistRequest
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 4<<10))
 	if json.Unmarshal(body, &request) != nil || ValidateAllowlistRequest(request) != nil {
@@ -279,16 +295,27 @@ func (s *Server) allowlist(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// restore puts back the archive an operator names, never a site, in place of a stopped world, then starts its
-// game. The body is {"archive": "20261016T031500Z.tar.gz"}, the archive's name in S3, which is not private and
-// is logged, and may carry {"world": "creative"} beside it.
+// archives lists one world's archives, newest first, for a site or an operator: GET /server/archives?world=<id>,
+// the first world when it names none.
+func (s *Server) archives(w http.ResponseWriter, r *http.Request) {
+	world := s.world(r.URL.Query().Get("world"))
+	list, err := s.Launcher.Archives(r.Context(), world)
+	switch {
+	case errors.Is(err, ErrUnknownWorld):
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "unknown_world"})
+	case err != nil:
+		s.Log.Error("archives", "world", world, "err", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"code": "archives_unconfirmed"})
+	default:
+		writeJSON(w, http.StatusOK, list)
+	}
+}
+
+// restore puts back the archive a site or an operator names in place of a stopped world, then starts its game.
+// The body is {"archive": "20261016T031500Z.tar.gz"}, the archive's name in S3, which is not private and is
+// logged, and may carry {"world": "creative"} beside it.
 func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
 	member := r.Header.Get(MemberHeader)
-	if !s.operator(r) {
-		s.Log.Info("restore refused", "member", member, "reason", "not_an_operator")
-		writeJSON(w, http.StatusForbidden, map[string]string{"code": "forbidden"})
-		return
-	}
 	var request struct {
 		World   string `json:"world"`
 		Archive string `json:"archive"`
@@ -323,6 +350,46 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
 		// Only a stopped world, or one whose start or restore failed, is restored: anything else is stopped first.
 		s.Log.Info("restore refused", "member", member, "world", world, "archive", request.Archive, "reason", "not_stopped", "state", status.State)
 		writeJSON(w, http.StatusConflict, map[string]string{"code": "not_stopped", "state": status.State})
+	}
+}
+
+// operators lists each world's operators, for a site or an operator. A site shows them only to a Member with its
+// minecraft-admin grant. No name is logged.
+func (s *Server) operators(w http.ResponseWriter, r *http.Request) {
+	list, err := s.Launcher.Operators(r.Context())
+	if err != nil {
+		s.Log.Error("operators", "err", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"code": "operators_unconfirmed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// changeOperator makes a player on the allowlist an operator of one world, or no longer one, for a site or an
+// operator. The body is {"world": "survival", "operation": "add", "edition": "java", "name": "Steve"}. The
+// player's name is not logged; the answer carries none either.
+func (s *Server) changeOperator(w http.ResponseWriter, r *http.Request) {
+	var request OperatorRequest
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 4<<10))
+	if json.Unmarshal(body, &request) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "bad_request"})
+		return
+	}
+	result, err := s.Launcher.ChangeOperator(r.Context(), request)
+	switch {
+	case errors.Is(err, ErrBadAllowlistRequest):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "bad_request"})
+	case errors.Is(err, ErrUnknownWorld):
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "unknown_world"})
+	case errors.Is(err, ErrNotAllowlisted):
+		s.Log.Info("operator refused", "world", request.World, "edition", request.Edition, "operation", request.Operation, "reason", "not_allowlisted")
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "not_allowlisted"})
+	case err != nil:
+		s.Log.Error("operator", "world", request.World, "edition", request.Edition, "operation", request.Operation, "err", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"code": "operators_failed"})
+	default:
+		s.Log.Info("operator", "world", result.World, "edition", request.Edition, "operation", result.Operation, "result", result.Operators)
+		writeJSON(w, http.StatusOK, result)
 	}
 }
 

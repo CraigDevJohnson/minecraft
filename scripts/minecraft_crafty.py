@@ -78,7 +78,7 @@ MAX_MEMORY_GB = 5
 STATE_DIR = "state"
 KEEP_ARCHIVES = 14
 STORAGE_FIELDS = ("size_bytes", "available_bytes", "used_percent")
-# Upper bounds on what the allowlist action reads.
+# Upper bounds on what the allowlist and operator actions read.
 PLAYER_FILE_LIMIT = 4096
 ALLOWLIST_LIMIT = 1024 * 1024
 LOG_LIMIT = 1024 * 1024
@@ -665,13 +665,13 @@ class Adapter:
         except CraftyError:
             return False
 
-    def start(self, instance: str, allowlist: list | None = None) -> dict:
+    def start(self, instance: str, allowlist: list | None = None, operators: list | None = None) -> dict:
         with self.lifecycle():
             if self.draining():
                 raise CraftyError("host is draining; finish stopping the host before starting another session")
             if self.manifest is not None and not self.provisioned(instance).exists():
                 self.provision(instance)
-            return self._start(instance, allowlist)
+            return self._start(instance, allowlist, operators)
 
     def provision(self, instance: str) -> None:
         """Set Crafty and the server up on a new or replaced host, by the steps docs/operations/crafty.md once gave
@@ -723,7 +723,7 @@ class Adapter:
                 shutil.rmtree(replaced, ignore_errors=True)
         write_durably(self.provisioned(instance), {"restored": verified[-1] if verified else None})
 
-    def _start(self, instance: str, allowlist: list | None = None) -> dict:
+    def _start(self, instance: str, allowlist: list | None = None, operators: list | None = None) -> dict:
         # Right after an EC2 start, Crafty's container may still be booting.
         self.wait(self.api_ready, self.timeouts["start"], "Crafty's API did not come up; check minecraft-crafty.service")
         server = self.server(instance)
@@ -733,6 +733,8 @@ class Adapter:
                 server = self.apply_content(instance, server)
             if allowlist is not None:
                 self.apply_allowlist(server, allowlist)
+            if operators is not None:
+                self.apply_operators(server, operators)
             # Mark the session first, so a crash before the next drain can never look backed up.
             self.record(instance, backup="pending", boot_id=self.host.boot_id())
             self.action(server, "start_server")
@@ -1060,11 +1062,19 @@ class Adapter:
     def apply_allowlist(self, server: dict, entries: list) -> None:
         """Write the family allowlist the launcher carried over the stopped server's whitelist.json, as the managed
         files are written, so the game loads it at this start. An allowlist already in place stays as it is."""
+        self._apply_list(server, "whitelist.json", entries)
+
+    def apply_operators(self, server: dict, entries: list) -> None:
+        """Write the world's operators the launcher carried over the stopped server's ops.json the same way, so
+        the server has no operator but those: an operator joins whether or not the allowlist lists them."""
+        self._apply_list(server, "ops.json", entries)
+
+    def _apply_list(self, server: dict, name: str, entries: list) -> None:
         data = (json.dumps(entries, indent=2) + "\n").encode()
         digest = hashlib.sha256(data).hexdigest()
         with _ServerFolder(self.server_dir(server)) as folder:
-            if folder.digest("whitelist.json") != digest:
-                folder.write("whitelist.json", [data], digest)
+            if folder.digest(name) != digest:
+                folder.write(name, [data], digest)
 
     def apply_compose(self) -> bool:
         """Write the Compose file the manifest calls for and have Docker apply it, answering whether Docker ran.
@@ -1152,6 +1162,21 @@ class Adapter:
             except AccessError as exc:
                 raise CraftyError(str(exc)) from None
 
+    def operator(self, instance: str, operation: str, edition: str, player: dict) -> dict:
+        """Make one verified player an operator of the running server, or no longer one (docs/operations/allowlist.md)."""
+        from minecraft_access import AccessError, change_operators  # only this action needs it
+
+        with self.lifecycle():
+            if self.draining():
+                raise CraftyError("operator changes require a running instance outside host drain")
+            server = self.server(instance)
+            if not (self.running(server) and self.host.port_open(self.config["instances"][instance]["java_port"])):
+                raise CraftyError("operator changes require a running, ready server")
+            try:
+                return change_operators(_Console(self, server), instance, operation, edition, player)
+            except AccessError as exc:
+                raise CraftyError(str(exc)) from None
+
     def _remove_listed(self, console: "_Console", instance: str, operation: str, edition: str, player: dict) -> dict:
         """Remove the Java entry the allowlist holds under a name Mojang no longer knows, as after a rename.
 
@@ -1194,6 +1219,7 @@ class _Console:
         self.monotonic = adapter.host.monotonic
         self.sleep = adapter.host.sleep
         self.path = adapter.server_dir(server) / "whitelist.json"
+        self.ops = adapter.server_dir(server) / "ops.json"
         self.log = adapter.server_dir(server) / "logs" / "latest.log"
 
     def rcon(self, instance: str, text: str) -> None:
@@ -1284,13 +1310,19 @@ class _Console:
         return None
 
     def read_allowlist(self, instance: str) -> list:
+        return self._read_list(self.path, "allowlist")
+
+    def read_operators(self, instance: str) -> list:
+        return self._read_list(self.ops, "operators")
+
+    def _read_list(self, path: Path, what: str) -> list:
         # The server rewrites the file in place, so a read can catch it half written: read once more.
         for attempt in range(2):
-            descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
             with os.fdopen(descriptor, "rb") as stream:
                 data = stream.read(ALLOWLIST_LIMIT + 1)
             if len(data) > ALLOWLIST_LIMIT:
-                raise CraftyError("the server allowlist exceeded its size limit")
+                raise CraftyError(f"the server {what} exceeded its size limit")
             try:
                 return json.loads(data)
             except ValueError:
@@ -1514,7 +1546,7 @@ def read_private(path: Path, limit: int, name: str):
 
 
 def read_player_file(path: Path) -> dict:
-    """The identity of the one player an allowlist change names."""
+    """The identity of the one player an allowlist or operator change names."""
     value = read_private(path, PLAYER_FILE_LIMIT, "player")
     if not isinstance(value, dict):
         raise CraftyError("the player file must hold a JSON object")
@@ -1534,6 +1566,25 @@ def read_allowlist_file(path: Path) -> list:
         valid = False
     if not valid:
         raise CraftyError("the allowlist file must list each player's canonical UUID and a name of 1 to 32 characters")
+    return entries
+
+
+def read_ops_file(path: Path) -> list:
+    """A world's operators a start carries, in ops.json's own format: each player's UUID and name, the permission
+    level and whether they may join a full server."""
+    from minecraft_access import AccessError, canonical_uuid  # only a start that carries the operators needs it
+
+    entries = read_private(path, ALLOWLIST_LIMIT, "operators")
+    try:
+        valid = isinstance(entries, list) and all(
+            isinstance(entry, dict) and set(entry) == {"uuid", "name", "level", "bypassesPlayerLimit"}
+            and canonical_uuid(entry["uuid"]) and isinstance(entry["name"], str) and 1 <= len(entry["name"]) <= 32
+            and type(entry["level"]) is int and 1 <= entry["level"] <= 4 and type(entry["bypassesPlayerLimit"]) is bool
+            for entry in entries)
+    except AccessError:
+        valid = False
+    if not valid:
+        raise CraftyError("the operators file must list each player's canonical UUID, a name of 1 to 32 characters, a level of 1 to 4 and bypassesPlayerLimit")
     return entries
 
 
@@ -1816,6 +1867,7 @@ def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
     start.add_argument("instance")
     start.add_argument("--mods", help="the mods that are on, as ids with commas between; without it, the world's defaults")
     start.add_argument("--allowlist-file", type=Path, help="a private file in whitelist.json's format to start the server with")
+    start.add_argument("--ops-file", type=Path, help="a private file in ops.json's format to start the server with")
     for name in ("stop", "status"):
         commands.add_parser(name).add_argument("instance")
     commands.add_parser("host-drain")
@@ -1836,6 +1888,11 @@ def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
     allow.add_argument("operation", choices=("add", "remove"))
     allow.add_argument("--edition", choices=("java", "bedrock"), required=True)
     allow.add_argument("--player-file", type=Path, required=True)
+    op = commands.add_parser("operator", help="make one verified player an operator of the running server, or no longer one")
+    op.add_argument("instance")
+    op.add_argument("operation", choices=("add", "remove"))
+    op.add_argument("--edition", choices=("java", "bedrock"), required=True)
+    op.add_argument("--player-file", type=Path, required=True)
     send = commands.add_parser("console", help="send one line to the running server's console and print what it logged")
     send.add_argument("instance")
     send.add_argument("line")
@@ -1853,14 +1910,16 @@ def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
         config = load_config(args.config)
         if getattr(args, "instance", None) is not None and args.instance not in config["instances"]:
             raise CraftyError("instance is not configured")
-        content = allowlist = None
+        content = allowlist = operators = None
         if args.action == "start":
             # A start applies the pinned content the launcher installed beside the adapter, and fails without it: the
-            # instance is the world, with the mods the launcher names. Both files are checked before anything changes.
+            # instance is the world, with the mods the launcher names. Every file is checked before anything changes.
             mods = None if args.mods is None else [name for name in args.mods.split(",") if name]
             content = world_content(load_manifest(manifest), args.instance, mods)
             if args.allowlist_file is not None:
                 allowlist = read_allowlist_file(args.allowlist_file)
+            if args.ops_file is not None:
+                operators = read_ops_file(args.ops_file)
         if api is None:
             # setup-api-key makes the token, and so does the first start on a new host: both begin without one.
             token_file = Path(config["token_file"])
@@ -1868,13 +1927,15 @@ def main(argv=None, *, api=None, host=None, manifest=MANIFEST) -> int:
             api = CraftyAPI(config["crafty_url"], token)
         adapter = Adapter(config, api, host, content)
         if args.action == "start":
-            output = adapter.start(args.instance, allowlist)
+            output = adapter.start(args.instance, allowlist, operators)
         elif args.action in ("stop", "status"):
             output = getattr(adapter, args.action)(args.instance)
         elif args.action == "restore":
             output = adapter.restore(args.instance, args.key)
         elif args.action == "allowlist":
             output = adapter.allowlist(args.instance, args.operation, args.edition, read_player_file(args.player_file))
+        elif args.action == "operator":
+            output = adapter.operator(args.instance, args.operation, args.edition, read_player_file(args.player_file))
         elif args.action == "console":
             output = adapter.console_command(args.instance, args.line)
         elif args.action == "setup-api-key":
