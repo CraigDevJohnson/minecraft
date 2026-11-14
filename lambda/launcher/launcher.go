@@ -151,6 +151,8 @@ type Launcher struct {
 	Mods func(ctx context.Context) ([]string, error)
 	// Whitelist answers the family's allowlist as the whitelist.json a start carries to the host.
 	Whitelist func(ctx context.Context) ([]byte, error)
+	// Ops answers this world's operators as the ops.json a start carries to the host.
+	Ops func(ctx context.Context) ([]byte, error)
 	// Adapter is the host adapter this launcher installs before each command that needs it.
 	Adapter *HostAdapter
 	Now     func() time.Time
@@ -617,7 +619,8 @@ func (l *Launcher) startGame(ctx context.Context) error {
 			return errors.New("too little time is left to start the game")
 		}
 	}
-	// The mods and the allowlist are read now, so a switch or a change made up to this moment reaches the game.
+	// The mods, the allowlist and the operators are read now, so a switch or a change made up to this moment
+	// reaches the game.
 	mods, err := l.Mods(ctx)
 	if err != nil {
 		return err
@@ -626,7 +629,11 @@ func (l *Launcher) startGame(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	id, err := l.sendCommand(ctx, l.onHost(startScript(l.Config.Instance, mods, whitelist)), "minecraft launcher start", timeout)
+	ops, err := l.Ops(ctx)
+	if err != nil {
+		return err
+	}
+	id, err := l.sendCommand(ctx, l.onHost(startScript(l.Config.Instance, mods, whitelist, ops)), "minecraft launcher start", timeout)
 	if err != nil {
 		return fmt.Errorf("send game start: %w", err)
 	}
@@ -649,18 +656,20 @@ func (l *Launcher) startGame(ctx context.Context) error {
 	}
 }
 
-// startScript writes the family's allowlist to a private file on the host (mktemp creates it with mode 0600),
-// starts the game with it and with the mods that are on, and removes it. The adapter writes the list over the
-// stopped server's whitelist.json, so a restored archive never brings a removed player back. Like a player's
-// identity (allowlistScript), the list travels base64-encoded, so the script carries only characters the single
-// quotes keep literal; the world's and the mods' ids are the manifest's, which LoadManifest checked. It runs
-// under `set -eu` after the adapter's installation (onHost).
-func startScript(instance string, mods []string, whitelist []byte) string {
+// startScript writes the family's allowlist and the world's operators to private files on the host (mktemp
+// creates them with mode 0600), starts the game with them and with the mods that are on, and removes them. The
+// adapter writes them over the stopped server's whitelist.json and ops.json, so a restored archive never brings a
+// removed player or operator back. Like a player's identity (playerScript), each file travels base64-encoded, so
+// the script carries only characters the single quotes keep literal; the world's and the mods' ids are the
+// manifest's, which LoadManifest checked. It runs under `set -eu` after the adapter's installation (onHost).
+func startScript(instance string, mods []string, whitelist, ops []byte) string {
 	return strings.Join([]string{
 		`allowlist="$(mktemp)"`,
-		`trap 'rm -f "$allowlist"' EXIT`,
+		`ops="$(mktemp)"`,
+		`trap 'rm -f "$allowlist" "$ops"' EXIT`,
 		"printf '%s' '" + base64.StdEncoding.EncodeToString(whitelist) + "' | base64 -d > \"$allowlist\"",
-		remoteCommand + " start " + instance + " --mods=" + strings.Join(mods, ",") + ` --allowlist-file "$allowlist"`,
+		"printf '%s' '" + base64.StdEncoding.EncodeToString(ops) + "' | base64 -d > \"$ops\"",
+		remoteCommand + " start " + instance + " --mods=" + strings.Join(mods, ",") + ` --allowlist-file "$allowlist" --ops-file "$ops"`,
 	}, "\n")
 }
 

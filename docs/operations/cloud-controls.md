@@ -4,11 +4,11 @@ Nothing about operating the family's worlds runs on a workstation ([ADR 0006](..
 
 | Entry point | What it does | Who |
 | --- | --- | --- |
-| The `/minecraft` page in The Lobby | each world's status, Start and Stop; the mods switches | Members with the `minecraft` grant; the switches need `minecraft-admin` |
+| The `/minecraft` page in The Lobby | each world's status, Start and Stop; on Minecraft Admin, the mods switches, the allowlist, each world's archives with a restore, and each world's operators | Members with the `minecraft` grant; the switches, the allowlist, the archives and the operators on Minecraft Admin need `minecraft-admin` |
 | The **Server control** workflow (GitHub Actions) | status, start, stop (forced if asked), restore an archive, list and switch mods, allowlist add or remove | Craig: the job runs only for runs his own account started, through the `server` environment |
 | `task server:status`, `server:start`, `server:stop`, `server:restore`, `server:mods`, `server:mod-on`, `server:mod-off`, `server:allowlist` | The same requests from any terminal | Anyone with an AWS profile that may invoke the launcher (`workloads-admin` may) |
 
-Every one of them sends one SigV4-signed request to the launcher's Function URL. The launcher does the work in AWS with the same host adapter actions the workstation runbook used. It reads who signed each request: a site's role may only read the status, start and stop without force, and list and switch mods, and the allowlist, a restore and a forced stop answer it `403` with `forbidden`.
+Every one of them sends one SigV4-signed request to the launcher's Function URL. The launcher does the work in AWS with the same host adapter actions the workstation runbook used. It reads who signed each request: a site's role may do everything but force a stop, which answers it `403` with `forbidden`. The Lobby's Minecraft Admin page, shown only to Members with `minecraft-admin`, lists and changes the allowlist, lists each world's archives and restores one, and makes players operators of a world ([ADR 0011](../adr/0011-minecraft-admin-keeps-players-and-archives.md)).
 
 ## The Server control workflow
 
@@ -72,7 +72,7 @@ These are the IAM pieces aws-setup's `aws-design.md` keeps with an administrator
      --policy-document file:///tmp/launcher-boundary.json --set-as-default
    ```
 
-   This prints the new version, `"VersionId": "v2"` with `"IsDefaultVersion": true`. (A managed policy keeps five versions; delete the oldest with `aws iam delete-policy-version` if a later change hits that limit.)
+   This prints the new version with `"IsDefaultVersion": true`. (A managed policy keeps five versions; delete the oldest with `aws iam delete-policy-version` if a later change hits that limit.) The same command publishes each later version of the example, such as the one that adds `s3:ListBucket` on the backup bucket's `instances/` prefix for the archives list ([ADR 0011](../adr/0011-minecraft-admin-keeps-players-and-archives.md)).
 
 2. **Let the Deploy workflow assume the operator role.** Add the GitHub statement to the role's existing trust policy without touching the SSO statement:
 

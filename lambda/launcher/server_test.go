@@ -34,6 +34,12 @@ type fakeLauncher struct {
 	restored    []string
 	mods        ModsList
 	switched    []string
+	players     []PlayerName
+	archives    ArchiveList
+	listed      []string // the world of each archives read
+	operators   OperatorsList
+	opResult    OperatorResult
+	opRequests  []OperatorRequest
 	// reading, when set, hears the world of each status read, and the read then waits for release.
 	reading chan string
 	release chan struct{}
@@ -89,6 +95,22 @@ func (f *fakeLauncher) Restore(_ context.Context, world, archive string) (Status
 }
 
 func (f *fakeLauncher) Mods(context.Context) (ModsList, error) { return f.mods, f.err }
+
+func (f *fakeLauncher) AllowlistPlayers(context.Context) ([]PlayerName, error) {
+	return f.players, f.err
+}
+
+func (f *fakeLauncher) Archives(_ context.Context, world string) (ArchiveList, error) {
+	f.listed = append(f.listed, world)
+	return f.archives, f.err
+}
+
+func (f *fakeLauncher) Operators(context.Context) (OperatorsList, error) { return f.operators, f.err }
+
+func (f *fakeLauncher) ChangeOperator(_ context.Context, request OperatorRequest) (OperatorResult, error) {
+	f.opRequests = append(f.opRequests, request)
+	return f.opResult, f.err
+}
 
 func (f *fakeLauncher) SwitchMod(_ context.Context, world, mod string, enabled bool) (ModsList, error) {
 	f.switched = append(f.switched, fmt.Sprint(world, " ", mod, " ", enabled))
@@ -297,7 +319,7 @@ func TestStartAnswers(t *testing.T) {
 func TestOnlyTheContractRoutes(t *testing.T) {
 	log, _ := quiet()
 	server := &Server{Launcher: &fakeLauncher{}, Log: log}
-	for _, route := range [][2]string{{"POST", "/server"}, {"GET", "/server/start"}, {"GET", "/server/stop"}, {"GET", "/server/allowlist"}, {"GET", "/server/restore"}, {"GET", "/"}, {"DELETE", "/server"}, {"PUT", "/mods"}, {"DELETE", "/mods"}, {"GET", "/mods/creative"}, {"POST", "/mods/creative"}} {
+	for _, route := range [][2]string{{"POST", "/server"}, {"GET", "/server/start"}, {"GET", "/server/stop"}, {"PUT", "/server/allowlist"}, {"GET", "/server/restore"}, {"POST", "/server/archives"}, {"DELETE", "/server/operators"}, {"GET", "/"}, {"DELETE", "/server"}, {"PUT", "/mods"}, {"DELETE", "/mods"}, {"GET", "/mods/creative"}, {"POST", "/mods/creative"}} {
 		recorder := httptest.NewRecorder()
 		server.Handler().ServeHTTP(recorder, httptest.NewRequest(route[0], route[1], io.NopCloser(strings.NewReader(""))))
 		if recorder.Code != http.StatusNotFound && recorder.Code != http.StatusMethodNotAllowed {
@@ -473,20 +495,123 @@ func TestRestoreAnswers(t *testing.T) {
 	}
 }
 
-func TestOnlyAnOperatorMayRestore(t *testing.T) {
+func TestASiteMayRestore(t *testing.T) {
+	// Minecraft Admin restores through the site, which shows the page only to a Member with its minecraft-admin
+	// grant; the operator's workflow restores too.
 	for name, operator := range map[string]func(*http.Request) bool{
 		"a site's role":   func(*http.Request) bool { return false },
 		"no caller check": nil,
+		"an operator":     anyone,
 	} {
 		log, _ := quiet()
 		launcher := &fakeLauncher{status: Status{State: Starting}, started: true}
 		server := &Server{Launcher: launcher, Log: log, Operator: operator}
-		// The caller is checked before the body is read: a site learns nothing about what a body must hold.
-		for _, body := range []string{`{"archive":"20261016T031500Z.tar.gz"}`, "not json"} {
-			if code, answer := serveBody(t, server, "POST", "/server/restore", body); code != 403 || answer["code"] != "forbidden" || len(launcher.restored) != 0 {
-				t.Fatalf("%s: restore answered %d %v (sent %d)", name, code, answer, len(launcher.restored))
-			}
+		if code, answer := serveBody(t, server, "POST", "/server/restore", `{"world":"creative","archive":"20261016T031500Z.tar.gz"}`); code != 202 || answer["state"] != Starting || !slices.Equal(launcher.asked, []string{"creative"}) {
+			t.Fatalf("%s: restore answered %d %v (asked %v)", name, code, answer, launcher.asked)
 		}
+	}
+}
+
+func TestAllowlistListAnswers(t *testing.T) {
+	players := []PlayerName{{Edition: "java", Name: "Steve"}, {Edition: "bedrock", Name: "Sample Player"}}
+	for name, operator := range map[string]func(*http.Request) bool{
+		"a site's role": func(*http.Request) bool { return false },
+		"an operator":   anyone,
+	} {
+		log, logged := quiet()
+		recorder := httptest.NewRecorder()
+		(&Server{Launcher: &fakeLauncher{players: players}, Log: log, Operator: operator}).Handler().ServeHTTP(recorder, httptest.NewRequest("GET", "/server/allowlist", nil))
+		if recorder.Code != 200 || strings.TrimSpace(recorder.Body.String()) != `{"players":[{"edition":"java","name":"Steve"},{"edition":"bedrock","name":"Sample Player"}]}` {
+			t.Fatalf("%s: %d %s", name, recorder.Code, recorder.Body.String())
+		}
+		if strings.Contains(logged.String(), "Steve") || strings.Contains(logged.String(), "Sample") {
+			t.Fatalf("%s: a name was logged: %s", name, logged.String())
+		}
+	}
+	// Nobody listed is an empty list, not null.
+	log, _ := quiet()
+	recorder := httptest.NewRecorder()
+	(&Server{Launcher: &fakeLauncher{players: []PlayerName{}}, Log: log}).Handler().ServeHTTP(recorder, httptest.NewRequest("GET", "/server/allowlist", nil))
+	if recorder.Code != 200 || strings.TrimSpace(recorder.Body.String()) != `{"players":[]}` {
+		t.Fatalf("%d %s", recorder.Code, recorder.Body.String())
+	}
+	if code, body := serve(t, &Server{Launcher: &fakeLauncher{err: errors.New("read the allowlist: throttled")}, Log: log}, "GET", "/server/allowlist"); code != 502 || body["code"] != "allowlist_unconfirmed" {
+		t.Fatalf("%d %v", code, body)
+	}
+}
+
+func TestArchivesAnswers(t *testing.T) {
+	made := time.Date(2026, 10, 16, 3, 15, 42, 0, time.UTC)
+	list := ArchiveList{World: "creative", Archives: []Archive{{Name: "20261016T031500Z.tar.gz", Size: 123456789, Modified: made}}}
+	log, _ := quiet()
+	launcher := &fakeLauncher{archives: list}
+	recorder := httptest.NewRecorder()
+	(&Server{Launcher: launcher, Log: log}).Handler().ServeHTTP(recorder, httptest.NewRequest("GET", "/server/archives?world=creative", nil))
+	if recorder.Code != 200 || strings.TrimSpace(recorder.Body.String()) != `{"world":"creative","archives":[{"name":"20261016T031500Z.tar.gz","size":123456789,"modified":"2026-10-16T03:15:42Z"}]}` {
+		t.Fatalf("%d %s", recorder.Code, recorder.Body.String())
+	}
+	// No world means the first, as for every other route.
+	if code, _ := serve(t, &Server{Launcher: launcher, Log: log}, "GET", "/server/archives"); code != 200 || !slices.Equal(launcher.listed, []string{"creative", "survival"}) {
+		t.Fatalf("%d, listed %v", code, launcher.listed)
+	}
+	if code, body := serve(t, &Server{Launcher: &fakeLauncher{err: ErrUnknownWorld}, Log: log}, "GET", "/server/archives?world=nether"); code != 409 || body["code"] != "unknown_world" {
+		t.Fatalf("%d %v", code, body)
+	}
+	if code, body := serve(t, &Server{Launcher: &fakeLauncher{err: errors.New("list the archives: AccessDenied")}, Log: log}, "GET", "/server/archives?world=creative"); code != 502 || body["code"] != "archives_unconfirmed" {
+		t.Fatalf("%d %v", code, body)
+	}
+}
+
+func TestOperatorsAnswers(t *testing.T) {
+	list := OperatorsList{Worlds: []WorldOperators{{ID: "survival", Operators: []PlayerName{{Edition: "java", Name: "Steve"}}}, {ID: "creative", Operators: []PlayerName{}}}}
+	log, logged := quiet()
+	recorder := httptest.NewRecorder()
+	(&Server{Launcher: &fakeLauncher{operators: list}, Log: log}).Handler().ServeHTTP(recorder, httptest.NewRequest("GET", "/server/operators", nil))
+	if recorder.Code != 200 || strings.TrimSpace(recorder.Body.String()) != `{"worlds":[{"id":"survival","operators":[{"edition":"java","name":"Steve"}]},{"id":"creative","operators":[]}]}` {
+		t.Fatalf("%d %s", recorder.Code, recorder.Body.String())
+	}
+	if code, body := serve(t, &Server{Launcher: &fakeLauncher{err: errors.New("read the operators: throttled")}, Log: log}, "GET", "/server/operators"); code != 502 || body["code"] != "operators_unconfirmed" {
+		t.Fatalf("%d %v", code, body)
+	}
+
+	request := `{"world":"survival","operation":"add","edition":"java","name":"Steve"}`
+	updated := OperatorResult{World: "survival", Operation: "add", Operators: "updated"}
+	for _, tc := range []struct {
+		name     string
+		launcher *fakeLauncher
+		body     string
+		code     int
+		answer   string
+		sent     int
+	}{
+		{"updated", &fakeLauncher{opResult: updated}, request, 200, "", 1},
+		{"not on the allowlist", &fakeLauncher{err: ErrNotAllowlisted}, request, 409, "not_allowlisted", 1},
+		{"an unknown world", &fakeLauncher{err: ErrUnknownWorld}, request, 409, "unknown_world", 1},
+		{"a bad name", &fakeLauncher{err: ErrBadAllowlistRequest}, request, 400, "bad_request", 1},
+		{"an adapter failure", &fakeLauncher{err: errors.New("world survival: the host's adapter refused the operator change")}, request, 502, "operators_failed", 1},
+		{"no body", &fakeLauncher{}, "", 400, "bad_request", 0},
+		{"not JSON", &fakeLauncher{}, "op Steve", 400, "bad_request", 0},
+	} {
+		// A site's role may change operators: the site shows the page only to a Member with its minecraft-admin grant.
+		code, body := serveBody(t, &Server{Launcher: tc.launcher, Log: log, Operator: func(*http.Request) bool { return false }}, "POST", "/server/operators", tc.body)
+		if code != tc.code || len(tc.launcher.opRequests) != tc.sent {
+			t.Fatalf("%s: %d %v (sent %d)", tc.name, code, body, len(tc.launcher.opRequests))
+		}
+		if tc.code == 200 {
+			if encoded, _ := json.Marshal(body); string(encoded) != `{"operation":"add","operators":"updated","world":"survival"}` {
+				t.Fatalf("%s: %s", tc.name, encoded)
+			}
+			if want := (OperatorRequest{World: "survival", Operation: "add", Edition: "java", Name: "Steve"}); tc.launcher.opRequests[0] != want {
+				t.Fatalf("%s: sent %+v", tc.name, tc.launcher.opRequests)
+			}
+			continue
+		}
+		if body["code"] != tc.answer {
+			t.Fatalf("%s: %v", tc.name, body)
+		}
+	}
+	if strings.Contains(logged.String(), "Steve") {
+		t.Fatalf("a name was logged: %s", logged.String())
 	}
 }
 
@@ -562,15 +687,16 @@ func TestModsRefusals(t *testing.T) {
 // anyone stands in for an operator's signed request.
 func anyone(*http.Request) bool { return true }
 
-func TestASiteCannotForceAStopOrChangeTheAllowlist(t *testing.T) {
+func TestASiteCannotForceAStopButMayChangeTheAllowlist(t *testing.T) {
 	for name, operator := range map[string]func(*http.Request) bool{
 		"a site's role":   func(*http.Request) bool { return false },
 		"no caller check": nil,
 	} {
 		log, _ := quiet()
-		launcher := &fakeLauncher{status: Status{Name: "Survival", State: Stopping}, stopped: true}
+		launcher := &fakeLauncher{status: Status{Name: "Survival", State: Stopping}, stopped: true, allowlist: AllowlistResult{Edition: "java", Operation: "add", Allowlist: "updated", Worlds: []string{}}}
 		server := &Server{Launcher: launcher, Log: log, Operator: operator}
-		if code, body := serveBody(t, server, "POST", "/server/allowlist", `{"operation":"add","edition":"java","name":"Steve"}`); code != 403 || body["code"] != "forbidden" || len(launcher.allowlisted) != 0 {
+		// Minecraft Admin changes the allowlist through the site.
+		if code, body := serveBody(t, server, "POST", "/server/allowlist", `{"operation":"add","edition":"java","name":"Steve"}`); code != 200 || body["allowlist"] != "updated" || len(launcher.allowlisted) != 1 {
 			t.Fatalf("%s: allowlist answered %d %v (sent %d)", name, code, body, len(launcher.allowlisted))
 		}
 		if code, body := serveBody(t, server, "POST", "/server/stop", `{"force": true}`); code != 403 || body["code"] != "forbidden" || launcher.stops != 0 {

@@ -29,6 +29,8 @@ func environment(overrides map[string]string) func(string) string {
 		"WORLDS":                     worldsValue,
 		"MODS_PARAMETER":             "/minecraft-test/launcher/mods",
 		"ALLOWLIST_PARAMETER":        "/minecraft-test/launcher/allowlist",
+		"OPERATORS_PARAMETER":        "/minecraft-test/launcher/operators",
+		"BACKUP_BUCKET":              "minecraft-test-backups",
 		"BEDROCK_PORT":               "19132",
 		"CLOUDFLARE_ZONE_ID":         "0123456789abcdef0123456789abcdef",
 		"CLOUDFLARE_TOKEN_PARAMETER": "/minecraft/launcher/cloudflare-token",
@@ -45,7 +47,7 @@ func TestLoadConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	env, err := loadConfig(environment(nil), manifest)
-	if err != nil || env.ModsParameter != modsName || env.AllowlistParameter != allowlistName || env.DNS.TokenParameter != "/minecraft/launcher/cloudflare-token" || env.DNS.ZoneID == "" {
+	if err != nil || env.ModsParameter != modsName || env.AllowlistParameter != allowlistName || env.OperatorsParameter != operatorsName || env.BackupBucket != backupBucket || env.DNS.TokenParameter != "/minecraft/launcher/cloudflare-token" || env.DNS.ZoneID == "" {
 		t.Fatalf("env=%+v err=%v", env, err)
 	}
 	// The worlds come in the manifest's order, each named by the manifest and placed by WORLDS. A world without an
@@ -61,6 +63,8 @@ func TestLoadConfig(t *testing.T) {
 		"WORLDS":                     "",
 		"MODS_PARAMETER":             "",
 		"ALLOWLIST_PARAMETER":        "allowlist",
+		"OPERATORS_PARAMETER":        "",
+		"BACKUP_BUCKET":              "s3://minecraft-test-backups",
 		"BEDROCK_PORT":               "70000",
 		"CLOUDFLARE_ZONE_ID":         "zone",
 		"CLOUDFLARE_TOKEN_PARAMETER": "arn:aws:secretsmanager:us-west-2:111122223333:secret:token-abcdef",

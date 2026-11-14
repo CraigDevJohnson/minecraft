@@ -20,6 +20,8 @@ const (
 	creativeHostID = "i-0fedcba9876543210"
 	modsName       = "/minecraft-test/launcher/mods"
 	allowlistName  = "/minecraft-test/launcher/allowlist"
+	operatorsName  = "/minecraft-test/launcher/operators"
+	backupBucket   = "minecraft-test-backups"
 	// testContent is pinned server content with two worlds. Creative lists one mod that is on by default and one
 	// that is off.
 	testContent = `{
@@ -45,6 +47,7 @@ type worldsRig struct {
 	survival *rig
 	creative *rig
 	shared   *fakeSSM
+	bucket   *fakeS3
 	// looked are the player lookups made, and sent the follow-ups handed off.
 	looked []string
 	sent   []task
@@ -60,7 +63,8 @@ func newWorlds(t *testing.T) *worldsRig {
 	w := &worldsRig{
 		survival: newRig(ec2types.InstanceStateNameStopped, 0),
 		creative: newWorldRig("creative", "Creative", creativeHostID, ec2types.InstanceStateNameStopped, 0),
-		shared:   &fakeSSM{writable: []string{modsName, allowlistName}, params: map[string]string{modsName: "{}", allowlistName: "[]"}},
+		shared:   &fakeSSM{writable: []string{modsName, allowlistName, operatorsName}, params: map[string]string{modsName: "{}", allowlistName: "[]", operatorsName: "{}"}},
+		bucket:   &fakeS3{},
 	}
 	w.worlds = &Worlds{
 		Manifest:           manifest,
@@ -68,6 +72,9 @@ func newWorlds(t *testing.T) *worldsRig {
 		SSM:                w.shared,
 		ModsParameter:      modsName,
 		AllowlistParameter: allowlistName,
+		OperatorsParameter: operatorsName,
+		S3:                 w.bucket,
+		BackupBucket:       backupBucket,
 		LookupPlayer: func(_ context.Context, edition, name string) (Player, error) {
 			w.looked = append(w.looked, edition+":"+name)
 			return lookedUp(name)

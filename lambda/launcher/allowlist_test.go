@@ -174,9 +174,11 @@ func TestEachStartCarriesTheAllowlistAsTheServersOwnFile(t *testing.T) {
 	want := strings.Join([]string{
 		"set -eu",
 		`allowlist="$(mktemp)"`,
-		`trap 'rm -f "$allowlist"' EXIT`,
+		`ops="$(mktemp)"`,
+		`trap 'rm -f "$allowlist" "$ops"' EXIT`,
 		"printf '%s' '" + base64.StdEncoding.EncodeToString([]byte(whitelist)) + "' | base64 -d > \"$allowlist\"",
-		remoteCommand + ` start creative --mods=fawe --allowlist-file "$allowlist"`,
+		"printf '%s' 'W10=' | base64 -d > \"$ops\"",
+		remoteCommand + ` start creative --mods=fawe --allowlist-file "$allowlist" --ops-file "$ops"`,
 	}, "\n")
 	if len(r.ssm.commands) != 1 || r.ssm.commands[0] != want {
 		t.Fatalf("commands %q", r.ssm.commands)

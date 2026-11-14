@@ -133,6 +133,14 @@ func (w *Worlds) Allowlist(ctx context.Context, request AllowlistRequest) (Allow
 	if err != nil {
 		return AllowlistResult{}, err
 	}
+	// A player leaving the allowlist stops being an operator of every world too: an operator joins a running
+	// server whether or not it lists them.
+	dropped := map[string]Listed{}
+	if request.Operation == "remove" {
+		if dropped, err = w.dropOperator(ctx, player, byName); err != nil {
+			return AllowlistResult{}, err
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, allowlistTimeout)
 	defer cancel()
 	ids := w.Worlds()
@@ -143,7 +151,7 @@ func (w *Worlds) Allowlist(ctx context.Context, request AllowlistRequest) (Allow
 	}
 	running.Wait()
 	result := AllowlistResult{Edition: request.Edition, Operation: request.Operation, Allowlist: "unchanged", Worlds: []string{}}
-	var failed error
+	failed := w.deopRunning(ctx, dropped)
 	for i, id := range ids {
 		if errs[i] != nil {
 			failed = errors.Join(failed, fmt.Errorf("world %s: %w", id, errs[i]))
@@ -156,13 +164,26 @@ func (w *Worlds) Allowlist(ctx context.Context, request AllowlistRequest) (Allow
 	switch {
 	case failed != nil:
 		return AllowlistResult{}, failed
-	case byName && !changed:
+	case byName && !changed && len(dropped) == 0:
 		// Neither the record nor a running world holds the name: the same answer as Mojang not knowing it.
 		return AllowlistResult{}, ErrPlayerNotFound
-	case changed:
+	case changed || len(dropped) > 0:
 		result.Allowlist = "updated"
 	}
 	return result, nil
+}
+
+// AllowlistPlayers lists the allowlist of record as an admin would type each player to add them.
+func (w *Worlds) AllowlistPlayers(ctx context.Context) ([]PlayerName, error) {
+	var list []Listed
+	if err := w.read(ctx, w.AllowlistParameter, "allowlist", &list); err != nil {
+		return nil, err
+	}
+	players := make([]PlayerName, 0, len(list))
+	for _, entry := range list {
+		players = append(players, PlayerName{Edition: entry.Edition, Name: entry.Name})
+	}
+	return players, nil
 }
 
 // changeRecord makes the change on the allowlist of record and reports whether the list changed. A removal by
@@ -190,8 +211,7 @@ func (w *Worlds) changeRecord(ctx context.Context, request AllowlistRequest, pla
 }
 
 // whitelist answers the allowlist of record as the whitelist.json a start writes over the stopped server's own:
-// each account's UUID and name. A Bedrock player's name is the one Floodgate writes, a dot and the gamertag with
-// its spaces as underscores.
+// each account's UUID and name. A Bedrock player's name is the one Floodgate writes (serverName).
 func (w *Worlds) whitelist(ctx context.Context) ([]byte, error) {
 	var list []Listed
 	if err := w.read(ctx, w.AllowlistParameter, "allowlist", &list); err != nil {
@@ -199,18 +219,33 @@ func (w *Worlds) whitelist(ctx context.Context) ([]byte, error) {
 	}
 	entries := make([]Player, 0, len(list))
 	for _, entry := range list {
-		if entry.Edition == "bedrock" {
-			entry.Name = "." + strings.ReplaceAll(entry.Name, " ", "_")
-		}
-		entries = append(entries, entry.Player)
+		entries = append(entries, Player{UUID: entry.UUID, Name: serverName(entry)})
 	}
 	return json.Marshal(entries)
 }
 
+// serverName answers the name a server's own files hold for an entry: a Java account's name, or for a Bedrock
+// player the one Floodgate writes, a dot and the gamertag with its spaces as underscores.
+func serverName(entry Listed) string {
+	if entry.Edition == "bedrock" {
+		return "." + strings.ReplaceAll(entry.Name, " ", "_")
+	}
+	return entry.Name
+}
+
 // allowlistLive runs the adapter's allowlist action on this world's server while its game answers, and reports
-// what became of the server's own list: updated or unchanged. A starting world fails the change; a world in
-// any other state is left alone and reports nothing, since its next start carries the list.
+// what became of the server's own list: updated or unchanged.
 func (l *Launcher) allowlistLive(ctx context.Context, request AllowlistRequest, player Player, byName bool) (string, error) {
+	script := playerScript("allowlist", l.Config.Instance, request.Operation, request.Edition, player)
+	return l.changeLive(ctx, "allowlist change", script, func(output string, code int32) (string, error) {
+		return checkAllowlisted(output, code, l.Config.Instance, request, byName)
+	})
+}
+
+// changeLive sends one of the adapter's player changes (what names it) to this world's server while its game
+// answers, and answers what check makes of the adapter's answer. A starting world fails the change; a world in
+// any other state is left alone and reports nothing, since its next start carries the records.
+func (l *Launcher) changeLive(ctx context.Context, what, script string, check func(output string, code int32) (string, error)) (string, error) {
 	h, err := l.describeHost(ctx)
 	if err != nil {
 		return "", err
@@ -224,16 +259,16 @@ func (l *Launcher) allowlistLive(ctx context.Context, request AllowlistRequest, 
 	case err != nil:
 		return "", err
 	case state == Starting && session.Phase != Restoring:
-		// The start already holds the list it read, and nothing sends a later change once the game answers, so
-		// the change fails here: the record keeps it, and asking again once the world is ready finishes it. A
-		// restore's start has not read the list yet.
+		// The start already holds the records it read, and nothing sends a later change once the game answers,
+		// so the change fails here: the record keeps it, and asking again once the world is ready finishes it. A
+		// restore's start has not read the records yet.
 		return "", errors.New("the world is starting; ask again once it is ready")
 	case state != Ready:
 		return "", nil
 	}
-	id, err := l.sendCommand(ctx, l.onHost(allowlistScript(l.Config.Instance, request, player)), "minecraft launcher allowlist", allowlistExecutionSeconds)
+	id, err := l.sendCommand(ctx, l.onHost(script), "minecraft launcher "+strings.TrimSuffix(what, " change"), allowlistExecutionSeconds)
 	if err != nil {
-		return "", fmt.Errorf("send allowlist change: %w", err)
+		return "", fmt.Errorf("send %s: %w", what, err)
 	}
 	for {
 		invocation, err := l.SSM.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{CommandId: aws.String(id), InstanceId: aws.String(l.Config.HostID)})
@@ -241,30 +276,30 @@ func (l *Launcher) allowlistLive(ctx context.Context, request AllowlistRequest, 
 		switch {
 		case errors.As(err, &missing):
 		case err != nil:
-			return "", fmt.Errorf("follow allowlist change: %w", err)
+			return "", fmt.Errorf("follow %s: %w", what, err)
 		case invocation.Status == ssmtypes.CommandInvocationStatusSuccess:
-			return checkAllowlisted(aws.ToString(invocation.StandardOutputContent), invocation.ResponseCode, l.Config.Instance, request, byName)
+			return check(aws.ToString(invocation.StandardOutputContent), invocation.ResponseCode)
 		case invocation.Status == ssmtypes.CommandInvocationStatusPending, invocation.Status == ssmtypes.CommandInvocationStatusInProgress, invocation.Status == ssmtypes.CommandInvocationStatusDelayed:
 		default:
-			return "", fmt.Errorf("allowlist change %s ended with status %s%s", id, invocation.Status, adapterError(aws.ToString(invocation.StandardOutputContent)))
+			return "", fmt.Errorf("%s %s ended with status %s%s", what, id, invocation.Status, adapterError(aws.ToString(invocation.StandardOutputContent)))
 		}
-		if err := l.pause(ctx, "the allowlist change did not finish"); err != nil {
+		if err := l.pause(ctx, "the "+what+" did not finish"); err != nil {
 			return "", err
 		}
 	}
 }
 
-// allowlistScript writes the player's identity to a private file on the host (mktemp creates it with mode
-// 0600), runs the adapter on it, and removes it. The identity travels base64-encoded, so the script carries
-// only characters the single quotes keep literal; the instance, operation and edition were validated. It runs
-// under `set -eu` after the adapter's installation (onHost).
-func allowlistScript(instance string, request AllowlistRequest, player Player) string {
+// playerScript writes the player's identity to a private file on the host (mktemp creates it with mode 0600),
+// runs the adapter's player action (allowlist or operator) on it, and removes it. The identity travels
+// base64-encoded, so the script carries only characters the single quotes keep literal; the instance, operation
+// and edition were validated. It runs under `set -eu` after the adapter's installation (onHost).
+func playerScript(action, instance, operation, edition string, player Player) string {
 	encoded, _ := json.Marshal(player)
 	return strings.Join([]string{
 		`player="$(mktemp)"`,
 		`trap 'rm -f "$player"' EXIT`,
 		"printf '%s' '" + base64.StdEncoding.EncodeToString(encoded) + "' | base64 -d > \"$player\"",
-		remoteCommand + " allowlist " + instance + " " + request.Operation + " --edition " + request.Edition + ` --player-file "$player"`,
+		remoteCommand + " " + action + " " + instance + " " + operation + " --edition " + edition + ` --player-file "$player"`,
 	}, "\n")
 }
 

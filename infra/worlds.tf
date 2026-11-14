@@ -106,6 +106,17 @@ resource "aws_ssm_parameter" "launcher_mods" {
   }
 }
 
+resource "aws_ssm_parameter" "launcher_operators" {
+  count       = local.launcher_count
+  name        = "/${var.resource_prefix}/launcher/operators"
+  description = "Each world's operators, players from the family allowlist, which a world takes at its start; owned by the launcher after creation."
+  type        = "String"
+  value       = "{}"
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
 resource "aws_ssm_parameter" "launcher_allowlist" {
   count       = local.launcher_count
   name        = "/${var.resource_prefix}/launcher/allowlist"
