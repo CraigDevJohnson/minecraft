@@ -120,11 +120,40 @@ func TestChangeOperatorChangesTheRecordAndTheRunningWorld(t *testing.T) {
 		t.Fatalf("last command %s", last)
 	}
 
-	// Removing someone who is no operator there changes nothing and sends nothing.
+	// Removing a player on the allowlist who is no operator there still asks the running server, which may hold
+	// them from a removal that failed there.
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{operated("survival", "java", "remove", "unchanged")}
 	sent := len(w.survival.ssm.commands)
 	result, err = w.worlds.ChangeOperator(context.Background(), OperatorRequest{World: "survival", Operation: "remove", Edition: "java", Name: "Steve"})
+	if err != nil || result.Operators != "unchanged" || len(w.survival.ssm.commands) != sent+1 || w.operatorsRecord() != "{}" {
+		t.Fatalf("result %+v err %v record %s", result, err, w.operatorsRecord())
+	}
+
+	// Removing a player on neither list changes nothing and sends nothing.
+	sent = len(w.survival.ssm.commands)
+	result, err = w.worlds.ChangeOperator(context.Background(), OperatorRequest{World: "survival", Operation: "remove", Edition: "java", Name: "Alex"})
 	if err != nil || result.Operators != "unchanged" || len(w.survival.ssm.commands) != sent {
 		t.Fatalf("result %+v err %v", result, err)
+	}
+}
+
+func TestARemovalThatFailedOnTheRunningWorldFinishesWhenAskedAgain(t *testing.T) {
+	w := newWorlds(t)
+	w.allowlistHolds(t, listedSteve)
+	w.shared.params[operatorsName] = fmt.Sprintf(`{"survival":[{"edition":"java","uuid":"%s","name":"Steve"}]}`, steve.UUID)
+	w.running(w.survival)
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{{Status: ssmtypes.CommandInvocationStatusFailed}}
+	if _, err := w.worlds.ChangeOperator(context.Background(), OperatorRequest{World: "survival", Operation: "remove", Edition: "java", Name: "Steve"}); err == nil || w.operatorsRecord() != "{}" {
+		t.Fatalf("err %v record %s", err, w.operatorsRecord())
+	}
+	// The record no longer lists the player, but the server still does until it is asked again.
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{operated("survival", "java", "remove", "updated")}
+	result, err := w.worlds.ChangeOperator(context.Background(), OperatorRequest{World: "survival", Operation: "remove", Edition: "java", Name: "Steve"})
+	if err != nil || result.Operators != "updated" {
+		t.Fatalf("result %+v err %v", result, err)
+	}
+	if last := w.survival.ssm.commands[len(w.survival.ssm.commands)-1]; !strings.Contains(last, remoteCommand+` operator survival remove`) {
+		t.Fatalf("last command %s", last)
 	}
 }
 
@@ -211,6 +240,24 @@ func TestLeavingTheAllowlistEndsBeingAnOperatorEverywhere(t *testing.T) {
 	}
 	if len(w.survival.ssm.commands) != 2 || !strings.Contains(w.survival.ssm.commands[1], remoteCommand+` operator survival remove --edition java --player-file "$player"`) || len(w.creative.ssm.commands) != 0 {
 		t.Fatalf("commands %q and %q", w.survival.ssm.commands, w.creative.ssm.commands)
+	}
+
+	// Asked again, the record no longer holds the player, but a running server is asked again in case the first
+	// removal did not reach it.
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("survival", "remove", "unchanged"), operated("survival", "java", "remove", "updated")}
+	result, err = w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "remove", Edition: "java", Name: "Steve"})
+	if err != nil || result.Allowlist != "updated" || len(w.survival.ssm.commands) != 4 {
+		t.Fatalf("result %+v err %v commands %d", result, err, len(w.survival.ssm.commands))
+	}
+}
+
+func TestLeavingTheAllowlistSkipsAWorldTheManifestNoLongerHas(t *testing.T) {
+	w := newWorlds(t)
+	w.allowlistHolds(t, listedSteve)
+	w.shared.params[operatorsName] = fmt.Sprintf(`{"nether":[{"edition":"java","uuid":"%s","name":"Steve"}]}`, steve.UUID)
+	result, err := w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "remove", Edition: "java", Name: "Steve"})
+	if err != nil || result.Allowlist != "updated" || w.operatorsRecord() != "{}" {
+		t.Fatalf("result %+v err %v record %s", result, err, w.operatorsRecord())
 	}
 }
 

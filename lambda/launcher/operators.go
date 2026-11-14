@@ -104,14 +104,21 @@ func (w *Worlds) ChangeOperator(ctx context.Context, request OperatorRequest) (O
 		if !slices.ContainsFunc(operators, func(entry Listed) bool { return entry.UUID == player.UUID }) {
 			operators, changed = append(operators, player), true
 		}
-	} else {
-		at := slices.IndexFunc(operators, named)
-		if at < 0 {
-			// Not an operator of the world on the record, so not on its server either: each start writes the record.
-			return OperatorResult{World: request.World, Operation: request.Operation, Operators: "unchanged"}, nil
-		}
+	} else if at := slices.IndexFunc(operators, named); at >= 0 {
 		player = operators[at]
 		operators, changed = slices.Delete(operators, at, at+1), true
+	} else {
+		// Not an operator on the record, but an earlier removal may have changed the record and failed on the running
+		// server, so a player on the allowlist is still taken off it there.
+		var allowlist []Listed
+		if err := w.read(ctx, w.AllowlistParameter, "allowlist", &allowlist); err != nil {
+			return OperatorResult{}, err
+		}
+		at := slices.IndexFunc(allowlist, named)
+		if at < 0 {
+			return OperatorResult{World: request.World, Operation: request.Operation, Operators: "unchanged"}, nil
+		}
+		player = allowlist[at]
 	}
 	if changed {
 		record[request.World] = operators
@@ -177,23 +184,36 @@ func (w *Worlds) dropOperator(ctx context.Context, player Player, byName bool) (
 	return dropped, w.write(ctx, w.OperatorsParameter, "operators", record)
 }
 
-// deopRunning takes each player dropped from a world's operators off that world's server while its game runs,
-// side by side.
-func (w *Worlds) deopRunning(ctx context.Context, dropped map[string]Listed) error {
-	errs := make([]error, 0, len(dropped))
+// deopRunning takes a player leaving the allowlist off each world's operators while its game runs, side by side,
+// and reports whether a server's list changed. Each world is asked whether or not the record held the player
+// there, so a retry finishes a removal an earlier attempt took off the record but not off a running server. A
+// removal by name alone has no UUID to look for, so only the worlds whose record held the name are asked.
+func (w *Worlds) deopRunning(ctx context.Context, dropped map[string]Listed, player Listed, byName bool) (bool, error) {
+	ask := map[string]Listed{}
+	for _, id := range w.Worlds() {
+		if entry, ok := dropped[id]; ok {
+			ask[id] = entry
+		} else if !byName {
+			ask[id] = player
+		}
+	}
+	errs := make([]error, 0, len(ask))
+	updated := false
 	var mu sync.Mutex
 	var running sync.WaitGroup
-	for id, player := range dropped {
+	for id, entry := range ask {
 		running.Go(func() {
-			if _, err := w.Launchers[id].operatorLive(ctx, "remove", player); err != nil {
-				mu.Lock()
+			verdict, err := w.Launchers[id].operatorLive(ctx, "remove", entry)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
 				errs = append(errs, fmt.Errorf("world %s operators: %w", id, err))
-				mu.Unlock()
 			}
+			updated = updated || verdict == "updated"
 		})
 	}
 	running.Wait()
-	return errors.Join(errs...)
+	return updated, errors.Join(errs...)
 }
 
 // opsFile answers a world's operators as the ops.json a start writes over the stopped server's own. A Bedrock

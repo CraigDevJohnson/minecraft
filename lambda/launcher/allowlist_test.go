@@ -123,12 +123,16 @@ func TestAllowlistReachesEveryRunningWorld(t *testing.T) {
 	if err != nil || result.Allowlist != "unchanged" || len(result.Worlds) != 2 || w.record() != before {
 		t.Fatalf("result=%+v err=%v record=%s", result, err, w.record())
 	}
-	// A removal takes the player off the record and off both servers.
-	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("survival", "remove", "updated")}
-	w.creative.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("creative", "remove", "updated")}
+	// A removal takes the player off the record and off both servers, and off each server's operators, which
+	// the player was not one of.
+	w.survival.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("survival", "remove", "updated"), operated("survival", "java", "remove", "unchanged")}
+	w.creative.ssm.invocation = []ssm.GetCommandInvocationOutput{allowlisted("creative", "remove", "updated"), operated("creative", "java", "remove", "unchanged")}
 	result, err = w.worlds.Allowlist(context.Background(), AllowlistRequest{Operation: "remove", Edition: "java", Name: "Steve"})
 	if err != nil || result.Allowlist != "updated" || len(result.Worlds) != 2 || w.record() != "[]" {
 		t.Fatalf("result=%+v err=%v record=%s", result, err, w.record())
+	}
+	if last := w.creative.ssm.commands[len(w.creative.ssm.commands)-1]; !strings.Contains(last, remoteCommand+` operator creative remove --edition java --player-file "$player"`) {
+		t.Fatalf("creative's last command %s", last)
 	}
 }
 

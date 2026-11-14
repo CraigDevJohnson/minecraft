@@ -2022,6 +2022,16 @@ class OperatorTests(unittest.TestCase):
         self.assertNotIn("Sample", str(caught.exception))
         self.assertEqual(self.host.clock, 60)
 
+    def test_removing_an_operator_the_server_has_not_seen_times_out_and_says_so(self):
+        # The start wrote the player into ops.json, but the server cannot resolve their Floodgate name until they join.
+        self.ops.write_text(json.dumps([{**BEDROCK, "level": 4, "bypassesPlayerLimit": False}]))
+        self.known = {}
+        with self.assertRaises(crafty.CraftyError) as caught:
+            self.adapter.operator("family", "remove", "bedrock", dict(BEDROCK))
+        self.assertIn("stays an operator until its next start", str(caught.exception))
+        self.assertNotIn("Sample", str(caught.exception))
+        self.assertEqual(self.api.console, [(SERVER_ID, "deop .Sample_Player")])
+
     def test_a_stopped_server_or_a_linked_ops_file_is_refused(self):
         target = self.root / "elsewhere.json"
         target.write_text("[]")

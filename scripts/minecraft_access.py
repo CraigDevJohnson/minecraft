@@ -109,6 +109,8 @@ def change_operators(machine, instance, operation, edition, player: dict) -> dic
     expected_uuid, name = _verified(instance, operation, edition, player, "operator")
     target = name if edition == "java" else "." + name.replace(" ", "_")
     command = ("op " if operation == "add" else "deop ") + target
-    changed = _converge(machine, instance, command, expected_uuid, operation == "add", read_operator_uuids, "operator",
-                        "operator change verification timed out; a player this world has not seen becomes an operator at its next start")
+    timed_out = ("operator change verification timed out; a player this world has not seen becomes an operator at its next start"
+                 if operation == "add" else
+                 "operator change verification timed out; a player this world has not seen lately stays an operator until its next start")
+    changed = _converge(machine, instance, command, expected_uuid, operation == "add", read_operator_uuids, "operator", timed_out)
     return {"instance": instance, "edition": edition, "operation": operation, "operators": "updated" if changed else "unchanged"}

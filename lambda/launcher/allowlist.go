@@ -151,7 +151,12 @@ func (w *Worlds) Allowlist(ctx context.Context, request AllowlistRequest) (Allow
 	}
 	running.Wait()
 	result := AllowlistResult{Edition: request.Edition, Operation: request.Operation, Allowlist: "unchanged", Worlds: []string{}}
-	failed := w.deopRunning(ctx, dropped)
+	var failed error
+	if request.Operation == "remove" {
+		var deopped bool
+		deopped, failed = w.deopRunning(ctx, dropped, Listed{Edition: request.Edition, Player: player}, byName)
+		changed = changed || deopped
+	}
 	for i, id := range ids {
 		if errs[i] != nil {
 			failed = errors.Join(failed, fmt.Errorf("world %s: %w", id, errs[i]))
