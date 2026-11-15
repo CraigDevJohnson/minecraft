@@ -4,6 +4,21 @@ The family has one allowlist for every world: the allowlist of record, which the
 
 A change therefore works with every world stopped, and one change covers all three worlds. Removing a player also removes them from every world's operators, on the record and on each running world ([launcher](launcher.md#operators)). After the first Deploy the worlds are fresh and the record is empty: add each player once ([worlds](worlds.md#the-first-deploy)). The record is the only list to edit. A `whitelist add` typed into a world's console lasts until that world's next start.
 
+## Linked accounts
+
+A player with both a Java and a Bedrock account can play as one player on every world. Floodgate on each world uses GeyserMC's global linking, which is on by default and needs no setting, code or Deploy ([#104](https://github.com/CraigDevJohnson/minecraft/issues/104)). A linked Bedrock login joins with the Java account's UUID, name (no dot) and skin, so the Java entry's place on the allowlist, its operator status, its inventory and its land claims cover both editions, on all three worlds at once. Players with only one edition need nothing.
+
+Linking moves nothing from the Bedrock identity to the Java one, and the launcher refuses to add or remove a gamertag once it is linked (`409 linked_account`). So the order matters:
+
+1. **Move what matters off the Bedrock identity.** On each world where it has something: put its items and ender chest contents in chests, run `/flan list`, then stand in each claim and run `/flan transferClaim <JavaName>` (the Java account needs enough claim blocks), and empty any grave. Its player file stays on the world, out of reach while the link lasts.
+2. **Remove the Bedrock entry** with every world stopped, on Minecraft Admin or with `allowlist-remove` and the `bedrock` edition, and check that the Java account is listed. This also takes the Bedrock identity off every world's operators. Left in place, the entry could no longer be removed once linked.
+3. **Link** at [link.geysermc.org](https://link.geysermc.org/start): either sign in with the Bedrock account and then the Java account under "Online linking", or join the server `link.geysermc.org` on Java (port 25565) and on Bedrock (port 19132), run `/linkaccount` on one and `/linkaccount <code>` on the other within 15 minutes. On 2026-11-15 that server accepted Java 26.3 (protocol 777) and answered NetherNet signaling for Bedrock protocol 2225, the one our worlds report for Bedrock 26.60.
+4. **Wait five minutes, then join a world on Bedrock.** GeyserMC keeps each lookup, "not linked" included, for about five minutes. The player should appear under the Java name, with the Java skin and inventory. The two editions can't be online at once: the newer login turns the older one away.
+
+If GeyserMC's API does not answer when a linked player joins on Bedrock, Floodgate admits them as the old Bedrock identity, which the allowlist no longer holds, so they are turned away until it answers. `/unlinkaccount` on the link server undoes a link and brings the Bedrock identity, and everything it held, back; add its gamertag again to let it in.
+
+## The host command
+
 The rest of this page describes the host command, for the launcher's benefit and for a hands-on emergency.
 
 The host command is the Crafty adapter's `allowlist` action. It needs the host's instance, which is its world's id, running with its Java port answering, holds the adapter's lifecycle lock, and refuses while the host is draining. The launcher installs the adapter it carries before it runs this command, so the host always has the version the launcher was deployed with ([ADR 0007](../adr/0007-the-launcher-carries-the-host-adapter.md)). The archive taken at the next stop includes `whitelist.json` with the rest of the server folder.
