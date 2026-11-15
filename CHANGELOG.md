@@ -6,6 +6,7 @@ Notable changes to the family's Minecraft worlds and the tooling around them, ne
 
 ### Added
 
+- The allowlist runbook explains how a player with both a Java and a Bedrock account links them through GeyserMC's global linking, which every world already uses, to play as one player on both (#105).
 - Minecraft Admin can list and change the allowlist, list each world's archives and restore one, and make allowlisted players operators of a world: the Launcher lets a site's role do everything but force a stop and keeps each world's operators (#103).
 - Seven mods that make survival gentler for young players join the catalog, off until switched on: Universal Graves, Sleep, Healing Campfire, No Hostiles Around Campfire, Replanting Crops, Starter Kit and Zombie Proof Doors. A mod can now name the library mods it needs (#101).
 - spark and Chunky join the mod catalog on every world and Lithium on adventure, off until switched on, now that the Launcher's host command may be 64 KiB (#100).
