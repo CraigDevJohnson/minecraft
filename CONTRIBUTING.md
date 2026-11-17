@@ -19,4 +19,4 @@ This repository runs one family Minecraft server and is not taking outside contr
 
 ## Keep out of Git
 
-Credentials, `operator-config/`, `*.tfvars`, `users.json`, server data and logs stay local; `.gitignore` covers them. Leave player names and gamertags out of commits, issues and pull requests.
+Credentials, `operator-config/`, `*.tfvars`, `users.json`, server data and logs stay out of Git; `.gitignore` covers them. Leave player names and gamertags out of commits, issues and pull requests.

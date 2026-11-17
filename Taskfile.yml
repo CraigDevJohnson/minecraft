@@ -24,6 +24,14 @@ tasks:
     desc: Build the launcher function for ARM64 into a reproducible .build/launcher.zip
     cmd: python3 scripts/package_idle_stop.py --function launcher
 
+  inputs:pull:
+    desc: Copy the private input files from the state bucket to operator-config/inputs/; FORCE=1 replaces a local file that differs (MINECRAFT_STATE_BUCKET and the operator's AWS profile; see docs/operations/cloud-controls.md)
+    cmd: ./scripts/private_inputs.sh pull {{if eq .FORCE "1"}}--force{{end}}
+
+  inputs:push:
+    desc: Copy the private input files in operator-config/inputs/ up to the state bucket, after Craig's go-ahead; NAME=<name> sends one, and FROM=<path> sends that file as NAME
+    cmd: ./scripts/private_inputs.sh push {{if .NAME}}"{{.NAME}}"{{end}} {{if .FROM}}--from "{{.FROM}}"{{end}}
+
   server:status:
     desc: Ask the launcher for every world's state, or one world's with WORLD=<id> (LAUNCHER_URL and an AWS profile; see docs/operations/cloud-controls.md)
     cmd: ./scripts/launcher_call.sh status {{if .WORLD}}--world "{{.WORLD}}"{{end}}
