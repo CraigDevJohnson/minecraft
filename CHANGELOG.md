@@ -6,6 +6,7 @@ Notable changes to the family's Minecraft worlds and the tooling around them, ne
 
 ### Added
 
+- The private input files of the two OpenTofu roots get a place in the state bucket, and `task inputs:pull` and `task inputs:push` copy them to and from a checkout. The aim is that planning a root does not need Craig's computer once they are uploaded; a cloud thread's plan from them is untried (#109).
 - The allowlist runbook explains how a player with both a Java and a Bedrock account links them through GeyserMC's global linking, which every world already uses, to play as one player on both (#105).
 - Minecraft Admin can list and change the allowlist, list each world's archives and restore one, and make allowlisted players operators of a world: the Launcher lets a site's role do everything but force a stop and keeps each world's operators (#103).
 - Seven mods that make survival gentler for young players join the catalog, off until switched on: Universal Graves, Sleep, Healing Campfire, No Hostiles Around Campfire, Replanting Crops, Starter Kit and Zombie Proof Doors. A mod can now name the library mods it needs (#101).
