@@ -44,7 +44,7 @@ Each step checks whether an earlier start did it, so a start cut off by the laun
 
 ## Open a shell on the host
 
-Every hands-on step on a world's host runs in a Session Manager shell opened in the browser, so nothing is installed or forwarded on a workstation ([ADR 0006](../adr/0006-cloud-controls.md)). The host must be running.
+Every hands-on step on a world's host runs in a Session Manager shell opened in the browser, so nothing is installed or forwarded on a workstation ([ADR 0006](../adr/0006-cloud-controls.md)). The host must be running. A cloud thread cannot open this shell, so these steps stay Craig's ([cloud controls](cloud-controls.md#from-a-cloud-thread)).
 
 1. Sign in to the AWS console with the `WorkloadsAdmin` role and switch to US West (Oregon).
 2. Open EC2, Instances, and select the world's host, named `<resource_prefix>-<world>`, such as `minecraft-family-survival`.

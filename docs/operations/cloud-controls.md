@@ -10,6 +10,12 @@ Nothing about operating the family's worlds runs on a workstation ([ADR 0006](..
 
 Every one of them sends one SigV4-signed request to the launcher's Function URL. The launcher does the work in AWS with the same host adapter actions the workstation runbook used. It reads who signed each request: a site's role may do everything but force a stop, which answers it `403` with `forbidden`. The Lobby's Minecraft Admin page, shown only to Members with `minecraft-admin`, lists and changes the allowlist, lists each world's archives and restores one, and makes players operators of a world ([ADR 0011](../adr/0011-minecraft-admin-keeps-players-and-archives.md)).
 
+## From a cloud thread
+
+Where these runbooks say a terminal, a cloud thread counts too: an agent session in a cloud container, not on Craig's computer. It holds no AWS credential until it signs in with `aws sso login --sso-session identity-center --use-device-code`. The thread posts the link and the code, which lasts 10 minutes, and Craig approves on his phone (aws-setup `aws-design.md` §5.2). One sign-in covers `workloads-admin` and `workloads-readonly` for that thread alone, so the same commands apply. Anything that can change AWS or Cloudflare still needs Craig's approval of that specific change first. The IAM writes in the [one-time setup](#one-time-setup) have not been tried from a cloud thread.
+
+Approving a run in the `deploy` environment, changing a GitHub environment's settings and typing a secret's value stay Craig's, from a phone or any browser. The private files kept out of Git, such as the deployment inputs and anything under `operator-config/`, exist only on Craig's computer, so a step that reads one cannot run in a cloud thread. An interactive Session Manager shell does not work from one ([crafty](crafty.md#open-a-shell-on-the-host)). The joins in a [proof run](worlds.md#the-proof-run-for-a-world) need a person with a real device.
+
 ## The Server control workflow
 
 Open the repository's **Actions** tab (or the GitHub mobile app), choose **Server control**, press **Run workflow**, pick an action and run it from `main`.

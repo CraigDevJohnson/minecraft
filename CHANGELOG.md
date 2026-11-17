@@ -19,6 +19,7 @@ Notable changes to the family's Minecraft worlds and the tooling around them, ne
 
 ### Changed
 
+- The runbooks say which operator steps run in a cloud thread, signed in with a code Craig approves on his phone, and which stay his (#108).
 - Every world offers every mod that has a build for its loader, and the mods list carries each mod's Modrinth page for the site to link (#102).
 - The functions build with one exact Go version, so a Deploy plan and its apply build the same packages on any runner (#99).
 - Survival and creative run on Fabric and adventure on NeoForge, replacing Paper (#95).
