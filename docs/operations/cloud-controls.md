@@ -14,11 +14,11 @@ Every one of them sends one SigV4-signed request to the launcher's Function URL.
 
 Where these runbooks say a terminal, a cloud thread counts too: an agent session in a cloud container, not on Craig's computer. It holds no AWS credential until it signs in with `aws sso login --sso-session identity-center --use-device-code`. The thread posts the link and the code, which lasts 10 minutes, and Craig approves on his phone (aws-setup `aws-design.md` §5.2). One sign-in covers `workloads-admin` and `workloads-readonly` for that thread alone, so the same commands apply. Anything that can change AWS or Cloudflare still needs Craig's approval of that specific change first. The IAM writes in the [one-time setup](#one-time-setup) have not been tried from a cloud thread.
 
-Approving a run in the `deploy` environment, changing a GitHub environment's settings and typing a secret's value stay Craig's, from a phone or any browser. The private files kept out of Git, such as the workstation's deployment inputs and anything under `operator-config/`, exist only on Craig's computer, so a step that reads one cannot run in a cloud thread. The four private input files of the two OpenTofu roots are the exception once they are uploaded: their place is the state bucket, and a thread pulls them from there ([the private inputs](#the-private-inputs)). An interactive Session Manager shell does not work from a cloud thread ([crafty](crafty.md#open-a-shell-on-the-host)). The joins in a [proof run](worlds.md#the-proof-run-for-a-world) need a person with a real device.
+Approving a run in the `deploy` environment, changing a GitHub environment's settings and typing a secret's value stay Craig's, from a phone or any browser. The private files kept out of Git, such as the workstation's deployment inputs and anything under `operator-config/`, exist only on Craig's computer, so a step that reads one cannot run in a cloud thread. The four private input files of the two OpenTofu roots are the exception: they are in the state bucket, and a thread pulls them from there ([the private inputs](#the-private-inputs)). An interactive Session Manager shell does not work from a cloud thread ([crafty](crafty.md#open-a-shell-on-the-host)). The joins in a [proof run](worlds.md#the-proof-run-for-a-world) need a person with a real device.
 
 ### The private inputs
 
-Each OpenTofu root reads two private files that Git ignores. So that planning a root does not need Craig's computer, the four have a place in the state bucket, under `inputs/` beside the state, and a checkout's copies go in `operator-config/inputs/`:
+Each OpenTofu root reads two private files that Git ignores. So that planning a root does not need Craig's computer, the four are in the state bucket, under `inputs/` beside the state, and a checkout's copies go in `operator-config/inputs/`:
 
 | Name | What it is |
 | --- | --- |
@@ -27,11 +27,11 @@ Each OpenTofu root reads two private files that Git ignores. So that planning a 
 | `bootstrap.tfvars` | The inputs of `infra/state-bootstrap` ([state bootstrap](state-bootstrap.md)) |
 | `bootstrap.backend.hcl` | That root's backend settings |
 
-The first upload from Craig's computer is still to run (2026-11-17), so no cloud thread has pulled a file or planned a root from one.
+All four were uploaded on 2026-11-17 by a cloud thread that had copied them from Craig's computer. The same thread pulled them back and planned both roots from them: `infra/state-bootstrap` showed no changes, and `infra` showed only its three functions, whose code had changed on `main` since the last Deploy. `backend.hcl` is the workstation's backend file without its `assume_role` block, as step 5 of the [one-time setup](#one-time-setup) describes.
 
 None of the four holds a credential. They do hold private names and one private email address, so the two commands print a file's name and its object version and never its contents, and a pulled file is readable by its owner only. A thread may read and edit a pulled file. It keeps what the file holds out of Git, pull requests, issues and logs, and shows a file's text only to Craig, in their conversation.
 
-The bucket's policy denies every principal but `minecraft-operator`, the administrator SSO role included, so the commands run under a profile that assumes that role from `workloads-admin`. The bucket's name is private and is not in this repository. A thread looks for it in a listing of the account's buckets with `workloads-readonly`, which has not been tried, or asks Craig. In a cloud thread, after the sign-in:
+The bucket's policy denies every principal but `minecraft-operator`, the administrator SSO role included, so the commands run under a profile that assumes that role from `workloads-admin`. The bucket's name is private and is not in this repository. A thread finds it in a listing of the account's buckets with `workloads-readonly`, or in aws-setup's `aws-design.md` (§6.6). In a cloud thread, after the sign-in:
 
 ```sh
 aws configure set profile.minecraft-operator.role_arn arn:aws:iam::793680745829:role/minecraft-operator
@@ -45,18 +45,15 @@ task inputs:push                          # every one of the four that operator-
 task inputs:push NAME=deployment.tfvars   # one of them
 ```
 
-They run [`scripts/private_inputs.sh`](../../scripts/private_inputs.sh). A pull is a read: it is part of a plan and needs no approval. It names and passes over each of the four the bucket does not hold, and fails when it finds none of them or when a call to AWS fails for any other reason. It leaves a local file that differs from the bucket's copy as it is, says so and ends with an error, unless `FORCE=1` is set. A push changes AWS, so it needs Craig's approval of that change first, like any other write. The committed [operator permissions](operator-role/permissions.json.example) allow the role every S3 action on the project's buckets, but whether the live role's policy lets this profile read and write `inputs/` has not been checked. Before it signs out, a thread deletes `operator-config/inputs/`, any plan it saved, and `infra/.terraform/`, where `tofu init` keeps the backend settings.
+They run [`scripts/private_inputs.sh`](../../scripts/private_inputs.sh). A pull is a read: it is part of a plan and needs no approval. It names and passes over each of the four the bucket does not hold, and fails when it finds none of them or when a call to AWS fails for any other reason. It leaves a local file that differs from the bucket's copy as it is, says so and ends with an error, unless `FORCE=1` is set. A push changes AWS, so it needs Craig's approval of that change first, like any other write. The role's [permissions](operator-role/permissions.json.example) let this profile read and write `inputs/`. Before it signs out, a thread deletes `operator-config/inputs/`, any plan it saved, and `infra/.terraform/`, where `tofu init` keeps the backend settings.
 
-The first upload runs on Craig's computer, with the same two variables set. The files sit elsewhere there, some under other names, so each goes up under the name it takes in the bucket:
+`FROM` uploads a file that sits elsewhere, or under another name, as one of the four:
 
 ```sh
 task inputs:push NAME=deployment.tfvars FROM=/path/to/private/ci.deployment.tfvars
-task inputs:push NAME=backend.hcl FROM=/path/to/private/ci.backend.hcl
-task inputs:push NAME=bootstrap.tfvars FROM=/path/to/private/bootstrap.tfvars
-task inputs:push NAME=bootstrap.backend.hcl FROM=/path/to/private/bootstrap.backend.hcl
 ```
 
-With `deployment.tfvars` and `backend.hcl` pulled, the `infra` root is planned the way the Deploy workflow plans it, under the same operator profile. This has not been tried from a cloud thread:
+With `deployment.tfvars` and `backend.hcl` pulled, the `infra` root is planned the way the Deploy workflow plans it, under the same operator profile:
 
 ```sh
 python3 scripts/package_idle_stop.py --output operator-config/inputs/packages/idle-stop.zip
@@ -64,7 +61,7 @@ python3 scripts/package_idle_stop.py --function launcher --output operator-confi
 DEPLOY_DIR="$PWD/operator-config/inputs" scripts/deploy_tofu.sh plan
 ```
 
-The script prints the plan's resource headers and its digest and saves the plan in that folder. Only the Deploy workflow masks the inputs' values, so in a thread an OpenTofu error can quote one. `infra/state-bootstrap` is planned with the commands in [state bootstrap](state-bootstrap.md).
+The script prints the plan's resource headers and its digest and saves the plan in that folder. A function's package path is part of the plan, and here it lies under `operator-config/inputs/`, so a thread's plan can show each function as updated in place when nothing else differs, and its digest is not the Deploy workflow's. Only the Deploy workflow masks the inputs' values, so in a thread an OpenTofu error can quote one. `infra/state-bootstrap` is planned with the commands in [state bootstrap](state-bootstrap.md).
 
 ## The Server control workflow
 
@@ -203,7 +200,7 @@ These are the IAM pieces aws-setup's `aws-design.md` keeps with an administrator
    }
    ```
 
-   The two files behind the secrets are `deployment.tfvars` and `backend.hcl` of [the private inputs](#the-private-inputs). Once they are uploaded, the state bucket's copy of each is the source, and each secret is a paste of it. The Deploy workflow reads only the secrets, so they stay what deploys. A later change to an input goes in this order:
+   The two files behind the secrets are `deployment.tfvars` and `backend.hcl` of [the private inputs](#the-private-inputs). The state bucket's copy of each is the source, and each secret is a paste of it. The Deploy workflow reads only the secrets, so they stay what deploys. A later change to an input goes in this order:
 
    1. The file is edited in `operator-config/inputs/`, after a pull.
    2. The thread pushes it, with Craig's go-ahead: `task inputs:push NAME=deployment.tfvars`.
