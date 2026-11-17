@@ -62,7 +62,7 @@ gh run list --repo CraigDevJohnson/minecraft --workflow minecraft-health.yml --e
 gh run view <exact-run-id> --repo CraigDevJohnson/minecraft --json databaseId,headSha,status,conclusion,url,jobs
 ```
 
-Match the new run by workflow, main revision and dispatch time instead of attributing another operator's run to this request. A successful dispatch only queues work; require the completed health job's outcome before claiming AWS or game readiness. No AWS credential from the Mac is passed to GitHub. Dispatching still needs GitHub authentication with write access; reading the run does not, because the repository is public.
+Match the new run by workflow, main revision and dispatch time instead of attributing another operator's run to this request. A successful dispatch only queues work; require the completed health job's outcome before claiming AWS or game readiness. The dispatch passes no AWS credential to GitHub. Dispatching still needs GitHub authentication with write access; reading the run does not, because the repository is public.
 
 For rollback, disable this workflow's dispatch and remove only the new role's `minecraft-health` inline policy, new role and its `MINECRAFT_HEALTH_ROLE_ID` metadata secret. Disabling the workflow stops its future requests but does not by itself revoke an already-issued session or prevent another qualifying main workflow from assuming the role. This workflow's sessions last up to 15 minutes; the role allows other qualifying jobs to request up to one hour. Removing permissions cuts off future EC2 reads from those sessions. Never delete or modify the shared provider or existing roles. Rollback mutations require their corresponding authorization.
 

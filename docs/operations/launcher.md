@@ -125,7 +125,7 @@ The Cloudflare token is read at runtime from one SSM SecureString, `/<resource_p
 
 ## Deploy
 
-The [Deploy workflow](cloud-controls.md#deploys) builds the package and runs the root from GitHub Actions: Craig starts a run with `mode` set to `plan`, approves it as the `deploy` environment's reviewer and reads it, then starts and approves one with `mode` set to `apply` and that plan's digest; nothing below runs a deploy from a workstation. Steps 1 and 2 are the administrator's one-time setup of the launcher's IAM pieces and token, done from any terminal with the profiles named after `aws sso login`. Steps 3 to 5 are the deployment inputs and the checks. Check each output against what's shown before going on.
+The [Deploy workflow](cloud-controls.md#deploys) builds the package and runs the root from GitHub Actions: Craig starts a run with `mode` set to `plan`, approves it as the `deploy` environment's reviewer and reads it, then starts and approves one with `mode` set to `apply` and that plan's digest; nothing below runs a deploy from a workstation. Steps 1 and 2 are the administrator's one-time setup of the launcher's IAM pieces and token, done from any terminal with the profiles named after `aws sso login`. A cloud thread counts as a terminal ([cloud controls](cloud-controls.md#from-a-cloud-thread)), though step 1 has not been tried from one and step 2 stays Craig's. Steps 3 to 5 are the deployment inputs and the checks. Check each output against what's shown before going on.
 
 1. **Create the launcher's boundary and widen the operator role (administrator, once).** The operator role can create roles only inside the host boundary, which doesn't allow starting or stopping EC2. Set your prefix and account, then create the boundary policy and add the launcher statements to the operator role (an existing boundary from before the stop existed gets a new version instead; see [cloud controls](cloud-controls.md#one-time-setup)):
 
@@ -158,7 +158,7 @@ The [Deploy workflow](cloud-controls.md#deploys) builds the package and runs the
      --tags Key=project,Value=minecraft --value file:///dev/stdin
    ```
 
-   This prints `{"Version": 1, "Tier": "Standard"}`. To rotate the token later, run the same command again with `--overwrite` added and without `--tags`.
+   This prints `{"Version": 1, "Tier": "Standard"}`. To rotate the token later, run the same command again with `--overwrite` added and without `--tags`. A cloud thread never reads the token. When the work runs in one, Craig types the value into the parameter himself, in Parameter Store in the AWS console.
 
 3. **Add the launcher to the private deployment inputs.** The Deploy workflow builds the package itself (`scripts/package_idle_stop.py --function launcher`, reproducible: the same source and Go toolchain always give the same bytes) and names it through `package_dir`, so the inputs carry no `package_path`. Find the sites' roles with the read-only profile:
 
