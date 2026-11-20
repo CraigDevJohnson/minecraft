@@ -166,7 +166,7 @@ The [Deploy workflow](cloud-controls.md#deploys) builds the package and runs the
    aws iam list-roles --profile workloads-readonly --query "Roles[?starts_with(RoleName,'site-')].Arn"
    ```
 
-   This prints each site environment's roles. Use `site-<environment>-server`, the site's own Lambda role, for each environment The Lobby has deployed (the-lobby's `infra/environments/`). Then add this to the private `deployment.tfvars` the Deploy workflow reads from its `DEPLOYMENT_TFVARS` secret:
+   This prints each site environment's roles. Use `site-<environment>-server`, the site's own Lambda role, for each environment The Lobby has deployed (the-lobby's `infra/environments/`). Then add this to the private `deployment.tfvars` the Deploy workflow reads from the state bucket ([the private inputs](cloud-controls.md#the-private-inputs)):
 
    ```hcl
    launcher = {

@@ -2,9 +2,11 @@
 """Mask the private inputs' values in the Deploy workflow's log.
 
 Prints a GitHub `::add-mask::` command for every quoted value of six or more characters in the files named on
-the command line (deployment.tfvars and backend.hcl). OpenTofu writes its errors to stderr, straight to the
-log, and a provider error can quote an input, such as the backup bucket's name; once masked, the log shows
-*** in its place and the rest of the error stays readable.
+the command line (deployment.tfvars and backend.hcl), and for every whole line that long. OpenTofu writes its
+errors to stderr, straight to the log, and a provider error can quote an input, such as the backup bucket's
+name; once masked, the log shows *** in its place and the rest of the error stays readable. A syntax error
+quotes the source line instead, and a mistyped line, such as one with a quote left open, has no quoted value
+to find, so each line is masked whole, the way GitHub masks each line of a secret.
 """
 from __future__ import annotations
 
@@ -17,9 +19,10 @@ MINIMUM_LENGTH = 6
 
 
 def values(text: str) -> set[str]:
-    """The quoted values as OpenTofu would print them, with their escapes undone."""
+    """The quoted values as OpenTofu would print them, with their escapes undone, and each whole line."""
     found = (re.sub(r"\\(.)", r"\1", value) for value in QUOTED.findall(text))
-    return {value for value in found if len(value) >= MINIMUM_LENGTH}
+    lines = (line.strip() for line in text.splitlines())
+    return {value for value in (*found, *lines) if len(value) >= MINIMUM_LENGTH}
 
 
 def main(paths: list[str]) -> int:

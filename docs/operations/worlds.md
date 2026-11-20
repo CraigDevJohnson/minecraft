@@ -148,7 +148,7 @@ The family host of [ADR 0004](../adr/0004-crafty-multiverse-rebuild.md) stayed d
 
 The backup bucket and every object in it stay, including the family server's archives under `instances/family/crafty/`; no world host restores them, and the bucket's lifecycle is unchanged. The world hosts keep the AMI lookup, the host role and instance profile, the security group and the network they always shared.
 
-The private deployment inputs may still set the removed variables. OpenTofu 1.12 warns about a value for an undeclared variable in a `-var-file` and goes on, and drops `server_name` from `launcher` without a word, so the Deploy works with them in place. Remove them from the `DEPLOYMENT_TFVARS` secret when it is next edited.
+The private deployment inputs may still set the removed variables. OpenTofu 1.12 warns about a value for an undeclared variable in a `-var-file` and goes on, and drops `server_name` from `launcher` without a word, so the Deploy works with them in place. Remove them from `deployment.tfvars` in the state bucket when it is next edited ([the private inputs](cloud-controls.md#the-private-inputs)).
 
 **Before the plan**
 
