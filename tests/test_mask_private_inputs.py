@@ -31,7 +31,7 @@ use_lockfile = true
 
 
 class MaskPrivateInputsTests(unittest.TestCase):
-    """Every quoted value of the private inputs is masked before OpenTofu can quote it in an error."""
+    """Every quoted value and every line of the private inputs is masked before OpenTofu can quote it in an error."""
 
     def test_masks_each_quoted_value_once(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -50,6 +50,19 @@ class MaskPrivateInputsTests(unittest.TestCase):
         # Short words would blank out the whole log; numbers and booleans are not quoted.
         for unmasked in ["dev", "25", "true"]:
             self.assertNotIn(f"::add-mask::{unmasked}", masked)
+
+    def test_masks_each_whole_line_so_a_mistyped_line_stays_hidden(self):
+        # OpenTofu quotes the source line of a syntax error, and a line whose quote was left open or left out has
+        # no quoted value to mask. GitHub masked each line this way while the inputs were a secret (#110).
+        with tempfile.TemporaryDirectory() as directory:
+            tfvars = Path(directory) / "deployment.tfvars"
+            tfvars.write_text('budget_notification_email = "operator@example.invalid\n  public_hostname = mc.example.invalid  \n}\n')
+            completed = subprocess.run([sys.executable, str(ROOT / "scripts" / "mask_private_inputs.py"), str(tfvars)],
+                                       capture_output=True, text=True, check=True)
+        masked = completed.stdout.splitlines()
+        self.assertIn('::add-mask::budget_notification_email = "operator@example.invalid', masked)
+        self.assertIn("::add-mask::public_hostname = mc.example.invalid", masked)
+        self.assertNotIn("::add-mask::}", masked)
 
     def test_needs_a_file(self):
         completed = subprocess.run([sys.executable, str(ROOT / "scripts" / "mask_private_inputs.py")], capture_output=True, text=True, check=False)

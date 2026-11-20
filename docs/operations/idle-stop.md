@@ -43,7 +43,7 @@ An apply restores the rule's configured `ENABLED` state.
 
 ## Enable
 
-The Deploy workflow builds `idle-stop.zip` itself (`scripts/package_idle_stop.py`, reproducible with the pinned Go toolchain) and names it through `package_dir`, so the private inputs carry no `package_path`. Add to the private `deployment.tfvars` the Deploy workflow reads from its `DEPLOYMENT_TFVARS` secret:
+The Deploy workflow builds `idle-stop.zip` itself (`scripts/package_idle_stop.py`, reproducible with the pinned Go toolchain) and names it through `package_dir`, so the private inputs carry no `package_path`. Add to the private `deployment.tfvars` the Deploy workflow reads from the state bucket ([the private inputs](cloud-controls.md#the-private-inputs)):
 
 ```hcl
 idle_stop = {}

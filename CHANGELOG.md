@@ -20,6 +20,7 @@ Notable changes to the family's Minecraft worlds and the tooling around them, ne
 
 ### Changed
 
+- The Deploy workflow reads `deployment.tfvars` from the state bucket in place of its `DEPLOYMENT_TFVARS` secret, so the file `task inputs:push` uploads is what deploys and nothing is pasted by hand after a change to an input. The backend settings stay in the `BACKEND_CONFIG` secret (#112).
 - The runbooks say which operator steps run in a cloud thread, signed in with a code Craig approves on his phone, and which stay his (#108).
 - Every world offers every mod that has a build for its loader, and the mods list carries each mod's Modrinth page for the site to link (#102).
 - The functions build with one exact Go version, so a Deploy plan and its apply build the same packages on any runner (#99).

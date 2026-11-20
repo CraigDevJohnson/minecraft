@@ -2,8 +2,9 @@
 # Usage: DEPLOY_DIR=<dir> [APPROVED_PLAN=<digest>] deploy_tofu.sh plan|apply
 #
 # Runs the infra root the way the Deploy workflow does. DEPLOY_DIR holds the
-# private inputs the workflow wrote from its environment secrets,
-# deployment.tfvars and backend.hcl, and the packages it built under packages/.
+# private inputs, backend.hcl, which the workflow wrote from its environment
+# secret, and deployment.tfvars, which it read from the state bucket
+# (scripts/fetch_deployment_inputs.sh), and the packages it built under packages/.
 # The full plan and apply output goes to a file, not the log: attribute values
 # show the private inputs, so only the resource headers, the progress lines and
 # the totals reach the log and the job summary, and the progress lines lose

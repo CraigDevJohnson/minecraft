@@ -8,11 +8,13 @@
 # operator's write credentials, and the job runs only when Craig's own account
 # started the run (and any re-run of it), so another collaborator or an app
 # with write access cannot start it either. The one job runs in the deploy GitHub
-# Environment, which holds the private inputs, which only main may use, and
+# Environment, which holds the backend settings, which only main may use, and
 # which has Craig as its required reviewer, so GitHub holds every run until he
 # approves it and only then hands it the operator's credentials. The digest
-# binds that approval to the plan he read. See docs/operations/cloud-controls.md
-# and ADR 0006.
+# binds that approval to the plan he read. The root's inputs are not a secret
+# here: the job reads deployment.tfvars from the state bucket the backend
+# settings name, as the operator role, so the file `task inputs:push` uploads
+# is what deploys. See docs/operations/cloud-controls.md and ADR 0006.
 #
 # The operator role trusts this job through GitHub OIDC with the subject
 # repo:CraigDevJohnson@42454849/minecraft@1359070973:environment:deploy.
@@ -75,21 +77,19 @@ jobs:
           mkdir -p "$RUNNER_TEMP/deploy/packages"
           python3 scripts/package_idle_stop.py --output "$RUNNER_TEMP/deploy/packages/idle-stop.zip"
           python3 scripts/package_idle_stop.py --function launcher --output "$RUNNER_TEMP/deploy/packages/launcher.zip"
-      - name: Write the private inputs
+      - name: Write the backend settings
         env:
-          DEPLOYMENT_TFVARS: ${{ secrets.DEPLOYMENT_TFVARS }}
           BACKEND_CONFIG: ${{ secrets.BACKEND_CONFIG }}
         run: |
           umask 077
-          if [[ -z "$DEPLOYMENT_TFVARS" || -z "$BACKEND_CONFIG" ]]; then
-            printf '::error::The deploy environment needs the DEPLOYMENT_TFVARS and BACKEND_CONFIG secrets.\n' >&2
+          if [[ -z "$BACKEND_CONFIG" ]]; then
+            printf '::error::The deploy environment needs the BACKEND_CONFIG secret.\n' >&2
             exit 1
           fi
-          printf '%s\n' "$DEPLOYMENT_TFVARS" > "$RUNNER_TEMP/deploy/deployment.tfvars"
           printf '%s\n' "$BACKEND_CONFIG" > "$RUNNER_TEMP/deploy/backend.hcl"
           printf '::add-mask::%s\n' '793680745829'
-          # OpenTofu's errors reach the log unfiltered and may quote an input.
-          python3 scripts/mask_private_inputs.py "$RUNNER_TEMP/deploy/deployment.tfvars" "$RUNNER_TEMP/deploy/backend.hcl"
+          # The AWS CLI's and OpenTofu's errors reach the log unfiltered and may quote the bucket's name.
+          python3 scripts/mask_private_inputs.py "$RUNNER_TEMP/deploy/backend.hcl"
       - name: Obtain the operator role's credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
@@ -104,6 +104,14 @@ jobs:
           mask-aws-account-id: true
           retry-max-attempts: 2
           action-timeout-s: 60
+      - name: Read the deployment inputs from the state bucket
+        env:
+          DEPLOY_DIR: ${{ runner.temp }}/deploy
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: |
+          bash scripts/fetch_deployment_inputs.sh
+          # OpenTofu's errors reach the log unfiltered and may quote an input.
+          python3 scripts/mask_private_inputs.py "$DEPLOY_DIR/deployment.tfvars"
       - name: Plan, and in apply mode apply the approved plan
         env:
           DEPLOY_DIR: ${{ runner.temp }}/deploy

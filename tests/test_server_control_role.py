@@ -82,9 +82,14 @@ class ServerControlRoleTests(unittest.TestCase):
         self.assertEqual(server.count("${{ inputs.world }}"), 2)
         deploy = (ROOT / ".github/workflows/deploy.yml").read_text()
         self.assertIn("environment: deploy", deploy)
-        self.assertEqual(sorted(re.findall(r"secrets\.([A-Z_]+)", deploy)), ["BACKEND_CONFIG", "DEPLOYMENT_TFVARS"])
-        self.assertIn("secrets.DEPLOYMENT_TFVARS", deploy)
-        self.assertIn("secrets.BACKEND_CONFIG", deploy)
+        # The backend settings are the one secret. The root's inputs come from the state bucket those settings
+        # name, read as the operator role once the job holds it, so the bucket's copy is what deploys (#110).
+        self.assertEqual(re.findall(r"secrets\.([A-Z_]+)", deploy), ["BACKEND_CONFIG"])
+        credentials = deploy.index("uses: aws-actions/configure-aws-credentials@")
+        fetch = deploy.index("bash scripts/fetch_deployment_inputs.sh")
+        self.assertLess(deploy.index("secrets.BACKEND_CONFIG"), credentials)
+        self.assertLess(credentials, fetch)
+        self.assertLess(fetch, deploy.index("bash scripts/deploy_tofu.sh"))
         # Every Deploy run holds the operator's write credentials, so only a run Craig starts may have them:
         # no push or other event starts it, and a run he starts plans unless he picks apply (ADR 0006).
         self.assertRegex(deploy, r"\non:\n  workflow_dispatch:\n")
@@ -95,8 +100,13 @@ class ServerControlRoleTests(unittest.TestCase):
         # digest reaches the script through the environment, never the script's text.
         self.assertIn("APPROVED_PLAN: ${{ inputs.plan }}", deploy)
         self.assertEqual(deploy.count("inputs.plan"), 1)
-        # OpenTofu's errors reach the log unfiltered, so the private inputs' values are masked before it runs.
-        self.assertLess(deploy.index("scripts/mask_private_inputs.py"), deploy.index("bash scripts/deploy_tofu.sh"))
+        # The AWS CLI's and OpenTofu's errors reach the log unfiltered, so the bucket's name is masked before the
+        # job calls AWS, and the inputs' values once they are read and before OpenTofu runs.
+        self.assertEqual(deploy.count("scripts/mask_private_inputs.py"), 2)
+        self.assertLess(deploy.index('scripts/mask_private_inputs.py "$RUNNER_TEMP/deploy/backend.hcl"'), credentials)
+        masked = deploy.index('scripts/mask_private_inputs.py "$DEPLOY_DIR/deployment.tfvars"')
+        self.assertLess(fetch, masked)
+        self.assertLess(masked, deploy.index("bash scripts/deploy_tofu.sh"))
 
     def test_no_other_workflow_reaches_the_deploy_or_server_environment(self):
         # The roles trust a job by its environment, and the Craig-only checks live in these two workflows, so a
