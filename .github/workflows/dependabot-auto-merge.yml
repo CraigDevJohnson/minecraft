@@ -3,6 +3,8 @@
 # updates, minor updates of a 0.x dependency (which can break), updates whose
 # type Dependabot does not report, and any update while main has no
 # required status checks (auto-merge would then not wait for CI).
+# A manual update to a Dependabot branch can replace its signed commit.
+# The auto-merge job only runs on events triggered by Dependabot.
 # GitHub Actions updates are always held: they skip the auto-merge job
 # entirely, so a new action release never runs here with write access before
 # Craig has read it.
@@ -21,7 +23,11 @@ concurrency:
 jobs:
   auto-merge:
     name: Dependabot auto-merge
-    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'CraigDevJohnson/minecraft' && !startsWith(github.head_ref, 'dependabot/github_actions/')
+    if: >-
+      github.event.sender.login == 'dependabot[bot]' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.repository == 'CraigDevJohnson/minecraft' &&
+      !startsWith(github.head_ref, 'dependabot/github_actions/')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
